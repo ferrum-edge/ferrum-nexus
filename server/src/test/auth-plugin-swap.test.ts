@@ -513,6 +513,50 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     assert.match(announced.body, BASICAUTH_CREDENTIAL);
   });
 
+  it('tells an account once, however many of its identities hold a grant', async () => {
+    // Issue #687: the account and its application each hold a grant on the API,
+    // so the grant list names the account twice. It still gets one notice, for
+    // the swap and for the API's removal alike.
+    const api = await publish('swap-one-notice');
+    const client = await newClient();
+    const applicationId = await createApplication(client, 'One notice application');
+    await grant(api.id, client);
+    await grant(api.id, client, applicationId);
+    await issue(client, 'keyauth');
+    await issue(client, 'keyauth', applicationId);
+
+    const confirmed = await patchApi(api.id, {
+      auth_plugin: 'basic_auth',
+      confirm_access_disruption: true,
+    });
+    assert.equal(confirmed.statusCode, 200, confirmed.body);
+    const system = await harness.authed(client, {
+      method: 'GET',
+      url: '/api/notifications?type=system',
+    });
+    assert.equal(system.statusCode, 200, system.body);
+    const swapTitle = 'API swap-one-notice changed its authentication method';
+    const swapNotices = system
+      .json<ListNotificationsResponse>()
+      .items.filter((item) => item.title === swapTitle);
+    assert.equal(swapNotices.length, 1);
+
+    const removed = await harness.authed(provider, {
+      method: 'DELETE',
+      url: `/api/apis/${api.id}`,
+    });
+    assert.equal(removed.statusCode, 200, removed.body);
+    const revoked = await harness.authed(client, {
+      method: 'GET',
+      url: '/api/notifications?type=access_revoked',
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    const removalNotices = revoked
+      .json<ListNotificationsResponse>()
+      .items.filter((item) => item.title === 'API swap-one-notice was removed');
+    assert.equal(removalNotices.length, 1);
+  });
+
   it('leaves the credentials alone when the gateway refuses the swap', async () => {
     const api = await publish('swap-edge-fails');
     const client = await newClient();

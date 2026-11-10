@@ -18,7 +18,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
-import { internal } from '../lib/errors.js';
+import { internal, isNexusError } from '../lib/errors.js';
 
 /** Name of the bookkeeping table/collection every adapter maintains. */
 export const SCHEMA_MIGRATIONS_TABLE = 'schema_migrations';
@@ -61,7 +61,8 @@ export interface MigrationResult {
  * Apply every migration that has not been recorded yet, in id order.
  *
  * Idempotent: running it twice against the same database applies nothing the
- * second time.
+ * second time. A migration that fails stops the run with an error naming it
+ * ({@link migrationFailure}); the ones before it stay applied.
  */
 export async function runMigrations(
   driver: MigrationDriver,
@@ -76,10 +77,30 @@ export async function runMigrations(
       result.skipped.push(migration.id);
       continue;
     }
-    await driver.applyMigration(migration);
+    try {
+      await driver.applyMigration(migration);
+    } catch (error) {
+      throw migrationFailure(migration.id, error);
+    }
     result.applied.push(migration.id);
   }
   return result;
+}
+
+/**
+ * The error a failed migration surfaces as: one that names it, as the upgrade
+ * runbook promises (docs/operations.md, "Upgrade failures and rollback").
+ *
+ * A bare driver error (`column "priority" of relation "email_outbox" already
+ * exists`) does not say which migration ran it, so anything other than a
+ * `NexusError` is wrapped, keeping the original as `cause` for its driver code
+ * and stack. A `NexusError` is passed on unchanged: it carries its own code
+ * and message.
+ */
+function migrationFailure(id: string, error: unknown): unknown {
+  if (isNexusError(error)) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(`Migration ${id} failed: ${message}`, { cause: error });
 }
 
 /* ── Loading migration files ────────────────────────────────────────────── */

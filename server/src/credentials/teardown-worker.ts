@@ -43,10 +43,11 @@
  * stay live for good. The same sweep is what recovers a job whose store write
  * failed after the claim, with no restart involved at all.
  *
- * Rows are claimed singly; the default timing estimate is documented at
- * {@link TEARDOWN_JOB_BUDGET_MS}. Recovery replaces the ownership token, so
- * a delayed attempt cannot settle a reclaimed job. This database fence does
- * not fence HTTP writes already in flight after a shared Edge lease expires.
+ * Rows are claimed singly, so a claim lives as long as one job; how long that
+ * is, against {@link TEARDOWN_STALE_AFTER_MS}, is described there. Recovery
+ * replaces the ownership token, so a delayed attempt cannot settle a reclaimed
+ * job. This database fence does not fence HTTP writes already in flight after
+ * a shared Edge lease expires.
  *
  * ## Why there is no `failed` state
  *
@@ -87,29 +88,25 @@ export const TEARDOWN_MAX_BACKOFF_MS = 5 * 60_000;
  * A `sending` job untouched for this long is assumed to be a crashed worker's
  * and is returned to `pending`.
  *
- * Five minutes, and the arithmetic that makes that safe is the paragraph above
- * {@link TEARDOWN_JOB_BUDGET_MS}: one job is bounded at ~55 seconds, and jobs
- * are claimed one at a time, so a live worker never holds a claim for anything
- * approaching this. Anything still `sending` after five minutes is debris.
+ * One job is `disableGatewayAccess` for a whole account, and its length grows
+ * with the identities the account holds. Each durable identity (the account's
+ * own consumer and one per application) costs five Ferrum Edge round trips —
+ * `GET /consumers/{id}`, the whole-resource `PUT` that clears the ACL groups,
+ * and one `DELETE` per credential type — and each registered test consumer or
+ * older foreign consumer costs a read and a delete. Every call is bounded by
+ * `FERRUM_ADMIN_TIMEOUT_MS` (5 s by default, 60 s at the configuration
+ * ceiling), and every identity can add up to `LEASE_WAIT_MS` (30 s) waiting
+ * for its lease. An account with only its own consumer takes at most about
+ * 55 seconds at the defaults; one with the default ceiling of 20 applications
+ * can take several minutes on a slow gateway.
+ *
+ * Jobs are claimed one at a time, so the threshold only has to outlast one
+ * job, and five minutes does for an ordinary account. A longer job is released
+ * as stale while its worker is still running and a second attempt repeats the
+ * same teardown; the generation fence keeps the outcome correct, so the cost
+ * is duplicate gateway work and misleading stale-claim log lines.
  */
 export const TEARDOWN_STALE_AFTER_MS = 5 * 60_000;
-
-/**
- * How long one claimed job can legitimately take.
- *
- * A teardown is five Ferrum Edge round trips — `GET /consumers/{id}`, the
- * whole-resource `PUT` that clears the ACL groups, and one `DELETE` per
- * credential type — each bounded by `FERRUM_ADMIN_TIMEOUT_MS` (5 s by default,
- * 60 s at the configuration ceiling), plus up to `LEASE_WAIT_MS` (30 s) waiting
- * for the consumer's lease. That is ~55 seconds on the default configuration.
- *
- * Nothing enforces this number; it exists to be compared against
- * {@link TEARDOWN_STALE_AFTER_MS}, which must stay comfortably above it. An
- * operator who raises `FERRUM_ADMIN_TIMEOUT_MS` towards its ceiling is pushing
- * the worst case towards 5.5 minutes and should raise the stale threshold with
- * it — otherwise a slow gateway looks like a crashed worker.
- */
-export const TEARDOWN_JOB_BUDGET_MS = 60_000;
 
 /** What one {@link TeardownWorker.tick} did. */
 export interface TeardownTickResult {
@@ -305,9 +302,9 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
 
     // Claimed one at a time rather than as a batch. A batch's last row sits
     // `sending` for as long as every row before it takes, which would put the
-    // stale threshold at batch size × TEARDOWN_JOB_BUDGET_MS; claiming singly
-    // keeps a claim's lifetime equal to one job's, which is what makes a
-    // five-minute threshold both safe and quick.
+    // stale threshold at batch size × one job's length; claiming singly keeps
+    // a claim's lifetime equal to one job's, which is what lets a five-minute
+    // threshold be quick (see TEARDOWN_STALE_AFTER_MS for its limits).
     for (let taken = 0; taken < batchSize; taken += 1) {
       let job: GatewayTeardownJobRecord | undefined;
       try {

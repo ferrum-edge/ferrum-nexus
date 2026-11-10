@@ -107,7 +107,7 @@ trust, not from an untrusted forwarded header.
 | `POST /api/threads/:id/messages`                                               | 30               | account  |
 | `GET /api/catalog/:slug/spec`, `…/changes`, `…/changes/:revisionId`, per route | 60               | account  |
 | `/api/apis` mutations and the two spec diffs, per route                        | 30               | account  |
-| `GET /api/apis/:id/usage`                                                      | 30               | IP       |
+| `GET /api/apis/:id/usage`                                                      | 30               | account  |
 | `POST /api/access-requests`                                                    | 10               | account  |
 | `POST /api/access-requests/:id/cancel`                                         | 30               | account  |
 | `POST`, `PATCH`, `DELETE` on `/api/applications`, per route                    | 30               | account  |
@@ -1039,11 +1039,11 @@ own.
 
 _session_
 
-| Query             | Type                                                                                                                                                                                           |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unread`          | boolean — only unread                                                                                                                                                                          |
-| `type`            | one of `access_request_created`, `access_request_approved`, `access_request_denied`, `access_revoked`, `message_received`, `credential_rotated`, `api_published`, `api_spec_updated`, `system` |
-| `limit`, `offset` | pagination                                                                                                                                                                                     |
+| Query             | Type                                                                                                                                                                          |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unread`          | boolean — only unread                                                                                                                                                         |
+| `type`            | one of `access_request_created`, `access_request_approved`, `access_request_denied`, `access_revoked`, `message_received`, `credential_rotated`, `api_spec_updated`, `system` |
+| `limit`, `offset` | pagination                                                                                                                                                                    |
 
 ```json
 { "items": [ … ], "total": 42, "unread_count": 3 }

@@ -3402,6 +3402,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         );
         return message;
       };
+      // The grantee is the same account for every grant: read it once it is
+      // first needed, and again only after a read that failed or found nothing.
+      let grantee: UserRecord | null | undefined;
 
       for (const grant of grants) {
         // Bypasses the ownership check on purpose: this is only reachable from
@@ -3481,7 +3484,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         let consumerId: string | null = null;
         try {
           const api = await store.apis.findById(grant.api_id);
-          const grantee = await store.users.findById(userId);
+          grantee ??= await store.users.findById(userId);
           if (api && grantee) {
             const consumer = await store.consumers.findByUserAndNamespace(
               userId,

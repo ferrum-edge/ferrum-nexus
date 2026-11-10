@@ -64,6 +64,7 @@ updates:
     directories:
       - /docker
       - /e2e/upstream
+      - /e2e/public-only
     schedule:
       interval: weekly
       day: monday
@@ -79,7 +80,9 @@ updates:
           - version-update:semver-major
 
   - package-ecosystem: docker-compose
-    directory: /e2e
+    directories:
+      - /e2e
+      - /e2e/public-only
     schedule:
       interval: weekly
       day: monday

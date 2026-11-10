@@ -903,6 +903,34 @@ describe('legacy basicauth append scan', () => {
     assert.equal(fresh.status, 'active', 'issuing is not held');
   });
 
+  it('still holds an orphan after a whole-type revoke of another credential type', async () => {
+    const user = await client();
+    const credential = await issue(user);
+    const consumerId = credential.ferrum_consumer_id;
+    const event = await seedLegacyOrphan(user, consumerId);
+    // A later whole-type `keyauth` revoke on the same consumer, as a degraded
+    // index resolution or the account-recovery fallback records it. It
+    // removed no `basicauth` entry, so the orphan must still be held.
+    await harness.store.auditLogs.create({
+      actor_user_id: user.user.id,
+      actor_role: user.user.role,
+      action: 'credential.revoke',
+      target_type: 'credential',
+      target_id: credential.id,
+      details: {
+        credential_type: 'keyauth',
+        consumer_id: consumerId,
+        last4: 'kyau',
+        scope: 'whole-type',
+      },
+      ip: null,
+      created_at: new Date().toISOString(),
+    });
+
+    await rescan();
+    assert.equal((await placeholdersFor(event.id)).length, 1);
+  });
+
   it('keeps no completion marker when the scan fails, and completes on a retry', async () => {
     const user = await client();
     const credential = await issue(user);

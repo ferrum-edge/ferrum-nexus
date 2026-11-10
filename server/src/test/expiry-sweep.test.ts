@@ -1,5 +1,6 @@
 /**
- * Expired sessions and single-use links are purged (issue #338).
+ * Expired sessions and single-use links are purged (issue #338), and so are
+ * expired gateway leases (issue #675).
  *
  * The store always had `deleteExpired` for both tables, but nothing called
  * either, so every session and every verification/reset link ever issued stayed
@@ -12,7 +13,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { createExpirySweepWorker } from '../auth/expiry-sweep.js';
 import type { NexusStore } from '../db/store.js';
-import { isoInSeconds } from '../lib/ids.js';
+import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 describe('expiry sweep', () => {
@@ -57,6 +58,19 @@ describe('expiry sweep', () => {
     return hash;
   }
 
+  /** A lease row under a fresh key, as a holder that never released it leaves it. */
+  async function seedLease(expiresInSeconds: number): Promise<{ key: string; owner: string }> {
+    const lease = { key: `sweep-test:${newId()}`, owner: newId() };
+    const acquired = await harness.store.leases.acquire(
+      lease.key,
+      lease.owner,
+      isoInSeconds(expiresInSeconds),
+      nowIso(),
+    );
+    assert.equal(acquired, true);
+    return lease;
+  }
+
   it('is composed, and idle under NEXUS_ENV=test until a test ticks it', () => {
     assert.equal(harness.services.expirySweep.isRunning(), false);
   });
@@ -67,9 +81,13 @@ describe('expiry sweep', () => {
     const expiredReset = await seedToken('password_reset', -60);
     const expiredVerification = await seedToken('email_verification', -1);
     const liveReset = await seedToken('password_reset', 3600);
+    // A lease left behind by a crashed holder or a failed release, for a key
+    // nothing acquires again (a deleted consumer's, say), and a held one.
+    const expiredLease = await seedLease(-60);
+    const liveLease = await seedLease(3600);
 
     const result = await harness.services.expirySweep.tick();
-    assert.deepEqual(result, { sessions: 1, verificationTokens: 2 });
+    assert.deepEqual(result, { sessions: 1, verificationTokens: 2, leases: 1 });
 
     assert.equal(await harness.store.sessions.findByTokenHash(expiredSession), null);
     assert.ok(await harness.store.sessions.findByTokenHash(liveSession));
@@ -85,6 +103,9 @@ describe('expiry sweep', () => {
       null,
     );
     assert.ok(await harness.store.verificationTokens.findByTokenHash(liveReset, 'password_reset'));
+    assert.equal(await harness.store.leases.verify(expiredLease.key, expiredLease.owner), false);
+    assert.equal(await harness.store.leases.verify(liveLease.key, liveLease.owner), true);
+    assert.equal(await harness.store.leases.release(liveLease.key, liveLease.owner), true);
 
     // The session the owner signed in with is untouched and still works.
     const me = await harness.authed(owner, { method: 'GET', url: '/api/auth/me' });
@@ -94,6 +115,7 @@ describe('expiry sweep', () => {
     assert.deepEqual(await harness.services.expirySweep.tick(), {
       sessions: 0,
       verificationTokens: 0,
+      leases: 0,
     });
   });
 
@@ -114,7 +136,7 @@ describe('expiry sweep', () => {
       log: (obj) => logged.push(String(obj.table)),
     });
 
-    assert.deepEqual(await worker.tick(), { sessions: 0, verificationTokens: 1 });
+    assert.deepEqual(await worker.tick(), { sessions: 0, verificationTokens: 1, leases: 0 });
     assert.deepEqual(logged, ['sessions']);
     assert.equal(
       await harness.store.verificationTokens.findByTokenHash(expired, 'email_verification'),

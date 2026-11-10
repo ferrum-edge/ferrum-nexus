@@ -425,3 +425,48 @@ describe('users and organizations', () => {
     }
   });
 });
+
+describe('organization mutation rate limit', () => {
+  it('limits creates and updates per account once the limiter is enabled', async () => {
+    // The limiter is forced off under `NEXUS_ENV=test`, so this app runs as a
+    // development one with it on.
+    const limited = await buildTestApp({
+      env: { NEXUS_ENV: 'development', NEXUS_RATE_LIMIT_ENABLED: 'true' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const founder = await limited.registerUser({ email: 'org-limit@example.test' });
+      const created = await limited.authed(founder, {
+        method: 'POST',
+        url: '/api/organizations',
+        payload: { name: 'Limited' },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const id = created.json<{ organization: Organization }>().organization.id;
+      // Each route keeps its own counter, so the update route allows 30.
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const renamed = await limited.authed(founder, {
+          method: 'PATCH',
+          url: `/api/organizations/${id}`,
+          payload: { name: `Limited ${attempt}` },
+        });
+        assert.equal(renamed.statusCode, 200, renamed.body);
+      }
+      const refused = await limited.authed(founder, {
+        method: 'PATCH',
+        url: `/api/organizations/${id}`,
+        payload: { name: 'One too many' },
+      });
+      assert.equal(refused.statusCode, 429, refused.body);
+      assert.equal(errorCode(refused.body), 'RATE_LIMITED');
+      // Reads share no counter with the writes.
+      const read = await limited.authed(founder, {
+        method: 'GET',
+        url: `/api/organizations/${id}`,
+      });
+      assert.equal(read.statusCode, 200, read.body);
+    } finally {
+      await limited.close();
+    }
+  });
+});

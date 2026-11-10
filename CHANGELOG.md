@@ -66,6 +66,24 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   namespace, instead of silently dropping that association. Older
   gateways ignore the parameter. The mock Edge enforces it in tests.
 
+- Less repeated work on three paths (#682). `GET /api/branding` hashes each
+  cached payload once for its `ETag` instead of serialising and hashing it,
+  logo included, on every request and every `304`. The publish and settings
+  forms parse an edited OpenAPI document once per change instead of once for
+  each place that reads it. A god-mode disable's grant sweep and enrolling
+  all-tools grantees in the MCP group read the acting or affected account once,
+  not once per grant. Responses are unchanged.
+
+- Organization creates and updates (`POST /api/organizations`,
+  `PATCH /api/organizations/:id`) are limited to 30 a minute per account per
+  route, like the other admin-facing mutation groups. The `/api/organizations`
+  scope had no limiter at all; its reads stay unlimited.
+
+- The notification type `api_published` is gone from `NotificationType`, the
+  `GET /api/notifications` type filter and the docs. Nothing ever wrote a
+  notice of that type, so `?type=api_published` now answers `400` like any
+  other unknown type instead of always listing nothing (#688).
+
 ### Fixed
 
 - Re-enabling an account no longer restores an approval group for a grant whose
@@ -104,6 +122,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   write. The pre-check used to answer `409` ("disabled") for a missing
   application and skipped the owner check, leaving both to the re-check after
   the consumer write. A disabled application still answers `409` (#661).
+- An administrator's account edit (`PATCH /api/users/:id`) records only the
+  fields that moved. The **Edit user** dialog always sends `display_name` and
+  `org_id`, and every save wrote a `user.update` row with both in
+  `changed_fields`, showing organization moves that never happened. An edit
+  that changes nothing now writes no row, as the self-service, organization
+  and API edits already did (#686).
+- Deleting an API, or changing its authentication method, tells each grantee
+  account once. An account holding access for itself and for two applications
+  used to get three identical notices, one per grant. A failure to read the
+  grantees after an authentication change has committed is now logged instead
+  of answering `500` for a change that happened (#687).
 - Documentation corrections. Only the god-mode `revoke-grant`, `delete-api` and
   `disable-user` operations take a `reason`; a broadcast records its subject
   there instead. The admin route summary lists `PUT /api/admin/sso` and an SMTP
@@ -143,6 +172,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   error-styled notice that the account's gateway credentials keep working
   until the gateway accepts the revocation, which is retried automatically,
   and points to Users to follow or retry it (#698).
+- The hourly expiry sweep also deletes expired `edge_leases` rows (#675). A
+  lease whose holder crashed, or whose release failed, stayed until its key was
+  acquired again, so the leases of deleted consumers, proxies and applications
+  were never removed. `leases.deleteExpired` and the `expires_at` index existed
+  for this sweep, but nothing called it.
+- A failed migration names itself, as the upgrade runbook says it does
+  (#678). The error now reads `Migration <id> failed: <driver error>`, with
+  the driver error kept as its `cause`; before, SQLite, PostgreSQL and
+  MongoDB printed only the bare driver error, so the operator had to work out
+  which migration ran it.
+- `GET /api/health` reports the version in `server/package.json` (#679). It
+  read `npm_package_version`, which the image's `node server/dist/index.js`
+  never sets, and otherwise a literal that each release had to bump by hand.
+- `GET /api/apis/:id/usage` is rate limited per account, like every other
+  route behind a session (#680). It was keyed by client IP, so everyone
+  behind one egress address shared 30 usage loads a minute, while one account
+  could multiply its allowance by changing address. The `/api/apis` scope now
+  keys its limiter per account too.
+- The audit-log `details` filter on SQLite, PostgreSQL and MySQL matches its
+  key and value literally (#681). It was a `LIKE` pattern, so `_` and `%` in a
+  key or value (every caller's keys contain `_`) were wildcards, and on MySQL a
+  value whose JSON holds a backslash did not match itself. It is now a literal
+  substring test, as the search filters already are (#595).
 
 ### Security
 
@@ -209,6 +261,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   proof, link and sessions unchanged. A sign-in or reset that waits out
   one of these leases answers `409 CONFLICT` in its own words. Super-admin
   exceptions are unchanged.
+
+- The one-time legacy `basicauth` scan no longer treats a whole-type
+  `keyauth` or `jwt` revoke as having cleared `basicauth`
+  (GHSA-jhjw-5g7j-m528). It asked only whether the consumer had a
+  `scope: 'whole-type'` `credential.revoke` after the historical append, of
+  any credential type, and then skipped the `retiring` placeholder for an
+  entry that may still be on the gateway with no row, leaving a later
+  positional revoke free to delete a different password. The check now
+  requires `credential_type: 'basicauth'`, as its reconcile check already did.
 
 ### Added
 

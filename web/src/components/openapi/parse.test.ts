@@ -129,6 +129,25 @@ describe('parseSpecText', () => {
     expect(parseYaml).toHaveBeenCalledTimes(1);
   });
 
+  it('parses the same text once, however many callers read it', () => {
+    vi.mocked(parseYaml).mockClear();
+    const text = [
+      'openapi: 3.0.3',
+      'info:',
+      '  title: Shared API',
+      "  version: '1.0.0'",
+      'paths: {}',
+    ].join('\n');
+
+    const first = parseSpecText(text);
+    expect(parseSpecText(text)).toBe(first);
+    expect(parseYaml).toHaveBeenCalledTimes(1);
+    // Other limits, or other text, parse again.
+    expect(parseSpecText(text, CATALOG_SPEC_LIMITS)).not.toBe(first);
+    expect(parseSpecText(`${text}\n`)).not.toBe(first);
+    expect(parseYaml).toHaveBeenCalledTimes(3);
+  });
+
   it('parses the catalog rendering of a servers array shared by 300 places', () => {
     // The server-URL rewrite shares one `servers` array across the root and
     // every path item and operation that declared servers; the catalog writes
