@@ -134,6 +134,10 @@ describe('branding cache invalidation', () => {
     assert.equal(next.statusCode, 200, next.body);
     assert.equal(next.json().bootstrap_required, false);
     assert.notEqual(next.headers.etag, first.headers.etag);
+    // The tag is memoised per cached payload and seat state (issue #682); it
+    // must still be the hash of the body actually served.
+    assert.equal(first.headers.etag, brandingEtag(first.json()));
+    assert.equal(next.headers.etag, brandingEtag(next.json()));
   });
 
   it('invalidates CAPTCHA and registration policy after direct service writes', async () => {

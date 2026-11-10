@@ -6354,6 +6354,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // namespace's consumers, and restore, repair and recovery would take one
     // off again. Read under the caller's proxy lease, so it is the current row.
     if (!apiInNamespace(await store.apis.findById(apiId), namespace)) return;
+    // The acting account, read once, when the first enrollment needs it.
+    let actor: UserRecord | null | undefined;
     for (const grant of await store.grants.listActiveByApi(apiId)) {
       if (grant.approved_tools != null) continue;
       if ((await store.users.findById(grant.user_id))?.status !== 'active') continue;
@@ -6366,7 +6368,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const consumerId = consumer.ferrum_consumer_id;
       const groups = (await edge.consumers.get(consumerId))?.acl_groups ?? [];
       if (!groups.includes(grant.acl_group) || groups.includes(group)) continue;
-      const actor = await store.users.findById(subject);
+      actor ??= await store.users.findById(subject);
       await store.transaction(async (tx) => {
         await audit.forStore(tx).record(
           { id: subject, role: actor?.role ?? null },

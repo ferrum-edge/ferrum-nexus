@@ -66,6 +66,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   namespace, instead of silently dropping that association. Older
   gateways ignore the parameter. The mock Edge enforces it in tests.
 
+- Less repeated work on three paths (#682). `GET /api/branding` hashes each
+  cached payload once for its `ETag` instead of serialising and hashing it,
+  logo included, on every request and every `304`. The publish and settings
+  forms parse an edited OpenAPI document once per change instead of once for
+  each place that reads it. A god-mode disable's grant sweep and enrolling
+  all-tools grantees in the MCP group read the acting or affected account once,
+  not once per grant. Responses are unchanged.
+
 - The notification type `api_published` is gone from `NotificationType`, the
   `GET /api/notifications` type filter and the docs. Nothing ever wrote a
   notice of that type, so `?type=api_published` now answers `400` like any
