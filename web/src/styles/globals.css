@@ -232,7 +232,6 @@
   --radius-2xl: calc(1.25rem * var(--radius-factor));
 
   --shadow-card: var(--shadow-card);
-  --shadow-raised: var(--shadow-raised);
   --shadow-pop: var(--shadow-pop);
 
   --font-sans: var(--font-sans-stack);

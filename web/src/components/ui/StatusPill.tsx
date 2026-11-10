@@ -76,11 +76,6 @@ export function StatusPill({ status, className }: StatusPillProps): ReactElement
   );
 }
 
-/** Human label for a status value, for use outside a badge. */
-export function statusLabel(status: StatusValue): string {
-  return STATUSES[status].label;
-}
-
 const ROLE_TONES: Readonly<Record<Role, BadgeTone>> = {
   client: 'neutral',
   provider: 'info',

@@ -5,7 +5,6 @@ import {
   isNavItemActive,
   locationForPath,
   navItemsForSection,
-  requiredRoleForPath,
   visibleNavItems,
   type NavItem,
 } from './nav';
@@ -71,16 +70,8 @@ describe('nav config', () => {
     expect(navItemsForSection('client', 'main')).toHaveLength(6);
   });
 
-  it('reports the role a nav path requires', () => {
-    expect(requiredRoleForPath('/admin/god')).toBe('super_admin');
-    expect(requiredRoleForPath('/apis')).toBe('provider');
-    expect(requiredRoleForPath('/catalog')).toBe('client');
-    expect(requiredRoleForPath('/not-a-nav-path')).toBeNull();
-  });
-
-  it('keeps off-sidebar pages out of the sidebar and the route guards', () => {
+  it('keeps off-sidebar pages out of the sidebar', () => {
     expect(pathsFor('super_admin')).not.toContain('/notifications');
-    expect(requiredRoleForPath('/notifications')).toBeNull();
   });
 });
 

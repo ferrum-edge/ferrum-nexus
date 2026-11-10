@@ -134,11 +134,6 @@ export const CREDENTIAL_TYPE_FOR_PLUGIN = {
 /** Ferrum Edge credential type keys Nexus manages. */
 export type EdgeCredentialType = (typeof CREDENTIAL_TYPE_FOR_PLUGIN)[AuthPluginType];
 
-/** Runtime type guard for {@link AuthPluginType}. */
-export function isAuthPluginType(value: unknown): value is AuthPluginType {
-  return typeof value === 'string' && (AUTH_PLUGIN_TYPES as readonly string[]).includes(value);
-}
-
 /** Name of the Edge plugin used to restrict a requestable API to its ACL group. */
 export const ACCESS_CONTROL_PLUGIN = 'access_control';
 
@@ -293,11 +288,6 @@ export const EMAIL_TEMPLATE_LABELS: Readonly<Record<EmailTemplateKey, string>> =
   credential_rotated: 'Credential rotated',
   spec_updated: 'API specification changed',
 };
-
-/** Runtime type guard for {@link EmailTemplateKey}. */
-export function isEmailTemplateKey(value: unknown): value is EmailTemplateKey {
-  return typeof value === 'string' && (EMAIL_TEMPLATE_KEYS as readonly string[]).includes(value);
-}
 
 /* ── Defaults and limits ────────────────────────────────────────────────── */
 

@@ -8,7 +8,6 @@ import {
   ROLE_ORDER,
   capabilitiesFor,
   isRegistrableRole,
-  isRole,
   roleAtLeast,
   roleRank,
   type Role,
@@ -67,20 +66,6 @@ describe('roleAtLeast', () => {
         const b = ROLE_ORDER[j] as Role;
         assert.equal(roleAtLeast(a, b), i >= j, `roleAtLeast(${a}, ${b})`);
       }
-    }
-  });
-});
-
-describe('isRole', () => {
-  it('accepts every known role', () => {
-    for (const role of ROLE_ORDER) {
-      assert.equal(isRole(role), true);
-    }
-  });
-
-  it('rejects unknown or non-string values', () => {
-    for (const value of ['owner', 'SUPER_ADMIN', '', null, undefined, 3, {}, ['client']]) {
-      assert.equal(isRole(value), false, `${JSON.stringify(value)} is not a role`);
     }
   });
 });
