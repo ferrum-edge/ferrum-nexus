@@ -1,6 +1,6 @@
 # Image pin check
 
-The required `checks` job runs `ci/check-image-pins.sh`. Its structural scan checks
+The required `action-pins` job runs `ci/check-image-pins.sh`. Its structural scan checks
 tracked Dockerfiles (`FROM`, external `COPY --from`, syntax frontends and external
 `RUN --mount` images), Compose and workflow YAML image fields, workflow `docker://`
 actions and Docker `run`, `create`, and `pull` commands (including backslash
