@@ -105,6 +105,14 @@ export const SMTP_TEST_RATE_LIMIT = { max: 3, timeWindow: '1 minute' } as const;
  */
 export const MASS_EMAIL_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
 
+/**
+ * Per-account limit on email template saves and resets, the same 30 a minute
+ * as the other admin-facing mutation groups (`/api/organizations`,
+ * `/api/apis`). The `/api/admin` scope registers `@fastify/rate-limit` with
+ * `global: false`, so the template reads stay unlimited.
+ */
+export const EMAIL_TEMPLATE_MUTATION_RATE_LIMIT = { max: 30, timeWindow: '1 minute' } as const;
+
 /** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
 export const MAX_LOGO_DATA_URL_LENGTH = 512 * 1024;
 
@@ -410,29 +418,37 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
     return settings.getEmailTemplate(key);
   });
 
-  app.put('/email-templates/:key', async (request): Promise<UpdateEmailTemplateResponse> => {
-    const { user } = requireAuth(request);
-    const { key } = parseOrThrow(templateKeyParams, request.params);
-    const body = parseOrThrow(updateTemplateBody, request.body);
-    const template = await settings.upsertEmailTemplate(
-      { id: user.id, role: user.role },
-      key,
-      body,
-      clientIp(request),
-    );
-    return { template };
-  });
+  app.put(
+    '/email-templates/:key',
+    { config: { rateLimit: { ...EMAIL_TEMPLATE_MUTATION_RATE_LIMIT } } },
+    async (request): Promise<UpdateEmailTemplateResponse> => {
+      const { user } = requireAuth(request);
+      const { key } = parseOrThrow(templateKeyParams, request.params);
+      const body = parseOrThrow(updateTemplateBody, request.body);
+      const template = await settings.upsertEmailTemplate(
+        { id: user.id, role: user.role },
+        key,
+        body,
+        clientIp(request),
+      );
+      return { template };
+    },
+  );
 
-  app.delete('/email-templates/:key', async (request): Promise<ResetEmailTemplateResponse> => {
-    const { user } = requireAuth(request);
-    const { key } = parseOrThrow(templateKeyParams, request.params);
-    const template = await settings.resetEmailTemplate(
-      { id: user.id, role: user.role },
-      key,
-      clientIp(request),
-    );
-    return { template };
-  });
+  app.delete(
+    '/email-templates/:key',
+    { config: { rateLimit: { ...EMAIL_TEMPLATE_MUTATION_RATE_LIMIT } } },
+    async (request): Promise<ResetEmailTemplateResponse> => {
+      const { user } = requireAuth(request);
+      const { key } = parseOrThrow(templateKeyParams, request.params);
+      const template = await settings.resetEmailTemplate(
+        { id: user.id, role: user.role },
+        key,
+        clientIp(request),
+      );
+      return { template };
+    },
+  );
 
   /* ── Mass email ───────────────────────────────────────────────────────── */
 

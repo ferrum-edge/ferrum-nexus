@@ -941,10 +941,10 @@ export async function buildServer(
 
   await app.register(
     async (scope) => {
-      // `global: false` so only the two mail routes carry a limit — the probe
-      // that contacts the relay directly and the campaign composer — bucketed
-      // per account (see `userOrIpKey`). Their durable budgets bound the hour
-      // and the day; this bounds a burst.
+      // `global: false` so only the two mail routes and the email template
+      // save and reset carry a limit, bucketed per account (see
+      // `userOrIpKey`). The mail routes' durable budgets bound the hour and the
+      // day; this bounds a burst.
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }

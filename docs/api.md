@@ -115,6 +115,7 @@ trust, not from an untrusted forwarded header.
 | `POST /api/notifications/read`                                                 | 60               | account  |
 | `POST /api/grants/:id/tool-requests`                                           | 10               | account  |
 | `POST /api/grants/:id/relinquish`                                              | 30               | account  |
+| `PUT` and `DELETE /api/admin/email-templates/:key`, per route                  | 30               | account  |
 | `POST /api/admin/settings/smtp-test`                                           | 3                | account  |
 | `POST /api/admin/mass-email`                                                   | 10               | account  |
 | `POST /api/service-manifests/preview`                                          | 10               | account  |

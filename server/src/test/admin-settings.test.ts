@@ -16,7 +16,7 @@ import type {
 import { SMTP_PASSWORD_SETTINGS_KEY } from '../admin/settings-service.js';
 import { SMTP_TEST_LIMIT } from '../admin/smtp-test-service.js';
 import { CAPTCHA_SECRET_SETTINGS_KEY } from '../auth/captcha.js';
-import { SMTP_TEST_RATE_LIMIT } from '../routes/admin.js';
+import { EMAIL_TEMPLATE_MUTATION_RATE_LIMIT, SMTP_TEST_RATE_LIMIT } from '../routes/admin.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, TEST_CAPTCHA_TOKEN, type TestApp, type TestSession } from './helpers.js';
 
@@ -846,6 +846,52 @@ describe('the SMTP test rate limit', () => {
         payload: {},
       });
       assert.equal(again.statusCode, 429, 'and the first is still refused in the same window');
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
+describe('the email template rate limit', () => {
+  it('limits template saves and resets per account once the limiter is enabled', async () => {
+    // The limiter is forced off under `NEXUS_ENV=test`, so this app runs as a
+    // development one with it on.
+    const harness = await buildTestApp({
+      env: { NEXUS_ENV: 'development', NEXUS_RATE_LIMIT_ENABLED: 'true' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const founder = await harness.registerUser({ email: 'template-limit@example.test' });
+      // Resetting a template with no override is still a 200, so the route
+      // can be driven to its limit without saving anything first.
+      for (let attempt = 0; attempt < EMAIL_TEMPLATE_MUTATION_RATE_LIMIT.max; attempt += 1) {
+        const reset = await harness.authed(founder, {
+          method: 'DELETE',
+          url: '/api/admin/email-templates/access_denied',
+        });
+        assert.equal(reset.statusCode, 200, reset.body);
+      }
+      const refused = await harness.authed(founder, {
+        method: 'DELETE',
+        url: '/api/admin/email-templates/access_denied',
+      });
+      assert.equal(refused.statusCode, 429, refused.body);
+      assert.equal(errorCode(refused.body), 'RATE_LIMITED');
+
+      // Each route keeps its own counter, so a save is still accepted.
+      const saved = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/email-templates/access_denied',
+        payload: { subject: 'Custom denial', body_html: 'Declined', body_text: 'Declined' },
+      });
+      assert.equal(saved.statusCode, 200, saved.body);
+
+      // Reads share no counter with the writes.
+      const read = await harness.authed(founder, {
+        method: 'GET',
+        url: '/api/admin/email-templates/access_denied',
+      });
+      assert.equal(read.statusCode, 200, read.body);
     } finally {
       await harness.close();
     }
