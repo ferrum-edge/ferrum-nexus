@@ -7,7 +7,7 @@
  * `?sso_error=<reason>`, which the page turns into a message from a fixed set.
  */
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES, type SsoPublicConfigResponse } from '@ferrum-nexus/shared';
 import { SSO_ERROR_MESSAGES } from '../lib/sso-errors';
@@ -25,7 +25,7 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function stubApi(sso: SsoPublicConfigResponse): void {
+function stubApi(sso: SsoPublicConfigResponse, branding: Record<string, unknown> = {}): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
@@ -42,6 +42,7 @@ function stubApi(sso: SsoPublicConfigResponse): void {
             support_email: null,
             captcha: CAPTCHA,
             bootstrap_required: false,
+            ...branding,
           }),
         );
       }
@@ -55,8 +56,12 @@ function stubApi(sso: SsoPublicConfigResponse): void {
 }
 
 /** Render the app on `path` with a fresh query cache (see `RegisterPage.test.tsx`). */
-async function renderLogin(sso: SsoPublicConfigResponse, path = '/login'): Promise<void> {
-  stubApi(sso);
+async function renderLogin(
+  sso: SsoPublicConfigResponse,
+  path = '/login',
+  branding: Record<string, unknown> = {},
+): Promise<void> {
+  stubApi(sso, branding);
   vi.resetModules();
   const { App } = await import('../App');
   window.history.pushState({}, '', path);
@@ -144,5 +149,38 @@ describe('LoginPage single sign-on', () => {
       expect(screen.queryByText(message)).not.toBeInTheDocument();
     }
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+const PASSWORD_AND_REGISTRATION: SsoPublicConfigResponse = {
+  policy: 'local_and_sso',
+  password_login: 'enabled',
+  registration_enabled: true,
+  providers: [],
+};
+
+/** `GET /api/branding` says whether self-service registration is open. */
+describe('LoginPage closed registration', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    window.history.pushState({}, '', '/');
+  });
+
+  it('offers no Register link while registration is closed', async () => {
+    await renderLogin(PASSWORD_AND_REGISTRATION, '/login', {
+      registration: { open_registration: false, allowed_roles: ['client', 'provider'] },
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole('link', { name: 'Register' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('keeps the link for the founding registration', async () => {
+    await renderLogin(PASSWORD_AND_REGISTRATION, '/login', {
+      registration: { open_registration: false, allowed_roles: ['client', 'provider'] },
+      bootstrap_required: true,
+    });
+    expect(await screen.findByRole('link', { name: 'Register' })).toBeInTheDocument();
   });
 });

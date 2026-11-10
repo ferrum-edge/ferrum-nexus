@@ -126,6 +126,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `dist`, `coverage`, `.tsbuildinfo` files, databases, `.env` files, `.git`,
   docs or the acceptance suite, so a stale file in a local `server/dist` can no
   longer reach the runtime stage (#696).
+- With self-service registration closed, the sign-in page no longer links to
+  the sign-up form, and `/register` says the portal is not accepting
+  self-service accounts instead of collecting a name, address, password and
+  CAPTCHA only to answer `403`. The founding registration is still offered
+  (#699).
 
 ### Security
 

@@ -8,7 +8,7 @@ import { ResendVerification } from '../components/auth/ResendVerification';
 import { Button, buttonClassName } from '../components/ui/Button';
 import { Icon } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
-import { useCaptchaConfig, useSsoConfig } from '../hooks/useBranding';
+import { useBranding, useCaptchaConfig, useSsoConfig } from '../hooks/useBranding';
 import { ApiError, ssoStartUrl } from '../lib/api';
 import { SSO_ERROR_MESSAGES } from '../lib/sso-errors';
 import { useAuth } from '../stores/auth';
@@ -25,6 +25,7 @@ export function LoginPage(): ReactElement {
   const navigate = useNavigate();
   const { data: captcha } = useCaptchaConfig();
   const { data: sso } = useSsoConfig();
+  const { data: branding } = useBranding();
   // Set by the reset page, which cannot show its own confirmation: completing a
   // reset destroys every session, so the visitor is bounced straight here.
   // `sso_error` is set by a refused single sign-on callback.
@@ -53,7 +54,11 @@ export function LoginPage(): ReactElement {
   const passwordLogin = sso?.password_login ?? 'enabled';
   const showPasswordForm =
     passwordLogin === 'enabled' || (passwordLogin === 'break_glass' && breakGlassOpen);
-  const registrationEnabled = sso?.registration_enabled ?? true;
+  // No link to a form the server refuses: neither under `sso_only` nor with
+  // self-service registration closed, except for the founding registration.
+  const registrationEnabled =
+    (sso?.registration_enabled ?? true) &&
+    (branding?.registration?.open_registration !== false || branding?.bootstrap_required === true);
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
