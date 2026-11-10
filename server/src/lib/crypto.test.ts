@@ -10,7 +10,6 @@ import {
   encryptJsonWithKey,
   fingerprint,
   hashPassword,
-  isEncryptedBlob,
   last4,
   randomToken,
   SCRYPT_VERIFY_LIMITS,
@@ -120,7 +119,6 @@ describe('settings encryption', () => {
     const key = deriveKey(SECRET, SETTINGS_KEY_INFO);
     for (const value of ['smtp-password', 42, true, null, { a: 1, b: ['x'] }]) {
       const blob = encryptJsonWithKey(key, value);
-      assert.ok(isEncryptedBlob(blob));
       assert.match(blob, V1_CIPHERTEXT);
       assert.deepEqual(decryptJsonWithKey(key, blob), value);
     }

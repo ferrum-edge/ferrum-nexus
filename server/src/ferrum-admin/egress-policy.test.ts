@@ -13,7 +13,6 @@ import { buildTestApp, SAMPLE_SPEC_YAML } from '../test/helpers.js';
 import { publicEgressPolicy } from '../test/mock-ferrum-edge.js';
 import { EGRESS_POLICY_MAX_BYTES, gatewayDateMillis } from './client.js';
 import {
-  admitBackendEgress,
   assessBackendEgress,
   CLOCK_SKEW_ALLOWANCE_MS,
   createDataPlaneSightings,
@@ -22,18 +21,34 @@ import {
   describeDataPlaneAttestation,
   isUnsupportedEgressPolicySchema,
   MAX_SIGHTINGS,
-  parseBackendEgressPolicy,
   provesDataPlanePublicEgress,
   provesLocalPublicEgress,
   provesPublicEgress,
   readBackendEgressPolicy,
+  type BackendEgressAdmission,
   type BackendEgressPolicy,
   type DataPlaneAttestationProblem,
   type DataPlaneAttestationVerdict,
   type DataPlaneEgressAttestation,
   type DataPlaneEgressPolicy,
   type DataPlaneFreshness,
+  type EgressAdmissionOptions,
 } from './egress-policy.js';
+
+/** The exact owner shape: a reading with nothing set aside, or `null`. */
+function parseBackendEgressPolicy(value: unknown, namespace: string): BackendEgressPolicy | null {
+  const reading = readBackendEgressPolicy(value, namespace);
+  return reading !== null && reading.attestationProblem === null ? reading.policy : null;
+}
+
+/** The admission verdict for a policy read with nothing set aside. */
+function admitBackendEgress(
+  policy: BackendEgressPolicy,
+  options: EgressAdmissionOptions,
+  freshness: DataPlaneFreshness,
+): BackendEgressAdmission | null {
+  return assessBackendEgress({ policy, attestationProblem: null }, options, freshness).admission;
+}
 
 const REQUIRED_LOCAL_PUBLIC_EGRESS = /required local public egress policy/;
 const INVALID_PROTOCOL = /invalid protocol/;

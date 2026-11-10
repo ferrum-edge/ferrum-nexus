@@ -2441,20 +2441,6 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       stored.updated_at = nowIso();
       return send(res, 200, project(stored));
     }
-    if (method === 'PUT') {
-      const list = Array.isArray(body) ? body : isRecord(body) ? [body] : null;
-      if (!list) return fail(res, 400, 'Credential body must be an object or an array');
-      if (list.length === 0) return fail(res, 400, 'Credential array must not be empty');
-      if (list.length > maxCredentials) {
-        return fail(res, 400, 'FERRUM_MAX_CREDENTIALS_PER_TYPE exceeded');
-      }
-      if (!list.every(isRecord)) return fail(res, 400, 'Invalid credential entry');
-      const prepared = prepareCredentials({ [credentialType]: list }, maxCredentials);
-      if (prepared === null) return fail(res, 400, 'Invalid credential entry');
-      stored.credentials[credentialType] = prepared[credentialType]!;
-      stored.updated_at = nowIso();
-      return send(res, 200, project(stored));
-    }
     if (method === 'DELETE') {
       delete stored.credentials[credentialType];
       stored.updated_at = nowIso();
@@ -4079,30 +4065,6 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             url.searchParams,
             typeof provisionedBy === 'string' ? provisionedBy : undefined,
           );
-        }
-        if (method === 'GET') {
-          // The plugins Nexus writes: the six first-class ones plus every
-          // member of the provider palette. Real Edge lists ~75; anything not
-          // here is one Nexus never names.
-          return send(res, 200, [
-            'key_auth',
-            'basic_auth',
-            'jwt_auth',
-            'access_control',
-            'cors',
-            'rate_limiting',
-            'openapi_validator',
-            'security_headers',
-            'request_size_limiting',
-            'response_size_limiting',
-            'ip_restriction',
-            'bot_detection',
-            'correlation_id',
-            'compression',
-            'response_caching',
-            'request_deduplication',
-            'request_termination',
-          ]);
         }
         return fail(res, 404, 'Not found');
       default:

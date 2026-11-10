@@ -281,18 +281,6 @@ export function readBackendEgressPolicy(
   return { policy: { ...policy, data_plane_attestation: attestation }, attestationProblem: null };
 }
 
-/**
- * The exact owner shape: {@link readBackendEgressPolicy} with nothing set
- * aside, or `null`. Admission reads the degrading form instead.
- */
-export function parseBackendEgressPolicy(
-  value: unknown,
-  namespace: string,
-): BackendEgressPolicy | null {
-  const reading = readBackendEgressPolicy(value, namespace);
-  return reading !== null && reading.attestationProblem === null ? reading.policy : null;
-}
-
 /** One data plane's self-reported policy, with Edge's serving guarantee rule. */
 function parseDataPlanePolicy(value: unknown): DataPlaneEgressPolicy | null {
   if (!isRecord(value) || !hasExactKeys(value, DATA_PLANE_POLICY_KEYS)) return null;
@@ -745,16 +733,4 @@ export function assessBackendEgress(
     admission = { egress_profile: 'private-upstreams-opt-in', enforcement_scope };
   }
   return { publicEgressGuaranteed, admission, dataPlaneAttestation };
-}
-
-/**
- * Admit a recognized policy, or return `null` to refuse it. A policy that
- * proves public-only egress is always reported as such, whatever the opt-out.
- */
-export function admitBackendEgress(
-  policy: BackendEgressPolicy,
-  options: EgressAdmissionOptions,
-  freshness: DataPlaneFreshness,
-): BackendEgressAdmission | null {
-  return assessBackendEgress({ policy, attestationProblem: null }, options, freshness).admission;
 }

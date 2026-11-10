@@ -338,13 +338,6 @@ export interface FerrumAdminClient {
       entry: EdgeCredentialEntry,
       subject?: string,
     ): Promise<EdgeConsumer>;
-    /** Replace every entry of a credential type. */
-    replaceCredentials(
-      id: string,
-      type: EdgeCredentialType,
-      entries: EdgeCredentialEntry[],
-      subject?: string,
-    ): Promise<EdgeConsumer>;
     /** Remove one entry by 0-based index (rotation step 3); the array re-indexes. */
     deleteCredentialAt(
       id: string,
@@ -2478,19 +2471,6 @@ export function createFerrumAdminClient(
           'POST',
           `/consumers/${encodeURIComponent(id)}/credentials/${type}`,
           { body: entry, subject },
-        );
-      },
-
-      async replaceCredentials(
-        id: string,
-        type: EdgeCredentialType,
-        entries: EdgeCredentialEntry[],
-        subject?: string,
-      ): Promise<EdgeConsumer> {
-        return callRequired<EdgeConsumer>(
-          'PUT',
-          `/consumers/${encodeURIComponent(id)}/credentials/${type}`,
-          { body: entries, subject },
         );
       },
 

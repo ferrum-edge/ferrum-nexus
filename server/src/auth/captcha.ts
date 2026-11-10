@@ -141,8 +141,6 @@ export interface CaptchaSelfTestInput {
 export interface CaptchaService {
   /** Widget configuration safe to hand to the browser (never the secret). */
   getPublicConfig(): Promise<CaptchaPublicConfig>;
-  /** Whether a token is required on register/login right now. */
-  isEnabled(): Promise<boolean>;
   /** Whether the stored configuration applies at all (`NEXUS_CAPTCHA_ENFORCEMENT`). */
   getEnforcement(): CaptchaEnforcement;
   /**
@@ -278,10 +276,6 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
         provider: settings.provider,
         site_key: active ? settings.site_key : null,
       };
-    },
-
-    async isEnabled(): Promise<boolean> {
-      return isActive(await readSettings());
     },
 
     getEnforcement: () => enforcement,

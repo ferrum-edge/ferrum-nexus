@@ -8,7 +8,6 @@ import {
   MAX_DEFINITION_HASH_WORK,
   agentDocumentStats,
   agentToolDefinitionDigests,
-  agentToolDefinitionHash,
   definitionHashStats,
   identifyAgentTools,
   resolvedAgentOperations,
@@ -82,8 +81,9 @@ function edit(change: (document: Document) => void): Document {
   return document;
 }
 
+/** One tool's definition digest. */
 function hash(document: Record<string, unknown>, tool = TOOL): string {
-  return agentToolDefinitionHash(document, tool);
+  return agentToolDefinitionDigests(document, [tool])[0] as string;
 }
 
 function stats(): DefinitionHashStats {
@@ -266,7 +266,7 @@ function unusedChanged(document: Record<string, unknown>): Record<string, unknow
   return copy;
 }
 
-describe('agentToolDefinitionHash', () => {
+describe('a tool definition digest', () => {
   it('is a stable function of the definition, not of key order or document syntax', () => {
     assert.equal(hash(BASE), hash(structuredClone(BASE)));
     assert.equal(hash(reversed(BASE) as Record<string, unknown>), hash(BASE));

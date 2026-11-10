@@ -41,17 +41,6 @@ export interface EdgePage<T> {
   pagination: EdgePagination;
 }
 
-/** Edge's flat error body. There is no stable machine-readable code. */
-export interface EdgeErrorBody {
-  error: string;
-  /** Present on live-apply 503s: the row is durable but not yet live. */
-  applied?: boolean;
-  /** `config_rejected` | `reload_timeout` | `sequence_unavailable`. */
-  reason?: string;
-  /** Present on some namespace/Mongo errors — names the config to change. */
-  detail?: string;
-}
-
 /** Edge v0.9.13 snapshot stand-in for stored bytes: lowercase hex SHA-256 and length. */
 export interface EdgeStoredContentDigest {
   sha256: string;
@@ -98,16 +87,6 @@ export interface EdgeDeploymentAcknowledgement {
 export interface EdgeListQuery {
   limit?: number;
   offset?: number;
-}
-
-/* ── Namespaces ─────────────────────────────────────────────────────────── */
-
-/** A namespace registry row (`GET /namespaces/{name}`). */
-export interface EdgeNamespace {
-  name: string;
-  description?: string | null;
-  created_at?: string;
-  updated_at?: string;
 }
 
 /* ── Consumers and credentials ──────────────────────────────────────────── */
