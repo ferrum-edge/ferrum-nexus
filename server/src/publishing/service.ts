@@ -3481,18 +3481,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         let egress: BackendEgressAdmission | null = null;
         if (
           api.ferrum_proxy_id &&
-          [
-            'upstream_url',
-            'auth_plugin',
-            'requestable',
-            'rate_limit',
-            'cors',
-            'allowed_methods',
-            'timeouts',
-            'circuit_breaker',
-            'spec_enforcement',
-            'agents',
-          ].some((key) => Object.hasOwn(patch, key))
+          GATEWAY_SETTING_FIELDS.some((key) => Object.hasOwn(patch, key))
         ) {
           egress = await edge.assertBackendEgress();
         }
