@@ -446,6 +446,17 @@ export interface CreateOrganizationResponse {
   organization: Organization;
 }
 
+/** `PATCH /api/organizations/:id` (admin). An empty body changes nothing. */
+export interface UpdateOrganizationRequest {
+  name?: string;
+  description?: string | null;
+}
+
+/** `PATCH /api/organizations/:id` (admin) */
+export interface UpdateOrganizationResponse {
+  organization: Organization;
+}
+
 /* ── Catalog ────────────────────────────────────────────────────────────── */
 
 /** `GET /api/catalog` */

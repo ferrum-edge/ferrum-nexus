@@ -25,6 +25,7 @@ import {
   type UnlinkUserIdentityResponse,
   type UpdateMeResponse,
   type UpdateNotificationPreferencesResponse,
+  type UpdateOrganizationResponse,
   type UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 
@@ -276,9 +277,8 @@ export const organizationRoutes: FastifyPluginAsync<UsersRoutesOptions> = async 
     return { organization };
   });
 
-  // No shared DTO exists for the update body; the response mirrors the create
-  // shape so the SPA can reuse one parser.
-  app.patch('/:id', async (request): Promise<CreateOrganizationResponse> => {
+  // Body: `UpdateOrganizationRequest`.
+  app.patch('/:id', async (request): Promise<UpdateOrganizationResponse> => {
     const { user } = requireAuth(request);
     const { id } = parseOrThrow(idParamSchema, request.params);
     const patch = parseOrThrow(updateOrganizationBody, request.body);

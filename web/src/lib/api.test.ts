@@ -6,6 +6,7 @@ import {
   buildQuery,
   catalogApi,
   credentialsApi,
+  organizationsApi,
   readCookie,
   request,
   setUnauthorizedHandler,
@@ -175,6 +176,17 @@ describe('lib/api', () => {
 
     const [url] = lastCall();
     expect(url).toBe('/api/threads/thread%201/messages?before=message+2&limit=25');
+  });
+
+  it('renames an organization through PATCH /api/organizations/:id', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(jsonResponse({ organization: { id: 'org 1' } }));
+
+    await organizationsApi.update('org 1', { name: 'Platform' });
+
+    const [url, init] = lastCall();
+    expect(url).toBe('/api/organizations/org%201');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(String(init.body))).toEqual({ name: 'Platform' });
   });
 
   it('builds query strings, dropping empty values', () => {
