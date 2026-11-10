@@ -8,10 +8,7 @@
  * indigo icons before).
  */
 
-import { BRANDING_HEX_COLOR, normalizeBrandingHexColor } from '@ferrum-nexus/shared';
-
-/** Matches `#rgb` / `#rrggbb`, the only forms accepted from branding settings. */
-export const HEX_COLOR = BRANDING_HEX_COLOR;
+import { normalizeBrandingHexColor } from '@ferrum-nexus/shared';
 
 export interface Rgb {
   r: number;

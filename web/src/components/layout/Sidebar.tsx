@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router';
-import type { ReactElement, ReactNode, Ref } from 'react';
+import type { ReactElement, Ref } from 'react';
 import { ROLE_LABELS, type Role, type User } from '@ferrum-nexus/shared';
 import { cn } from '../../lib/cn';
 import { Icon } from '../ui/Icon';
@@ -20,8 +20,6 @@ export interface SidebarProps {
   logoDataUrl: string | null;
   /** Signed-in account, shown in the rail footer. */
   user?: Pick<User, 'display_name' | 'email' | 'role'> | null;
-  /** Optional operator footer (a copyright line, legal links). */
-  footer?: ReactNode;
 }
 
 /** Initials for an avatar tile: first letters of up to two words. */
@@ -76,7 +74,6 @@ export function Sidebar({
   portalName,
   logoDataUrl,
   user,
-  footer,
 }: SidebarProps): ReactElement {
   // Not the router's own active state: a page may ask to be shown under another
   // entry (an administrator managing someone else's API is in All APIs).
@@ -189,7 +186,6 @@ export function Sidebar({
             </span>
           </Link>
         ) : null}
-        {footer ? <div className="mt-2 px-2 text-xs text-sidebar-subtle">{footer}</div> : null}
       </div>
     </aside>
   );

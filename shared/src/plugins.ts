@@ -235,9 +235,6 @@ export interface ProviderPluginDescriptor {
 /** RFC 9110 field-name token — the grammar Edge accepts for a header name. */
 const HTTP_FIELD_NAME_PATTERN = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
 
-/** RFC 9110 method token. */
-const HTTP_METHOD_PATTERN = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
-
 /** A media type without parameters, e.g. `application/json`. */
 const MEDIA_TYPE_PATTERN = "[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+";
 

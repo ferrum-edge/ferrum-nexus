@@ -31,7 +31,6 @@ export const MAIL_URL = process.env.E2E_MAIL_URL ?? 'http://127.0.0.1:8025';
  * journey would otherwise pass on the wrong sender.
  */
 export const MAIL_FROM = process.env.E2E_MAIL_FROM ?? 'nexus@example.test';
-export const BOOTSTRAP_TOKEN = process.env.NEXUS_BOOTSTRAP_TOKEN ?? '';
 
 /**
  * The single operator account `prepare.ts` bootstraps, which both suites sign
@@ -329,7 +328,6 @@ interface RegisterResult {
 export async function registerVerifiedUser(
   email: string,
   role: 'client' | 'provider',
-  options: { bootstrap?: boolean } = {},
 ): Promise<Session> {
   const password = ADMIN_PASSWORD;
   const registered = await portal<RegisterResult>('POST', '/api/auth/register', {
@@ -338,7 +336,6 @@ export async function registerVerifiedUser(
       password,
       display_name: email.split('@')[0],
       role,
-      ...(options.bootstrap ? { bootstrap_token: BOOTSTRAP_TOKEN } : {}),
     },
   });
 
