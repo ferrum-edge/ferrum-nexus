@@ -7,7 +7,7 @@
  * `?sso_error=<reason>`, which the page turns into a message from a fixed set.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES, type SsoPublicConfigResponse } from '@ferrum-nexus/shared';
 import { SSO_ERROR_MESSAGES } from '../lib/sso-errors';
@@ -182,5 +182,42 @@ describe('LoginPage closed registration', () => {
       bootstrap_required: true,
     });
     expect(await screen.findByRole('link', { name: 'Register' })).toBeInTheDocument();
+  });
+});
+
+/**
+ * On wide screens the split layout shows the operator's footer and support
+ * address only in the hero, so the hero must not hide them from assistive
+ * technology; only its marketing copy is decorative.
+ */
+describe('LoginPage split layout', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    window.history.pushState({}, '', '/');
+  });
+
+  it('keeps the hero footer links and support address reachable', async () => {
+    await renderLogin(PASSWORD_AND_REGISTRATION, '/login', {
+      login_layout: 'split',
+      support_email: 'help@acme.test',
+      footer_text: 'Acme Corp',
+      footer_links: [{ label: 'Terms', url: 'https://acme.test/terms' }],
+    });
+    const hero = screen.getByText('Developer portal').closest('section');
+    expect(hero).not.toBeNull();
+    expect(hero).not.toHaveAttribute('aria-hidden');
+    const inHero = within(hero as HTMLElement);
+    expect(await inHero.findByRole('link', { name: 'Terms' })).toHaveAttribute(
+      'href',
+      'https://acme.test/terms',
+    );
+    expect(inHero.getByRole('link', { name: 'help@acme.test' })).toHaveAttribute(
+      'href',
+      'mailto:help@acme.test',
+    );
+    // The tagline and feature list stay decorative.
+    expect(inHero.queryByRole('heading')).not.toBeInTheDocument();
+    expect(inHero.queryByRole('list')).not.toBeInTheDocument();
   });
 });

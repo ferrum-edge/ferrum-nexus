@@ -131,6 +131,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   self-service accounts instead of collecting a name, address, password and
   CAPTCHA only to answer `403`. The founding registration is still offered
   (#699).
+- Accessibility: on a wide sign-in or registration page, the operator's
+  footer links and support address beside the form are no longer inside an
+  `aria-hidden` region, and the support address there is a `mailto:` link.
+  Only the hero's marketing copy is hidden from assistive technology. On the
+  Documentation tab, an operation listed under two tags gets a distinct panel
+  id on each card, so each button's `aria-controls` names its own panel
+  (#697).
 
 ### Security
 
