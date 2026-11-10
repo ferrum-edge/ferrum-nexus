@@ -117,6 +117,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - The catalog's Documentation tab renders an OpenAPI 3.1 `type` array:
   `type: ['string', 'null']` reads `string | null`, as `nullable: true` does
   in OpenAPI 3.0, where it used to show no type at all (#692).
+- Grants, access requests and "Your API access" rows for an API that
+  publishes no agent tools no longer carry an "Approved tools: all published
+  tools" line. A grant that names tools the API has since withdrawn still
+  reports them as expired (#693).
 
 ### Security
 
