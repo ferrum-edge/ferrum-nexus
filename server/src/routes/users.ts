@@ -25,6 +25,7 @@ import {
   type UnlinkUserIdentityResponse,
   type UpdateMeResponse,
   type UpdateNotificationPreferencesResponse,
+  type UpdateOrganizationResponse,
   type UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 
@@ -66,6 +67,14 @@ const updateMeBody = z.object({
  * person editing their own profile needs.
  */
 export const UPDATE_ME_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
+
+/**
+ * Per-account limit on organization creates and updates, the same 30 a minute
+ * as the other admin-facing mutation groups (`/api/apis`, `/api/applications`).
+ * The `/api/organizations` scope registers `@fastify/rate-limit` with
+ * `global: false`, so the reads stay unlimited.
+ */
+export const ORGANIZATION_MUTATION_RATE_LIMIT = { max: 30, timeWindow: '1 minute' } as const;
 
 const updateNotificationPreferencesBody = z
   .object({
@@ -268,20 +277,27 @@ export const organizationRoutes: FastifyPluginAsync<UsersRoutesOptions> = async 
     return { organization: await users.getOrganization(id) };
   });
 
-  app.post('/', async (request, reply): Promise<CreateOrganizationResponse> => {
-    const { user } = requireAuth(request);
-    const input = parseOrThrow(createOrganizationBody, request.body);
-    const organization = await users.createOrganization(user, input, clientIp(request));
-    reply.status(201);
-    return { organization };
-  });
+  app.post(
+    '/',
+    { config: { rateLimit: { ...ORGANIZATION_MUTATION_RATE_LIMIT } } },
+    async (request, reply): Promise<CreateOrganizationResponse> => {
+      const { user } = requireAuth(request);
+      const input = parseOrThrow(createOrganizationBody, request.body);
+      const organization = await users.createOrganization(user, input, clientIp(request));
+      reply.status(201);
+      return { organization };
+    },
+  );
 
-  // No shared DTO exists for the update body; the response mirrors the create
-  // shape so the SPA can reuse one parser.
-  app.patch('/:id', async (request): Promise<CreateOrganizationResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    const patch = parseOrThrow(updateOrganizationBody, request.body);
-    return { organization: await users.updateOrganization(user, id, patch, clientIp(request)) };
-  });
+  // Body: `UpdateOrganizationRequest`.
+  app.patch(
+    '/:id',
+    { config: { rateLimit: { ...ORGANIZATION_MUTATION_RATE_LIMIT } } },
+    async (request): Promise<UpdateOrganizationResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const patch = parseOrThrow(updateOrganizationBody, request.body);
+      return { organization: await users.updateOrganization(user, id, patch, clientIp(request)) };
+    },
+  );
 };

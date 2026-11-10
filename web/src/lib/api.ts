@@ -29,6 +29,7 @@ import {
   type CancelAccessRequestResponse,
   type CaptchaConfigResponse,
   type CatalogDetailResponse,
+  type CatalogIdentityAccessQuery,
   type CatalogIdentityAccessResponse,
   type CreateApplicationRequest,
   type CreateApplicationResponse,
@@ -170,6 +171,8 @@ import {
   type UpdateMeResponse,
   type UpdateNotificationPreferencesRequest,
   type UpdateNotificationPreferencesResponse,
+  type UpdateOrganizationRequest,
+  type UpdateOrganizationResponse,
   type UpdateSettingsRequest,
   type UpdateSettingsResponse,
   type UpdateUserRequest,
@@ -450,6 +453,8 @@ export const organizationsApi = {
     get<GetOrganizationResponse>(`/organizations/${encodeURIComponent(id)}`),
   create: (body: CreateOrganizationRequest): Promise<CreateOrganizationResponse> =>
     post<CreateOrganizationResponse>('/organizations', body),
+  update: (id: string, body: UpdateOrganizationRequest): Promise<UpdateOrganizationResponse> =>
+    patch<UpdateOrganizationResponse>(`/organizations/${encodeURIComponent(id)}`, body),
 };
 
 /* ── Catalog ────────────────────────────────────────────────────────────── */
@@ -482,7 +487,7 @@ export const catalogApi = {
   ): Promise<CatalogIdentityAccessResponse> =>
     get<CatalogIdentityAccessResponse>(`/catalog/${encodeURIComponent(slug)}/access`, {
       application_id: applicationId ?? ACCOUNT_IDENTITY_SCOPE,
-    }),
+    } satisfies CatalogIdentityAccessQuery),
 };
 
 /* ── Applications ───────────────────────────────────────────────────────── */

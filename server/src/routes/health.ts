@@ -58,6 +58,8 @@
  * unauthenticated endpoint should be able to trigger.
  */
 
+import { createRequire } from 'node:module';
+
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 
 import {
@@ -83,8 +85,17 @@ import {
   type FerrumAdminClient,
 } from '../ferrum-admin/index.js';
 
-/** Version `GET /api/health` reports to an admin. */
-export const NEXUS_VERSION = process.env.npm_package_version ?? '0.5.2';
+/**
+ * Version `GET /api/health` reports to an admin: `server/package.json`'s,
+ * read once at load, so release prep bumps it in one place (issue #679).
+ *
+ * The relative path holds from `src/routes/` under tsx and from
+ * `dist/routes/` in the build; the image copies `server/package.json` beside
+ * `server/dist`.
+ */
+export const NEXUS_VERSION: string = (
+  createRequire(import.meta.url)('../../package.json') as { version: string }
+).version;
 
 /** Services this route plugin needs. */
 export interface HealthRoutesOptions {

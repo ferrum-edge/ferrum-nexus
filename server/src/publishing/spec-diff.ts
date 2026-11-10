@@ -55,6 +55,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import {
   MAX_SPEC_RENDER_UNITS,
+  OPENAPI_OPERATION_METHODS,
   createOpenApiParameterKeyer,
   createOpenApiRefResolver,
   keyOpenApiParameters,
@@ -71,16 +72,7 @@ import {
 import { compactSpecKey, createKeyTextCharge, type KeyTextCharge } from './spec-keys.js';
 
 /** HTTP methods an OpenAPI Path Item Object may carry, lowercase as written. */
-const OPERATION_KEYS = [
-  'get',
-  'put',
-  'post',
-  'delete',
-  'options',
-  'head',
-  'patch',
-  'trace',
-] as const;
+const OPERATION_KEYS = OPENAPI_OPERATION_METHODS;
 
 /**
  * Operation Object members worth naming in a review, in the order they are

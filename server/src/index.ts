@@ -155,8 +155,8 @@ export interface NexusServices {
    */
   accessJobs: AccessGatewayWorker;
   /**
-   * Hourly purge of expired sessions and verification tokens; `tick()` runs one
-   * pass deterministically in tests.
+   * Hourly purge of expired sessions, verification tokens and gateway leases;
+   * `tick()` runs one pass deterministically in tests.
    */
   expirySweep: ExpirySweepWorker;
   notifications: NotificationsService;
@@ -900,9 +900,17 @@ export async function buildServer(
     { prefix: '/api/users' },
   );
 
-  await app.register(async (scope) => scope.register(organizationRoutes, { users, config, sso }), {
-    prefix: '/api/organizations',
-  });
+  await app.register(
+    async (scope) => {
+      // `global: false` so only the create and update routes carry a limit,
+      // bucketed per account (see `userOrIpKey`); the reads stay unlimited.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(organizationRoutes, { users, config, sso });
+    },
+    { prefix: '/api/organizations' },
+  );
 
   await app.register(
     async (scope) => {
@@ -968,7 +976,7 @@ export async function buildServer(
   await app.register(
     async (scope) => {
       if (config.rateLimitEnabled) {
-        await scope.register(rateLimit, { global: false });
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }
       await scope.register(publishingRoutes, { publishing, usage, apiPlugins, apiViewers });
     },
@@ -1191,8 +1199,9 @@ function logBackendEgressOptOuts(app: FastifyInstance, config: NexusConfig): voi
   if (config.allowUnattestedEdgeEgress) {
     app.log.warn(
       { egress_profile: 'unattested-edge-opt-in' },
-      'BACKEND EGRESS NOT GUARANTEED: NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true admits backend ' +
-        'writes the gateway cannot attest as public-only; every data plane must enforce it',
+      'BACKEND EGRESS NOT GUARANTEED: NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true waives the ' +
+        'gateway egress attestation but still requires public_only_guaranteed, so it admits ' +
+        'no control-plane/data-plane pairing; set NEXUS_EXPECTED_DATA_PLANES for one',
     );
   }
 }

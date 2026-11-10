@@ -1,5 +1,6 @@
 /**
- * The expiry sweep — housekeeping for the two tables sign-in fills up.
+ * The expiry sweep — housekeeping for the two tables sign-in fills up, and for
+ * the lease table every gateway write fills up.
  *
  * Every sign-in writes a `sessions` row, and every registration, re-sent
  * verification and password-reset request writes an `email_verification_tokens`
@@ -10,7 +11,14 @@
  * session token hash and single-use link hash ever issued, long after either
  * could be used.
  *
- * This worker runs both deletes once at start and then every
+ * `edge_leases` has the same shape of problem (issue #675). A lease row is
+ * deleted on release, but one whose holder crashed, or whose release failed,
+ * stays until its key is acquired again, and the keys of deleted consumers,
+ * proxies and applications never are. An expired lease is one any waiter may
+ * already take over, and the fence (`lib/lease-fence.ts`) already treats a
+ * swept row like a taken-over one, so deleting it changes nothing else.
+ *
+ * This worker runs all three deletes once at start and then every
  * {@link EXPIRY_SWEEP_INTERVAL_MS}. Each is one indexed `DELETE … WHERE
  * expires_at <= ?`, idempotent, and safe to run from every instance at once, so
  * there is no claim or lease: two instances sweeping together just find less to
@@ -37,6 +45,8 @@ export interface ExpirySweepResult {
   sessions: number;
   /** Expired `email_verification_tokens` rows removed, spent or not. */
   verificationTokens: number;
+  /** Expired `edge_leases` rows removed. */
+  leases: number;
 }
 
 /** The background expiry sweeper. */
@@ -76,7 +86,7 @@ export function createExpirySweepWorker(deps: ExpirySweepWorkerDeps): ExpirySwee
     try {
       return await run();
     } catch (error) {
-      // One table failing must not stop the other from being swept.
+      // One table failing must not stop the others from being swept.
       log(
         { table, error: error instanceof Error ? error.message : String(error) },
         'Could not delete expired rows; the next sweep will retry',
@@ -92,6 +102,7 @@ export function createExpirySweepWorker(deps: ExpirySweepWorkerDeps): ExpirySwee
       verificationTokens: await sweep('email_verification_tokens', () =>
         store.verificationTokens.deleteExpired(cutoff),
       ),
+      leases: await sweep('edge_leases', () => store.leases.deleteExpired(cutoff)),
     };
   }
 

@@ -3481,18 +3481,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         let egress: BackendEgressAdmission | null = null;
         if (
           api.ferrum_proxy_id &&
-          [
-            'upstream_url',
-            'auth_plugin',
-            'requestable',
-            'rate_limit',
-            'cors',
-            'allowed_methods',
-            'timeouts',
-            'circuit_breaker',
-            'spec_enforcement',
-            'agents',
-          ].some((key) => Object.hasOwn(patch, key))
+          GATEWAY_SETTING_FIELDS.some((key) => Object.hasOwn(patch, key))
         ) {
           egress = await edge.assertBackendEgress();
         }
@@ -5835,10 +5824,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         );
       }
 
-      for (const grant of grants) {
+      // One notice per account, however many of its identities (the account
+      // and each application) held a grant on the API.
+      for (const userId of new Set(grants.map((grant) => grant.user_id))) {
         await notifications
           .notify(
-            grant.user_id,
+            userId,
             'access_revoked',
             `${api.name} was removed`,
             `The provider removed ${api.name} from the portal. Your access to it has ended.`,
@@ -6352,6 +6343,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // namespace's consumers, and restore, repair and recovery would take one
     // off again. Read under the caller's proxy lease, so it is the current row.
     if (!apiInNamespace(await store.apis.findById(apiId), namespace)) return;
+    // The acting account, read once, when the first enrollment needs it.
+    let actor: UserRecord | null | undefined;
     for (const grant of await store.grants.listActiveByApi(apiId)) {
       if (grant.approved_tools != null) continue;
       if ((await store.users.findById(grant.user_id))?.status !== 'active') continue;
@@ -6364,7 +6357,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const consumerId = consumer.ferrum_consumer_id;
       const groups = (await edge.consumers.get(consumerId))?.acl_groups ?? [];
       if (!groups.includes(grant.acl_group) || groups.includes(group)) continue;
-      const actor = await store.users.findById(subject);
+      actor ??= await store.users.findById(subject);
       await store.transaction(async (tx) => {
         await audit.forStore(tx).record(
           { id: subject, role: actor?.role ?? null },
@@ -7024,7 +7017,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return { grantees: [...grantees], apiOwned };
   }
 
-  /** Best-effort in-app notice to everyone holding an active grant on `apiId`. */
+  /**
+   * Best-effort in-app notice to every account holding an active grant on
+   * `apiId`: one per account, however many of its identities hold a grant. It
+   * runs after the change has committed, so a failed grant read is logged
+   * rather than turned into an error for a change that happened.
+   */
   async function notifyGrantees(
     apiId: Uuid,
     type: Parameters<NotificationsService['notify']>[1],
@@ -7032,9 +7030,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     body: string,
     link: string,
   ): Promise<void> {
-    const grants = await store.grants.listActiveByApi(apiId);
-    for (const grant of grants) {
-      await notifications.notify(grant.user_id, type, title, body, link).catch(() => undefined);
+    const userIds = await store.grants.listActiveByApi(apiId).then(
+      (grants) => new Set(grants.map((grant) => grant.user_id)),
+      (error: unknown) => {
+        deps.log?.(
+          { api_id: apiId, error: errorMessage(error) },
+          'the grantees of an API could not be read to notify them of a change',
+        );
+        return new Set<Uuid>();
+      },
+    );
+    for (const userId of userIds) {
+      await notifications.notify(userId, type, title, body, link).catch(() => undefined);
     }
   }
 }

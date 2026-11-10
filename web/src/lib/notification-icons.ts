@@ -9,7 +9,6 @@ export const NOTIFICATION_ICONS: Readonly<Record<NotificationType, IconName>> = 
   access_revoked: 'lock',
   message_received: 'message',
   credential_rotated: 'key',
-  api_published: 'catalog',
   api_spec_updated: 'spec',
   system: 'bell',
 };
