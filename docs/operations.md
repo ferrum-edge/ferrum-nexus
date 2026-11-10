@@ -2659,7 +2659,8 @@ grantee's ACL group afterwards, under that grantee's own consumer key.
 
 - **A crash is not a deadlock.** The lease stops being renewed and another
   instance takes it after expiry, at most 60 s later. `edge_leases` needs no
-  maintenance.
+  maintenance: the hourly expiry sweep deletes expired rows, such as those left
+  by a crashed holder for a key nothing acquires again.
 - **Under contention** a request that cannot get the lease in 30 s fails with
   `409 CONFLICT`: "Another portal instance is updating this gateway resource
   right now — please retry". Nothing was written. If this is routine, look for a

@@ -165,7 +165,7 @@ Why this shape:
 
 Six background pollers start after `app.ready()` and stop on `onClose`: the
 email outbox (§7), gateway teardown (§7.1), account-recovery revocation (§7.2),
-access gateway jobs (§7.3), the hourly session/token expiry sweep (§8.1), and the
+access gateway jobs (§7.3), the hourly session/token/lease expiry sweep (§8.1), and the
 periodic gateway-reference reconciliation
 (`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, see
 [`operations.md`](operations.md#13-retargeting-or-rebuilding-ferrum-edge)). All
@@ -1296,8 +1296,9 @@ See [`operations.md`](operations.md#access-gateway-jobs) for monitoring.
   `Vary: Cookie`.
 - A session whose account is no longer active is deleted on the next request,
   along with every other session of that user.
-- **Expired rows are purged** by `auth/expiry-sweep.ts`: expired sessions and
-  email tokens, once at startup and then hourly. Reads already ignore them.
+- **Expired rows are purged** by `auth/expiry-sweep.ts`: expired sessions,
+  email tokens and `edge_leases` rows, once at startup and then hourly. Reads
+  already ignore them.
 - **A single sign-on issues the same session.** `sso/service.ts` calls
   `auth.issueSession` inside the transaction that provisions, links or syncs
   the account, and the callback sets the cookie pair through the same helper

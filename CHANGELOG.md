@@ -114,6 +114,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are safe on several instances. Edge v0.9.17's hop budget and the published
   service-manifest contract are no longer described as pending, and the
   mass-email daily default is described as the storage bound it now is.
+- The hourly expiry sweep also deletes expired `edge_leases` rows (#675). A
+  lease whose holder crashed, or whose release failed, stayed until its key was
+  acquired again, so the leases of deleted consumers, proxies and applications
+  were never removed. `leases.deleteExpired` and the `expires_at` index existed
+  for this sweep, but nothing called it.
 
 ### Security
 

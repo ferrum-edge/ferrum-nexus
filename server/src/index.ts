@@ -155,8 +155,8 @@ export interface NexusServices {
    */
   accessJobs: AccessGatewayWorker;
   /**
-   * Hourly purge of expired sessions and verification tokens; `tick()` runs one
-   * pass deterministically in tests.
+   * Hourly purge of expired sessions, verification tokens and gateway leases;
+   * `tick()` runs one pass deterministically in tests.
    */
   expirySweep: ExpirySweepWorker;
   notifications: NotificationsService;
