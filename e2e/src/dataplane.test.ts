@@ -581,8 +581,6 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     assert.ok(reachedUpstream(undeclared));
   });
 
-  /* ── Revocation and rotation, at the gateway ──────────────────────────── */
-
   /* ── Agent tools, through the same consumer authorization ────────────── */
 
   interface ToolResult {
@@ -650,7 +648,8 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     };
   }
 
-  // The default at the immutable v0.9.15 pin; this client supports that version.
+  // The default at the pinned Edge release (`release/compatibility.env`); this
+  // client supports that version.
   const MCP_PROTOCOL_VERSION = '2025-11-25';
 
   async function rpc(
@@ -1787,6 +1786,8 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     assert.ok(audit.items.some((row) => row.action === 'api.update'));
   });
 
+  /* ── Revocation and rotation, at the gateway ──────────────────────────── */
+
   it('stops an approved client the moment access is revoked', async () => {
     const client = await newClient();
     const api = await publishApi(provider, {
@@ -1871,7 +1872,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     assert.equal(reachedUpstream(still), true);
   });
 
-  it('keeps the retiring credential working until the rotation is settled', async () => {
+  it('rotation: the replacement works and the retired credential stops working', async () => {
     const client = await newClient();
     const api = await publishApi(provider, {
       name: `E2E rotate ${RUN}`,
@@ -2030,7 +2031,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       return response.status === 200;
     });
 
-    // The only Admin API call in the suite, and it is the *destructive* step
+    // An Admin API call that is the *destructive* step
     // being simulated: an operator deleting one proxy and nothing else. The
     // consumer, its ACL group and its credential all stay.
     const stored = await portal<{ api: { ferrum_proxy_id: string | null } }>(
@@ -2184,8 +2185,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
 });
 
 /**
- * Delete one proxy through Edge's Admin API — the operator action the restore
- * case exists to recover from.
+ * Call Edge's Admin API as an operator.
  *
  * It mints its own admin token from the shared secret rather than borrowing
  * one from the portal, because the portal is the thing under test and must not
@@ -2234,6 +2234,10 @@ async function gatewayAdmin(
   });
 }
 
+/**
+ * Delete one proxy through Edge's Admin API — the operator action the restore
+ * case exists to recover from.
+ */
 async function deleteProxyOnGateway(proxyId: string): Promise<void> {
   const response = await gatewayAdmin('DELETE', `/proxies/${encodeURIComponent(proxyId)}`);
   if (response.status >= 400 && response.status !== 404) {
