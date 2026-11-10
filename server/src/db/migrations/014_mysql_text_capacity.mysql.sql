@@ -14,3 +14,7 @@ ALTER TABLE apis MODIFY COLUMN version LONGTEXT NOT NULL;
 ALTER TABLE apis MODIFY COLUMN description LONGTEXT DEFAULT NULL;
 ALTER TABLE api_spec_changes MODIFY COLUMN version LONGTEXT NOT NULL;
 ALTER TABLE api_spec_changes MODIFY COLUMN previous_version LONGTEXT DEFAULT NULL;
+-- The baseline omitted the CHECK the SQLite and PostgreSQL baselines declare on
+-- apis.circuit_breaker (issue #677); every other 0/1 column has one. Retained
+-- rows hold 0 or 1, since every write encodes the boolean.
+ALTER TABLE apis ADD CONSTRAINT ck_apis_circuit_breaker CHECK (circuit_breaker IN (0, 1));

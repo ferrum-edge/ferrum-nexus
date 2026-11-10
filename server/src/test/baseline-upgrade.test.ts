@@ -36,8 +36,9 @@
  * `012_access_request_grant` keeps every retained request a request for
  * access rather than for more tools on a grant; and `013_account_recovery_jobs`
  * only adds an empty table, so no retained account owes a recovery revocation.
- * `014_mysql_text_capacity` widens eight MySQL text columns in place and changes
- * nothing on the other backends; retained values read back unchanged.
+ * `014_mysql_text_capacity` widens eight MySQL text columns in place and adds
+ * MySQL's missing `apis.circuit_breaker` CHECK, and changes nothing on the
+ * other backends; retained values read back unchanged.
  * `015_access_gateway_jobs` (pending) adds an empty table, and the first start
  * after it queues jobs for what an earlier release may have stranded: the
  * fixture's revoked grant, whose group is still on its consumer, and its

@@ -1522,11 +1522,16 @@ audit 256 tool descriptions of 2,048 characters each. An OpenAPI document's
 `info.title`, `info.version` and `info.description` have no length limit of
 their own, and `info.version` and `info.description` become the API's version
 and description when the request names none. Strict-mode MySQL refused such writes, and non-strict mode truncated them.
-Retained values are unchanged. On SQLite, PostgreSQL and MongoDB the migration
+Retained values are unchanged. It also adds the
+`ck_apis_circuit_breaker CHECK (circuit_breaker IN (0, 1))` constraint that the
+SQLite and PostgreSQL baselines declare and the MySQL baseline omitted; retained
+rows already hold 0 or 1. On SQLite, PostgreSQL and MongoDB the migration
 is recorded and does nothing. `MODIFY COLUMN` rebuilds each table on MySQL, so
 plan for the copy time and disk space on a large `audit_logs` table. The runner
 skips a column that is already `LONGTEXT` on a replay, and refuses one whose
-type, nullability, default, generation or collation it does not expect.
+type, nullability, default, generation or collation it does not expect. It
+likewise skips the CHECK when it already exists, and refuses a constraint of that
+name with another condition or on another table, or one that is not enforced.
 
 `015_access_gateway_jobs` (not yet released) adds the `access_gateway_jobs`
 table (a collection on MongoDB, with the same two indexes): at most one row per
@@ -1576,7 +1581,8 @@ PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
   nonnegative default. It checks live column type, nullability, default,
   collation and generated-column metadata before replaying an ALTER. Added
   indexes are checked for columns/order, direction, uniqueness, prefixes,
-  visibility and type. A mismatched existing definition stops the upgrade
+  visibility and type, and an added `CHECK (<column> IN (0, 1))` for its table,
+  condition and enforcement. A mismatched existing definition stops the upgrade
   without recording that step. The exact 009 security-priority assignment is
   idempotent and may replay; arbitrary data changes are still refused.
   An advisory lock serializes metadata checks, DDL and ledger writes across
