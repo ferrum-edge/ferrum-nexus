@@ -643,7 +643,11 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
           const started = Date.now();
           await assert.rejects(
             () => runMysqlMigrations(checked, migrations, { lockWaitTimeoutSeconds: 1 }),
-            { code: 'ER_LOCK_WAIT_TIMEOUT' },
+            // The runner names the migration and keeps the driver error as `cause`.
+            (error: unknown) =>
+              error instanceof Error &&
+              error.message.startsWith(`Migration ${id} failed: `) &&
+              (error.cause as { code?: unknown } | undefined)?.code === 'ER_LOCK_WAIT_TIMEOUT',
           );
           assert.ok(attempted, `${id} reached its blocked ALTER`);
           assert.ok(Date.now() - started < 15_000, 'the metadata wait was bounded');
@@ -758,7 +762,7 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
             });
             await assert.rejects(
               () => runMysqlMigrations(faulty),
-              (error) => error === aborted,
+              (error: unknown) => error instanceof Error && error.cause === aborted,
             );
             assert.ok(fired, `${cleanup}: ${after ? 'lost acknowledgement' : 'before write'}`);
             const replacement = await sessionState(migrator);

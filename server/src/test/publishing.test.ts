@@ -5771,6 +5771,22 @@ describe('publishing rate limit', () => {
     assert.equal(errorCode(refused.body), 'RATE_LIMITED');
   });
 
+  it('limits usage reads per account, not per address (#680)', async () => {
+    // Both accounts present the same 127.0.0.1 to `app.inject`, so an
+    // IP-keyed limiter would refuse `second` once `revisionDiffUser` is spent.
+    const url = '/api/apis/00000000-0000-4000-8000-000000000000/usage';
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await harness.authed(revisionDiffUser, { method: 'GET', url });
+      assert.equal(response.statusCode, 404, response.body);
+    }
+    const refused = await harness.authed(revisionDiffUser, { method: 'GET', url });
+    assert.equal(refused.statusCode, 429, refused.body);
+    assert.equal(errorCode(refused.body), 'RATE_LIMITED');
+
+    const other = await harness.authed(second, { method: 'GET', url });
+    assert.equal(other.statusCode, 404, other.body);
+  });
+
   it('leaves the reads alone', async () => {
     // The provider's own list is cheap and the SPA polls it, so it remains
     // unlimited. Expensive revision diffs are the deliberate read-only exception.

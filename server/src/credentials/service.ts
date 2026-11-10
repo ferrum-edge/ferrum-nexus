@@ -2286,6 +2286,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * Whether a reconcile of `consumerId`'s `basicauth`, or a whole-type
    * `basicauth` revoke on it, was recorded after `since` — either of which
    * emptied the type on the gateway and took any older orphan with it.
+   * Both reads filter on `credential_type`: a whole-type `keyauth` or `jwt`
+   * revoke on the same consumer removed no `basicauth` entry.
    *
    * Each is one filtered, newest-first read of a single row.
    */
@@ -2303,7 +2305,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       {
         action: AuditAction.CREDENTIAL_REVOKE,
         from: since,
-        details: { consumer_id: consumerId, scope: 'whole-type' },
+        details: { consumer_id: consumerId, credential_type: 'basicauth', scope: 'whole-type' },
       },
       { limit: 1, offset: 0 },
     );

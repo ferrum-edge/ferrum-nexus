@@ -11,7 +11,7 @@ import { attestedControlPlanePolicy } from './edge-egress-attestation-fixtures.j
 import { publicEgressPolicy } from './mock-ferrum-edge.js';
 import type { DataPlaneEgressAttestation } from '../ferrum-admin/egress-policy.js';
 import type { NexusError } from '../lib/errors.js';
-import { OPAQUE_ERROR } from '../routes/health.js';
+import { NEXUS_VERSION, OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 const HEALTHCHECK_TIMEOUT = /HEALTHCHECK[^\n]*--timeout=(\d+)s/;
@@ -154,7 +154,12 @@ describe('health endpoints', () => {
     const response = await harness.authed(admin, { method: 'GET', url: '/api/health' });
     assert.equal(response.statusCode, 200);
     const body = response.json<AppHealth>();
-    assert.ok(typeof body.version === 'string' && body.version.length > 0);
+    // The version is `server/package.json`'s, not a literal to bump by hand (#679).
+    const manifest = JSON.parse(
+      await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
+    assert.equal(NEXUS_VERSION, manifest.version);
+    assert.equal(body.version, manifest.version);
     assert.ok(body.uptime_seconds !== null && body.uptime_seconds >= 0);
     assert.equal(body.database.driver, 'sqlite');
     assert.equal(body.edge.namespace, 'nexus');

@@ -155,8 +155,8 @@ export interface NexusServices {
    */
   accessJobs: AccessGatewayWorker;
   /**
-   * Hourly purge of expired sessions and verification tokens; `tick()` runs one
-   * pass deterministically in tests.
+   * Hourly purge of expired sessions, verification tokens and gateway leases;
+   * `tick()` runs one pass deterministically in tests.
    */
   expirySweep: ExpirySweepWorker;
   notifications: NotificationsService;
@@ -968,7 +968,7 @@ export async function buildServer(
   await app.register(
     async (scope) => {
       if (config.rateLimitEnabled) {
-        await scope.register(rateLimit, { global: false });
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }
       await scope.register(publishingRoutes, { publishing, usage, apiPlugins, apiViewers });
     },

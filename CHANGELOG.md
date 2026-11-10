@@ -114,6 +114,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   are safe on several instances. Edge v0.9.17's hop budget and the published
   service-manifest contract are no longer described as pending, and the
   mass-email daily default is described as the storage bound it now is.
+- The hourly expiry sweep also deletes expired `edge_leases` rows (#675). A
+  lease whose holder crashed, or whose release failed, stayed until its key was
+  acquired again, so the leases of deleted consumers, proxies and applications
+  were never removed. `leases.deleteExpired` and the `expires_at` index existed
+  for this sweep, but nothing called it.
+- A failed migration names itself, as the upgrade runbook says it does
+  (#678). The error now reads `Migration <id> failed: <driver error>`, with
+  the driver error kept as its `cause`; before, SQLite, PostgreSQL and
+  MongoDB printed only the bare driver error, so the operator had to work out
+  which migration ran it.
+- `GET /api/health` reports the version in `server/package.json` (#679). It
+  read `npm_package_version`, which the image's `node server/dist/index.js`
+  never sets, and otherwise a literal that each release had to bump by hand.
+- `GET /api/apis/:id/usage` is rate limited per account, like every other
+  route behind a session (#680). It was keyed by client IP, so everyone
+  behind one egress address shared 30 usage loads a minute, while one account
+  could multiply its allowance by changing address. The `/api/apis` scope now
+  keys its limiter per account too.
+- The audit-log `details` filter on SQLite, PostgreSQL and MySQL matches its
+  key and value literally (#681). It was a `LIKE` pattern, so `_` and `%` in a
+  key or value (every caller's keys contain `_`) were wildcards, and on MySQL a
+  value whose JSON holds a backslash did not match itself. It is now a literal
+  substring test, as the search filters already are (#595).
 
 ### Security
 
@@ -180,6 +203,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   proof, link and sessions unchanged. A sign-in or reset that waits out
   one of these leases answers `409 CONFLICT` in its own words. Super-admin
   exceptions are unchanged.
+
+- The one-time legacy `basicauth` scan no longer treats a whole-type
+  `keyauth` or `jwt` revoke as having cleared `basicauth`
+  (GHSA-jhjw-5g7j-m528). It asked only whether the consumer had a
+  `scope: 'whole-type'` `credential.revoke` after the historical append, of
+  any credential type, and then skipped the `retiring` placeholder for an
+  entry that may still be on the gateway with no row, leaving a later
+  positional revoke free to delete a different password. The check now
+  requires `credential_type: 'basicauth'`, as its reconcile check already did.
 
 ### Added
 
