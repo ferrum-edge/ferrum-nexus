@@ -104,6 +104,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   write. The pre-check used to answer `409` ("disabled") for a missing
   application and skipped the owner check, leaving both to the re-check after
   the consumer write. A disabled application still answers `409` (#661).
+- Documentation corrections. Only the god-mode `revoke-grant`, `delete-api` and
+  `disable-user` operations take a `reason`; a broadcast records its subject
+  there instead. The admin route summary lists `PUT /api/admin/sso` and an SMTP
+  test to another address among the `super_admin`-only routes. The usage
+  metrics cache is one entry per Nexus process shared across proxies, not one
+  per proxy. `GET /api/auth/sso` is listed among the public reads, and the
+  access-gateway worker among the background workers that stop on shutdown and
+  are safe on several instances. Edge v0.9.17's hop budget and the published
+  service-manifest contract are no longer described as pending, and the
+  mass-email daily default is described as the storage bound it now is.
 
 ### Security
 

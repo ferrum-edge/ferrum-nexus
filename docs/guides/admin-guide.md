@@ -459,9 +459,8 @@ refused with a message naming the limit and the setting:
   reaches fewer people. The size allows for the longest recipient name and
   address, so a template that repeats them counts every repetition;
 - at most `NEXUS_MAX_MASS_EMAILS_PER_DAY` campaigns per admin in a rolling
-  24 hours (5 by default, until password-reset and verification mail get their
-  own place in the queue). Retrying a campaign with the same ID does not count
-  again.
+  24 hours (5 by default; it bounds how much campaign mail one administrator can
+  queue). Retrying a campaign with the same ID does not count again.
 
 An audience that matches nobody is refused and does not count as a campaign.
 
@@ -535,7 +534,8 @@ The log does **not** contain:
 ## God mode (super admin)
 
 **Administration → God mode** holds four emergency operations. Each needs a
-written **Reason** and a typed confirmation.
+typed confirmation, and the three that act on someone else's resources need a
+written **Reason** (a broadcast records its subject instead).
 
 God mode adds no new capability. It lets you act on **someone else's**
 resources without owning them, and records why. Every action writes two audit

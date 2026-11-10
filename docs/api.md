@@ -1082,8 +1082,8 @@ _session_ — body **either** `ids` (≤ 500 ids) **or** `all: true`; neither is
 
 Registered under `/api/admin`; every route needs _admin_. These additionally
 need **_super_admin_**: the `smtp`, `captcha` and `gateway` sections of
-`PUT /settings`, `POST /gateway/reconcile`, `POST /gateway/repair` and the four
-`god/*` routes.
+`PUT /settings`, `PUT /sso`, `POST /gateway/reconcile`, `POST /gateway/repair`,
+an SMTP test to another address, and the four `god/*` routes.
 
 ### `POST /api/admin/credentials/reconcile`
 
@@ -1614,9 +1614,10 @@ curl -sS -b cookies.txt \
 
 ### God mode
 
-Four routes, all _super_admin_, all requiring a `reason` (1–2000 chars) that is
-written to a `god.*` audit row **in addition to** the audit row of the
-underlying operation.
+Four routes, all _super_admin_. `revoke-grant`, `delete-api` and `disable-user`
+require a `reason` (1–2000 chars) that is written to a `god.*` audit row **in
+addition to** the audit row of the underlying operation; `broadcast` takes no
+`reason` and records its subject in that field instead.
 
 #### `POST /api/admin/god/revoke-grant`
 
@@ -2259,8 +2260,9 @@ _provider_, owner or admin
 _provider_, owner or admin — a read-through of what Ferrum Edge reports for this
 API's proxy. Nexus stores no metrics history. Backed by Edge's `GET /metrics`
 (`ferrum_requests_total`, `ferrum_request_duration_ms`) and
-`GET /admin/metrics` (circuit breakers, unhealthy targets), each cached per
-proxy for 10 seconds. 30 requests per minute per IP.
+`GET /admin/metrics` (circuit breakers, unhealthy targets), each cached for 10
+seconds per Nexus process and shared across proxies. 30 requests per minute per
+IP.
 
 ```json
 {

@@ -108,7 +108,8 @@ CIDR allowlist.
 Gateway-origin detection runs at write time only: re-pointing DNS after a
 publish, or moving the gateway, is invisible to Nexus. That gap is covered at
 request time by Ferrum Edge's own egress screening (`FERRUM_BACKEND_ALLOW_IPS`)
-and the request-time hop/`Via` loop guard filed as a ferrum-edge issue.
+and, from Edge v0.9.17, its `X-Ferrum-Hops` hop budget (`FERRUM_MAX_PROXY_HOPS`;
+see [Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917)).
 
 **Gateway egress admission.** Since `v0.4.0` the public-upstream profile
 requires a fresh, authenticated, namespace-matched `GET /backend-egress-policy`
@@ -2386,5 +2387,5 @@ upstream hosts and free-form descriptions are omitted and reference values are m
 file-intake or TLS reader dependency. It cannot apply/publish, fetch URLs, read declared
 files, access TLS secrets or import diagnostics. Reading the fixed vendored schema at
 startup is the only schema file access. Alloy remains a producer, never a trace store.
-This implements only the Nexus consumer portion of Alloy #27; Anvil diagnostic import
-and contract freeze remain cross-repository work.
+This implements the Nexus consumer of the shared contract, which is published
+(`contract_status: "implemented"`); see [service-manifest-preview.md](service-manifest-preview.md).

@@ -183,5 +183,6 @@ It does not prove delivery to an external provider or TLS deployment configurati
 
 The SMTP timeout baseline remains 10 seconds connection, 10 seconds greeting and 30 seconds
 socket inactivity. These phase/inactivity limits are not a whole-attempt deadline.
-[Issue #158](https://github.com/ferrum-edge/ferrum-nexus/issues/158) remains separate and open;
-this dependency update does not repair or claim to repair that deadline defect.
+[Issue #158](https://github.com/ferrum-edge/ferrum-nexus/issues/158) was separate (fixed and
+closed on 2026-09-08); this dependency update does not repair or claim to repair that deadline
+defect.
