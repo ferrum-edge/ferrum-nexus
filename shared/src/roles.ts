@@ -30,9 +30,6 @@ export type RegistrableRole = (typeof REGISTRABLE_ROLES)[number];
 /** Roles that can only be conferred by an existing admin/super_admin. */
 export const ELEVATED_ROLES = ['admin', 'super_admin'] as const satisfies readonly Role[];
 
-/** A role that requires promotion by an existing admin. */
-export type ElevatedRole = (typeof ELEVATED_ROLES)[number];
-
 /** Human-readable labels for each role, for UI rendering. */
 export const ROLE_LABELS: Readonly<Record<Role, string>> = {
   client: 'Client',
@@ -40,11 +37,6 @@ export const ROLE_LABELS: Readonly<Record<Role, string>> = {
   admin: 'Admin',
   super_admin: 'Super Admin',
 };
-
-/** Runtime type guard: is `value` one of the four known roles? */
-export function isRole(value: unknown): value is Role {
-  return typeof value === 'string' && (ROLE_ORDER as readonly string[]).includes(value);
-}
 
 /** Runtime type guard: is `value` a role a visitor may register with? */
 export function isRegistrableRole(value: unknown): value is RegistrableRole {

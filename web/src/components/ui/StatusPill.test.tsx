@@ -6,7 +6,6 @@ import {
   RoleBadge,
   StatusPill,
   VisibilityBadge,
-  statusLabel,
   visibilityLabel,
   type StatusValue,
 } from './StatusPill';
@@ -36,7 +35,11 @@ describe('StatusPill', () => {
       ['granted', 'Granted'],
       ['owner', 'You own this'],
     ];
-    for (const [status, label] of cases) expect(statusLabel(status)).toBe(label);
+    for (const [status, label] of cases) {
+      const { container, unmount } = render(<StatusPill status={status} />);
+      expect(container.textContent).toBe(label);
+      unmount();
+    }
   });
 
   it('renders success tone styling for an active status', () => {

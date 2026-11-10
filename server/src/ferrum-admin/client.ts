@@ -35,7 +35,7 @@
  * of a create would `409`.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { TextDecoder } from 'node:util';

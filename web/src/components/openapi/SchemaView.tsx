@@ -209,19 +209,11 @@ function requiredNames(values: unknown[]): Set<string> {
  * `$ref`s are resolved against the document root; a pointer already expanded on
  * the current branch renders as a "circular" marker rather than recursing, so
  * self-referential schemas (`Node.children: Node[]`) terminate.
- */
-export function SchemaView(props: SchemaViewProps): ReactElement {
-  return renderSchema(props);
-}
-
-/**
- * The same renderer as a plain function.
  *
- * {@link OpenApiView} calls this rather than mounting {@link SchemaView} as a
- * component: the budget is spent while elements are *constructed*, so a caller
- * that owns a budget has to construct every schema inside its own render body
- * instead of handing the same budget object to children React may invoke on its
- * own schedule.
+ * It is a plain function, not a component: the budget is spent while elements
+ * are *constructed*, so a caller that owns a budget ({@link OpenApiView}) has to
+ * construct every schema inside its own render body instead of handing the same
+ * budget object to children React may invoke on its own schedule.
  */
 export function renderSchema({
   schema,

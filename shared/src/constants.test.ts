@@ -18,8 +18,6 @@ import {
   apiIdFromAclGroup,
   clampPageSize,
   consumerUsernameForUser,
-  isAuthPluginType,
-  isEmailTemplateKey,
   listenPathFor,
   normalizeBrandingHexColor,
   testConsumerUsername,
@@ -72,12 +70,6 @@ describe('auth plugins', () => {
     }
   });
 
-  it('guards plugin types at runtime', () => {
-    assert.equal(isAuthPluginType('key_auth'), true);
-    assert.equal(isAuthPluginType('oauth2'), false);
-    assert.equal(isAuthPluginType(undefined), false);
-  });
-
   it('names the access control plugin used for requestable APIs', () => {
     assert.equal(ACCESS_CONTROL_PLUGIN, 'access_control');
   });
@@ -98,12 +90,10 @@ describe('email template keys', () => {
     ]);
   });
 
-  it('labels every key and guards them at runtime', () => {
+  it('labels every key', () => {
     for (const key of EMAIL_TEMPLATE_KEYS) {
       assert.equal(typeof EMAIL_TEMPLATE_LABELS[key], 'string');
-      assert.equal(isEmailTemplateKey(key), true);
     }
-    assert.equal(isEmailTemplateKey('welcome'), false);
   });
 });
 

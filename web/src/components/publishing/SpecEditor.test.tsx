@@ -3,7 +3,7 @@ import { useState, type ReactElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_SPEC_BYTES, MAX_SPEC_OPERATIONS } from '@ferrum-nexus/shared';
 import { RAW_SPEC } from '../../../test/fixtures';
-import { SpecEditor, isSpecValid, specProblem } from './SpecEditor';
+import { SpecEditor, specProblem } from './SpecEditor';
 
 const OPENAPI_SPECIFICATION = /OpenAPI specification/;
 
@@ -79,9 +79,9 @@ describe('OpenAPI specification editor', () => {
     render(<Editor initialValue={yaml} />);
     expect(screen.getByText('YAML API · 0 operations')).toBeInTheDocument();
     expect(screen.getByLabelText(OPENAPI_SPECIFICATION)).toHaveValue(yaml);
-    expect(isSpecValid(yaml)).toBe(true);
-    expect(isSpecValid('plain text')).toBe(false);
-    expect(isSpecValid('')).toBe(false);
+    expect(specProblem(yaml)).toBeNull();
+    expect(specProblem('plain text')).not.toBeNull();
+    expect(specProblem('')).not.toBeNull();
   });
 
   it('opens the file picker and permits uploading the same file again', async () => {
@@ -133,14 +133,14 @@ describe('OpenAPI specification editor', () => {
       paths: {},
     });
     expect(multibyte.length).toBeLessThan(MAX_SPEC_BYTES);
-    expect(isSpecValid(multibyte)).toBe(false);
     expect(specProblem(multibyte)).toBe('The OpenAPI document is larger than the 2.00 MB limit.');
 
     const atLimit = specOfBytes(MAX_SPEC_BYTES);
     expect(new TextEncoder().encode(atLimit).length).toBe(MAX_SPEC_BYTES);
-    expect(isSpecValid(atLimit)).toBe(true);
     expect(specProblem(atLimit)).toBeNull();
-    expect(isSpecValid(specOfBytes(MAX_SPEC_BYTES + 1))).toBe(false);
+    expect(specProblem(specOfBytes(MAX_SPEC_BYTES + 1))).toBe(
+      'The OpenAPI document is larger than the 2.00 MB limit.',
+    );
   });
 
   it('refuses a YAML document with more aliases than the server accepts', () => {
@@ -249,8 +249,8 @@ describe('OpenAPI specification editor', () => {
   it('accepts the operation limit and refuses a document one operation over it', () => {
     const accepted = operationSpec(MAX_SPEC_OPERATIONS);
     const rejected = operationSpec(MAX_SPEC_OPERATIONS + 1);
-    expect(isSpecValid(accepted)).toBe(true);
-    expect(isSpecValid(rejected)).toBe(false);
+    expect(specProblem(accepted)).toBeNull();
+    expect(specProblem(rejected)).not.toBeNull();
     const { rerender } = render(<SpecEditor value={rejected} onChange={() => undefined} />);
     expect(screen.getByText('Too many operations')).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('Split it into several APIs.');

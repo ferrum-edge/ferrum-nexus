@@ -164,25 +164,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # One lane per pooled backend, each with its own 15-minute budget; the
-  # combined suite outgrew a single job. The SQLite smoke suite is skipped
-  # here (NEXUS_TEST_SKIP_SQLITE): every `checks` leg already runs it through
-  # `npm test`. The other files still run their SQLite cases.
-  store-contract-lanes:
-    name: store-contracts (${{ matrix.backend }})
+  # One job per pooled backend, each with its own 15-minute budget and only
+  # its own service container; the combined suite outgrew a single job. The
+  # SQLite smoke suite is skipped here (NEXUS_TEST_SKIP_SQLITE): every `checks`
+  # leg already runs it through `npm test`. The other files still run their
+  # SQLite cases.
+  store-contracts-postgres:
+    name: store-contracts (postgres)
     runs-on: ubuntu-26.04
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: postgres
-            postgres_url: postgres://postgres:nexus_test@127.0.0.1:5432/postgres
-          - backend: mysql
-            mysql_url: mysql://root:nexus_test@127.0.0.1:3306/mysql
-          - backend: mongodb
-            mongo_url: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
-            mongo_standalone_url: mongodb://127.0.0.1:27018/?directConnection=true
     services:
       postgres:
         image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
@@ -195,6 +185,31 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace shared
+      # Also the released-baseline upgrade fixture (issue #286) on every
+      # backend; `npm test` in `checks` covers only its SQLite lane.
+      - name: Run the postgres and SQLite store contracts
+        working-directory: server
+        env:
+          NEXUS_TEST_POSTGRES_URL: postgres://postgres:nexus_test@127.0.0.1:5432/postgres
+          NEXUS_TEST_SKIP_SQLITE: 'true'
+        run: >-
+          node --import tsx --test src/test/smoke.test.ts
+          src/test/mysql-migration-recovery.test.ts src/test/mysql-user-transition.test.ts
+          src/test/baseline-upgrade.test.ts
+
+  store-contracts-mysql:
+    name: store-contracts (mysql)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    services:
       mysql:
         image: mysql:8.4@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
         env:
@@ -206,6 +221,31 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace shared
+      # Also the released-baseline upgrade fixture (issue #286) on every
+      # backend; `npm test` in `checks` covers only its SQLite lane.
+      - name: Run the mysql and SQLite store contracts
+        working-directory: server
+        env:
+          NEXUS_TEST_MYSQL_URL: mysql://root:nexus_test@127.0.0.1:3306/mysql
+          NEXUS_TEST_SKIP_SQLITE: 'true'
+        run: >-
+          node --import tsx --test src/test/smoke.test.ts
+          src/test/mysql-migration-recovery.test.ts src/test/mysql-user-transition.test.ts
+          src/test/baseline-upgrade.test.ts
+
+  store-contracts-mongodb:
+    name: store-contracts (mongodb)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    services:
       # The oldest server the mongodb 7 driver accepts (wire version 9), so
       # the standalone refusal check also proves the floor still connects.
       # 4.4 images ship the legacy `mongo` shell, not `mongosh`.
@@ -225,7 +265,6 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - name: Start MongoDB replica set
-        if: ${{ matrix.backend == 'mongodb' }}
         # GLIBC_TUNABLES=glibc.pthread.rseq=1 lets mongo:9 start on the
         # ubuntu-26.04 runners (ferrum-edge/ferrum-edge#6589). Their kernel
         # reports 7.0.0, inside MongoDB's 6.19-7.0.13 tcmalloc/rseq startup gate
@@ -278,13 +317,11 @@ jobs:
       - run: npm run build --workspace shared
       # Also the released-baseline upgrade fixture (issue #286) on every
       # backend; `npm test` in `checks` covers only its SQLite lane.
-      - name: Run the ${{ matrix.backend }} and SQLite store contracts
+      - name: Run the mongodb and SQLite store contracts
         working-directory: server
         env:
-          NEXUS_TEST_POSTGRES_URL: ${{ matrix.postgres_url }}
-          NEXUS_TEST_MYSQL_URL: ${{ matrix.mysql_url }}
-          NEXUS_TEST_MONGO_URL: ${{ matrix.mongo_url }}
-          NEXUS_TEST_MONGO_STANDALONE_URL: ${{ matrix.mongo_standalone_url }}
+          NEXUS_TEST_MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+          NEXUS_TEST_MONGO_STANDALONE_URL: mongodb://127.0.0.1:27018/?directConnection=true
           NEXUS_TEST_SKIP_SQLITE: 'true'
         run: >-
           node --import tsx --test src/test/smoke.test.ts
@@ -293,33 +330,75 @@ jobs:
 
   # The required check: every backend lane must pass.
   store-contracts:
-    needs: store-contract-lanes
+    needs: [store-contracts-postgres, store-contracts-mysql, store-contracts-mongodb]
     if: ${{ always() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Require every store-contract lane
         env:
-          LANES_RESULT: ${{ needs.store-contract-lanes.result }}
+          LANES_RESULTS: >-
+            ${{ needs.store-contracts-postgres.result }}
+            ${{ needs.store-contracts-mysql.result }}
+            ${{ needs.store-contracts-mongodb.result }}
         run: |
-          if [ "$LANES_RESULT" != 'success' ]; then
-            echo "::error::Every store-contract lane must pass (result: ${LANES_RESULT:-missing})."
+          for result in $LANES_RESULTS; do
+            if [ "$result" != 'success' ]; then
+              echo "::error::Every store-contract lane must pass (results: ${LANES_RESULTS})."
+              exit 1
+            fi
+          done
+
+  # A required check in the `main` ruleset: the production image builds and
+  # carries the expected schemas. `acceptance` builds the same image, so the
+  # schema check runs there and this job only reports its outcome; the image
+  # is built once per run.
+  docker:
+    needs: acceptance
+    if: ${{ always() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the production image check from acceptance
+        env:
+          IMAGE_VERIFIED: ${{ needs.acceptance.outputs.image-verified }}
+        run: |
+          if [ "$IMAGE_VERIFIED" != 'true' ]; then
+            echo "::error::The production image did not build, or failed its schema check, in acceptance."
             exit 1
           fi
 
-  docker:
+  # The release gate: the **packaged** portal against a real, pinned Ferrum
+  # Edge release, asserting through the gateway's data-plane listener rather
+  # than through its Admin API. Everything else in CI tests Nexus against a
+  # mock gateway, which can only ever confirm that the portal sent the
+  # configuration it meant to send (issue #285).
+  #
+  # A required check in the `main` ruleset: a change that makes a real gateway
+  # refuse a request the portal says it approved is exactly what this exists to
+  # stop shipping. The Edge release is pinned in release/compatibility.env,
+  # which run.sh copies into the e2e/.env a fresh checkout does not have.
+  acceptance:
     runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    outputs:
+      image-verified: ${{ steps.image-verified.outputs.verified }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build image
-        run: docker build -t ferrum-nexus:ci -f docker/Dockerfile .
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - name: Build the production image
+        run: docker build -t ferrum-nexus:e2e -f docker/Dockerfile .
       # The released migrations must lead, unchanged and in order; a pending
       # one after them is allowed, since this workflow runs from main for every
       # pull request and so cannot list a migration before it merges. The
       # per-dialect id list is pinned exactly by initial-schema.test.ts.
       - name: Verify SQLite and bundled schemas in the production image
         run: >-
-          docker run --rm ferrum-nexus:ci node --input-type=module -e
+          docker run --rm ferrum-nexus:e2e node --input-type=module -e
           "import assert from 'node:assert/strict';
           import { createHash } from 'node:crypto';
           import Database from 'better-sqlite3';
@@ -356,31 +435,12 @@ jobs:
           assert.deepEqual(db.prepare('SELECT name FROM sqlite_master WHERE type = ? AND name LIKE ? ORDER BY name').all('index', 'ix_messages_thread%'), [{ name: 'ix_messages_thread_latest' }]);
           assert.deepEqual(db.prepare('SELECT 1 AS ok').get(), { ok: 1 });
           db.close();"
-
-  # The release gate: the **packaged** portal against a real, pinned Ferrum
-  # Edge release, asserting through the gateway's data-plane listener rather
-  # than through its Admin API. Everything else in CI tests Nexus against a
-  # mock gateway, which can only ever confirm that the portal sent the
-  # configuration it meant to send (issue #285).
-  #
-  # A required check in the `main` ruleset: a change that makes a real gateway
-  # refuse a request the portal says it approved is exactly what this exists to
-  # stop shipping. The Edge release is pinned in release/compatibility.env,
-  # which run.sh copies into the e2e/.env a fresh checkout does not have.
-  acceptance:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: e2e/package-lock.json
+      # Read by the `docker` check.
+      - name: Record the production image check
+        id: image-verified
+        run: echo 'verified=true' >> "$GITHUB_OUTPUT"
       - name: Test the acceptance runner
         run: bash e2e/test-run.sh
-      - name: Build the production image
-        run: docker build -t ferrum-nexus:e2e -f docker/Dockerfile .
       - name: Install the suite's dependencies
         working-directory: e2e
         run: npm ci --no-audit --no-fund

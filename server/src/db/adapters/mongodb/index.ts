@@ -159,7 +159,6 @@ import type {
   AccountRecoveryJobRepo,
   AccessGatewayJobRecord,
   AccessGatewayJobRepo,
-  GatewayTeardownJobFilter,
   GatewayTeardownJobRecord,
   GatewayTeardownJobRepo,
   GrantFilter,

@@ -36,6 +36,7 @@ import {
   mockCorsPreflight,
   mockWebsocketAllowed,
   publicEgressPolicy,
+  type RecordedRequest,
 } from './mock-ferrum-edge.js';
 
 const TRAILING_BRACE = /}\s*$/;
@@ -85,19 +86,23 @@ function validationIssues(body: string): { path: string; message: string }[] {
  * what the compensation has to cover. `skip` lets that many transactions
  * through first — a spec revision that rewrites a live proxy commits its
  * `api.spec_revision_start` row in one of its own before the gateway moves.
+ *
+ * Returns an assertion that the injected failure actually fired, so a request
+ * refused before it reached the store cannot pass for a rolled-back one.
  */
 function failNextTransaction(
   harness: TestApp,
   message: string,
   restorations: (() => void)[],
   skip = 0,
-): void {
+): () => void {
   const real = harness.store.transaction.bind(harness.store);
   const restore = (): void => {
     harness.store.transaction = real;
   };
   restorations.push(restore);
   let remaining = skip;
+  let triggered = false;
   harness.store.transaction = async <T>(
     fn: (tx: NexusStore) => Promise<T>,
     options?: TransactionOptions,
@@ -106,9 +111,29 @@ function failNextTransaction(
       remaining -= 1;
       return real(fn, options);
     }
+    triggered = true;
     restore();
     throw new Error(message);
   };
+  return () => {
+    assert.ok(triggered, 'the injected failure reached the intended transaction');
+  };
+}
+
+/**
+ * Gateway writes recorded since `offset`, an earlier `harness.edge.requests`
+ * length: what a rollback test checks happened *before* the store failed, so
+ * that the compensation it asserts had something live to undo.
+ */
+function edgeWritesSince(harness: TestApp, offset: number): RecordedRequest[] {
+  return harness.edge.requests.slice(offset).filter((request) => request.method !== 'GET');
+}
+
+/** Whether a gateway write since `offset` carried `text` anywhere in its body. */
+function edgeWroteSince(harness: TestApp, offset: number, text: string): boolean {
+  return edgeWritesSince(harness, offset).some((request) =>
+    JSON.stringify(request.body ?? null).includes(text),
+  );
 }
 
 /** Own a one-shot catalog fault even when an earlier refusal makes it unreachable. */
@@ -794,7 +819,12 @@ describe('publishing', () => {
     it('leaves no association behind when the publish is rolled back', async () => {
       // The association write is the last gateway call of a publish, so a store
       // failure after it is the case that would strand one.
-      failNextTransaction(harness, 'database is gone', restorations);
+      const before = harness.edge.requests.length;
+      const assertTransactionFailed = failNextTransaction(
+        harness,
+        'database is gone',
+        restorations,
+      );
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -804,7 +834,17 @@ describe('publishing', () => {
           cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
         }),
       });
-      assert.notEqual(response.statusCode, 201);
+      assert.equal(response.statusCode, 500, response.body);
+      assertTransactionFailed();
+      const writes = edgeWritesSince(harness, before);
+      assert.ok(
+        writes.some((request) => request.method === 'POST' && request.path.includes('/proxies')),
+        'the proxy was live before the store failed',
+      );
+      assert.ok(
+        writes.some((request) => request.path.startsWith('/plugins/config')),
+        'its plugin configs were written before the store failed',
+      );
 
       assert.equal(harness.edge.proxyByName('nexus-assoc-rollback'), undefined);
       assert.equal(harness.edge.pluginConfigs.size, 0);
@@ -880,7 +920,12 @@ describe('publishing', () => {
     it('deletes the Edge objects when the Nexus rows cannot be written', async () => {
       // The rollback used to end before persistence began, so a store failure
       // here left a live proxy nothing in the portal knew about.
-      failNextTransaction(harness, 'database is gone', restorations);
+      const before = harness.edge.requests.length;
+      const assertTransactionFailed = failNextTransaction(
+        harness,
+        'database is gone',
+        restorations,
+      );
 
       const response = await harness.authed(provider, {
         method: 'POST',
@@ -890,7 +935,14 @@ describe('publishing', () => {
           rate_limit: { limit: 5, window_seconds: 60 },
         }),
       });
-      assert.notEqual(response.statusCode, 201);
+      assert.equal(response.statusCode, 500, response.body);
+      assertTransactionFailed();
+      assert.ok(
+        edgeWritesSince(harness, before).some(
+          (request) => request.method === 'POST' && request.path.includes('/proxies'),
+        ),
+        'the proxy was live before the store failed',
+      );
 
       assert.equal(
         harness.edge.proxyByName('nexus-orphan-guard'),
@@ -2749,13 +2801,24 @@ describe('publishing', () => {
       const api = published.json<PublishApiResponse>().api;
       const proxyId = String(api.ferrum_proxy_id);
 
-      failNextTransaction(harness, 'database is gone', restorations, 1);
+      const before = harness.edge.requests.length;
+      const assertTransactionFailed = failNextTransaction(
+        harness,
+        'database is gone',
+        restorations,
+        1,
+      );
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${api.id}/spec`,
         payload: { spec: specWithServer('https://v2.example.com:8443', '3.0.0') },
       });
-      assert.notEqual(response.statusCode, 200);
+      assert.equal(response.statusCode, 500, response.body);
+      assertTransactionFailed();
+      assert.ok(
+        edgeWroteSince(harness, before, 'v2.example.com'),
+        'the backend was moved before the store failed',
+      );
 
       assert.equal(
         harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host,
@@ -4295,7 +4358,13 @@ describe('publishing', () => {
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
 
-      failNextTransaction(harness, 'store offline', restorations, 1);
+      const before = harness.edge.requests.length;
+      const assertTransactionFailed = failNextTransaction(
+        harness,
+        'store offline',
+        restorations,
+        1,
+      );
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,
@@ -4309,6 +4378,11 @@ describe('publishing', () => {
         },
       });
       assert.equal(response.statusCode, 500, response.body);
+      assertTransactionFailed();
+      assert.ok(
+        edgeWroteSince(harness, before, 'elsewhere.example.com'),
+        'the new document reached the gateway before the store failed',
+      );
 
       // The gateway moved first, so the compensation has to put the document
       // back: otherwise the proxy would enforce — and forward to — a revision
@@ -4347,13 +4421,21 @@ describe('publishing', () => {
     });
 
     it('rolls the spec back when a later publish step fails', async () => {
-      failNextTransaction(harness, 'store offline', restorations);
+      const before = harness.edge.requests.length;
+      const assertTransactionFailed = failNextTransaction(harness, 'store offline', restorations);
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
         payload: publishPayload({ slug: 'enf-publish-undo', spec_enforcement: 'routes' }),
       });
       assert.equal(response.statusCode, 500, response.body);
+      assertTransactionFailed();
+      assert.ok(
+        edgeWritesSince(harness, before).some(
+          (request) => request.method === 'POST' && request.path.includes('/api-specs'),
+        ),
+        'the spec was imported before the store failed',
+      );
 
       // Deleting the proxy cascades the spec and the validator it generated, so
       // a failed `routes` publish leaves nothing at all behind.
@@ -5548,13 +5630,24 @@ describe('spec upstream following', () => {
         'https://billing.example.com:8443/v2',
       );
 
-      failNextTransaction(harness, 'database is gone', restorations, 1);
+      const before = harness.edge.requests.length;
+      const assertTransactionFailed = failNextTransaction(
+        harness,
+        'database is gone',
+        restorations,
+        1,
+      );
       const failed = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,
         payload: { spec: specWithServer('https://billing.example.com:8443/v3', '2.0.0') },
       });
-      assert.notEqual(failed.statusCode, 200);
+      assert.equal(failed.statusCode, 500, failed.body);
+      assertTransactionFailed();
+      assert.ok(
+        edgeWroteSince(harness, before, '/v3'),
+        'the backend followed the new document before the store failed',
+      );
 
       assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/v2');
       assert.equal(

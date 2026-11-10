@@ -152,7 +152,6 @@ import type {
   AccessGatewayJobRepo,
   GatewayIdentityRecord,
   GatewayIdentityRepo,
-  GatewayTeardownJobFilter,
   GatewayTeardownJobRecord,
   GatewayTeardownJobRepo,
   GrantFilter,

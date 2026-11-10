@@ -2,8 +2,14 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_OPENAPI_REF_LENGTH } from '@ferrum-nexus/shared';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createRenderBudget, MAX_PAGE_NODES, SchemaView } from './SchemaView';
+import {
+  createRenderBudget,
+  MAX_PAGE_NODES,
+  renderSchema,
+  type SchemaViewProps,
+} from './SchemaView';
 import { OpenApiView } from './OpenApiView';
 import {
   MAX_DISPLAYED_DESCRIPTION_LENGTH,
@@ -11,6 +17,11 @@ import {
   TRUNCATED_TEXT_HINT,
   type SpecNode,
 } from './parse';
+
+/** Mounts {@link renderSchema} as a component, as a page section would. */
+function SchemaView(props: SchemaViewProps): ReactElement {
+  return renderSchema(props);
+}
 
 const DOWNLOAD_SPECIFICATION = /download the specification/;
 const CIRCULAR = /circular →/;
