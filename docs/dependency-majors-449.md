@@ -128,5 +128,5 @@ No local project tooling was run for this migration. Root and a fresh independen
 must review the combined candidate and integration delta, and every hosted gate must pass again.
 At that preparation stage, owner approval to change the released profile was pending;
 integration alone did not imply approval, authorize another owner request or close #449.
-The explicit approval and qualified prior head `059b428` now supersede that historical status;
-the documentation adoption head still requires its own hosted gates and root review.
+The explicit approval and qualified prior head `059b428` superseded that historical status.
+PR #521 merged on 2026-10-05 and shipped in `v0.4.0`; issue #449 closed the same day.
