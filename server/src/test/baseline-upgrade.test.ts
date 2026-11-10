@@ -87,6 +87,7 @@ import { buildTestApp } from './helpers.js';
 
 const VERIFY_OR_RESET_KEY = /^(verify:|reset:)/;
 const ROLLBACK_PRIORITY_CLAIMS = /rollback priority claims/;
+const ROLLBACK_CAPACITY_PROBE = /rollback capacity probe/;
 const HYPHENS = /-/g;
 
 const SECRET = 'baseline-upgrade-secret-0123456789abcdef';
@@ -871,7 +872,7 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
 
   // Public API identity: slug and gateway proxy still resolve to the same id.
   assert.equal((await store.apis.findBySlug('INVOICES'))?.id, ID.invoices);
-  assert.equal((await store.apis.findByProxyId('edge-proxy-invoices'))?.id, ID.invoices);
+  assert.equal((await store.apis.findById(ID.invoices))?.ferrum_proxy_id, 'edge-proxy-invoices');
   assert.deepEqual(
     [...(await store.apis.listIdsByOwner(ID.provider))].sort(),
     [ID.invoices, ID.ledger].sort(),
@@ -891,10 +892,9 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
   );
 
   // Gateway mapping and show-once metadata.
-  assert.equal(
-    (await store.consumers.findByUsername('nexus', `nexus-user-${ID.client}`))?.id,
-    ID.consumerClient,
-  );
+  const clientConsumer = await store.consumers.findByUserAndNamespace(ID.client, 'nexus');
+  assert.equal(clientConsumer?.id, ID.consumerClient);
+  assert.equal(clientConsumer?.ferrum_username, `nexus-user-${ID.client}`);
   assert.equal(
     (await store.credentials.findByFingerprint(fingerprint('fixture-key-2')))?.id,
     ID.credentialActive,
@@ -1292,18 +1292,25 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
               wideRows.items.find((row) => row.id === wideAudit.id)?.details,
               wideDetails,
             );
-            const wideSpec = await store.apiSpecs.create({
-              api_id: ID.invoices,
-              version: 'upgrade-capacity',
-              raw_spec: 'openapi: 3.1.0',
-              parsed_title: 'T'.repeat(300),
-              parsed_version: 'v'.repeat(100),
-              is_current: false,
-            });
-            const readSpec = await store.apiSpecs.findById(wideSpec.id);
-            assert.equal(readSpec?.parsed_title, 'T'.repeat(300));
-            assert.equal(readSpec?.parsed_version, 'v'.repeat(100));
-            assert.equal(await store.apiSpecs.delete(wideSpec.id), true);
+            // The revision is written and read back inside a transaction that
+            // is then rolled back, so the retained history is left as it was.
+            await assert.rejects(
+              store.transaction(async (tx) => {
+                const wideSpec = await tx.apiSpecs.create({
+                  api_id: ID.invoices,
+                  version: 'upgrade-capacity',
+                  raw_spec: 'openapi: 3.1.0',
+                  parsed_title: 'T'.repeat(300),
+                  parsed_version: 'v'.repeat(100),
+                  is_current: false,
+                });
+                const readSpec = await tx.apiSpecs.findById(wideSpec.id);
+                assert.equal(readSpec?.parsed_title, 'T'.repeat(300));
+                assert.equal(readSpec?.parsed_version, 'v'.repeat(100));
+                throw new Error('rollback capacity probe');
+              }),
+              ROLLBACK_CAPACITY_PROBE,
+            );
 
             // `015_access_gateway_jobs` adds an empty table; the repair that
             // fills it runs at the first start, below. A decision on a
