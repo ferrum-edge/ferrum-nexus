@@ -124,6 +124,19 @@ describe('parsePrometheusText', () => {
     assert.equal(infBucket?.value, 1_258);
   });
 
+  it('decodes a \\n escape in a label value and reads -Inf', () => {
+    const samples = parsePrometheusText(
+      [
+        'ferrum_gateway_listener_failures_active{reason="line one\\nline two"} 1',
+        'ferrum_tls_cert_expiry_seconds{source="file"} -Inf',
+      ].join('\n'),
+    );
+
+    assert.equal(samples.length, 2);
+    assert.equal(samples[0]?.labels.reason, 'line one\nline two');
+    assert.equal(samples[1]?.value, Number.NEGATIVE_INFINITY);
+  });
+
   it('never throws, whatever it is handed', () => {
     for (const body of ['', '   ', '#', '{}', 'not a metric line at all', '\n\n\n', '\u0000']) {
       assert.deepEqual(parsePrometheusText(body), []);

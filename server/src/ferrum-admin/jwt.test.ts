@@ -157,7 +157,9 @@ describe('createFleetReadTokenMinter', () => {
     );
   });
 
-  it('never shares a cache entry with the admin minter', async () => {
+  // Each minter owns a private cache, so what this can check is that the two
+  // tokens differ and the admin one keeps its namespace claim.
+  it('mints a different token from the admin minter', async () => {
     const config = edgeConfig({ jwtTtlSeconds: 600, fleetReadJwtSecret: FLEET_SECRET });
     const admin = await createAdminTokenMinter(config).getToken();
     const fleet = await createFleetReadTokenMinter(config)?.getToken();
@@ -205,12 +207,13 @@ describe('createAdminTokenMinter', () => {
     assert.equal(minter.size(), 0);
   });
 
-  it('stamps the configured namespace and keys the cache on it', async () => {
+  it('stamps the configured namespace', async () => {
     const staging = createAdminTokenMinter(edgeConfig({ jwtTtlSeconds: 600 }));
     assert.equal(decodeJwt(await staging.getToken()).ns, 'nexus');
 
-    // Two minters differing only in namespace must not share a cache entry,
-    // or one tenant's token would be handed to the other's calls.
+    // Each minter owns a private cache (`createMinter`), so two minters that
+    // differ only in namespace cannot share an entry; what can regress is the
+    // claim each one stamps.
     const other = createAdminTokenMinter(
       edgeConfig({ jwtTtlSeconds: 600, namespace: 'nexus-staging' }),
     );

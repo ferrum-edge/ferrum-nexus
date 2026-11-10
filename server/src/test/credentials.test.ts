@@ -477,13 +477,30 @@ describe('gateway credentials', () => {
   });
 
   it('filters the list by status', async () => {
-    const response = await harness.authed(founder, {
-      method: 'GET',
-      url: `/api/credentials?user_id=${alice.user.id}&status=active`,
+    // A holder with one credential of each status, so a filter that was
+    // ignored would return both rows for either query.
+    const holder = await harness.registerUser({
+      email: 'cred-status@example.test',
+      role: 'client',
     });
-    assert.ok(
-      response.json<ListCredentialsResponse>().items.every((row) => row.status === 'active'),
-    );
+    const kept = await issue(holder, 'keyauth', 'Kept');
+    const dropped = await issue(holder, 'keyauth', 'Dropped');
+    const revoke = await harness.authed(holder, {
+      method: 'DELETE',
+      url: `/api/credentials/${dropped.credential.id}`,
+    });
+    assert.equal(revoke.statusCode, 200, revoke.body);
+
+    const list = async (status: string): Promise<string[]> => {
+      const response = await harness.authed(founder, {
+        method: 'GET',
+        url: `/api/credentials?user_id=${holder.user.id}&status=${status}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json<ListCredentialsResponse>().items.map((row) => row.id);
+    };
+    assert.deepEqual(await list('active'), [kept.credential.id]);
+    assert.deepEqual(await list('revoked'), [dropped.credential.id]);
   });
 
   it('rejects an unknown credential type at the route boundary', async () => {

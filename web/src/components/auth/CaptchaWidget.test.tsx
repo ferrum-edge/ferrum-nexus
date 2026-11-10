@@ -234,13 +234,17 @@ describe('CaptchaWidget', () => {
 
     const onToken = vi.fn();
     render(<CaptchaWidget config={config} onToken={onToken} />);
-    await act(async () => vi.advanceTimersByTimeAsync(10000));
-    const selector =
-      'script[src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"]';
-    const retried = document.querySelector(selector) !== failedScript;
-    const reported =
-      screen.queryByRole('status') !== null && onToken.mock.calls.some(([token]) => token === null);
-    expect(retried || reported).toBe(true);
+    // The next form fetches the script again at once, with a tag of its own
+    // rather than listeners on the dead one, and reports nothing yet.
+    const retry = vendorScript(TURNSTILE.src);
+    expect(retry).not.toBe(failedScript);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(onToken).not.toHaveBeenCalled();
+
+    // A retry that also never settles still ends in the visible failure.
+    await act(async () => vi.advanceTimersByTimeAsync(SCRIPT_LOAD_TIMEOUT_MS));
+    expect(screen.getByRole('status')).toHaveTextContent('could not be loaded');
+    expect(onToken).toHaveBeenCalledWith(null);
   });
 
   it('reports failure when the vendor script never settles', async () => {

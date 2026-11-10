@@ -214,12 +214,17 @@ describe('a gateway write whose acknowledgement is lost', () => {
     // timeouts must therefore still succeed rather than replay a restore.
     const timeouts = { connect_ms: 4000, read_ms: 20000, write_ms: 20000 };
     const { id, proxyId } = await publish(publishPayload('lost-ack-noop', { timeouts }));
+    const proxyPuts = (): number => harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length;
+    const putsBefore = proxyPuts();
     const patched = await harness.authed(provider, {
       method: 'PATCH',
       url: `/api/apis/${id}`,
       payload: { timeouts, description: 'Unchanged settings, changed prose' },
     });
     assert.equal(patched.statusCode, 200, patched.body);
+    // A PATCH that re-sent an identical `PUT` would also answer 200 with the
+    // same timeout; the skipped write is what this case is about.
+    assert.equal(proxyPuts(), putsBefore, 'an unchanged setting issues no PUT');
     assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_connect_timeout_ms, 4000);
   });
 
