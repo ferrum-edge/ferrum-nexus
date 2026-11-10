@@ -141,6 +141,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   "alice" reads "AL" in the users table as it does in the header. The routes
   enforcement and agent operation hints say "Edge v0.9.15 and later" rather
   than naming one Edge release.
+- The gateway cutover runbook (operations guide §12 and §13) describes
+  consumer repair per identity, as the repair works: an account and each of its
+  applications has its own consumer (`nexus-user-<user_id>` or
+  `nexus-app-<application_id>`), its own orphan entry with `application_id`,
+  and its own grants' REST and approved MCP groups replayed. It used to
+  describe one consumer per account, so an operator saw more orphans than
+  accounts and the §12 hand check rejected an application's username (#703).
 
 ### Security
 

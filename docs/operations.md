@@ -3468,7 +3468,8 @@ If that limit is reached:
    row, or the identity's `ferrum_consumer_id` in `gateway_identities`, with the
    correct owner and namespace.
 3. Verify it with `GET /consumers/{id}` under the right `X-Ferrum-Namespace`:
-   the username must be exactly `nexus-user-<user_id>` or the registered
+   the username must be exactly `nexus-user-<user_id>` for an account,
+   `nexus-app-<application_id>` for one of its applications, or the registered
    `nexus-test-<api_id>`.
 4. With no backup, inventory the gateway with paginated Admin API reads and
    rebuild the mapping after the same checks. Do not delete gateway identities
@@ -3600,14 +3601,16 @@ SELECT created_at, target_id AS consumer_id, details_json
 ## 13. Retargeting or rebuilding Ferrum Edge
 
 Nexus stores two kinds of gateway ids: `consumers.ferrum_consumer_id` (one
-consumer per account per namespace) and `apis.ferrum_proxy_id` (one proxy per
-API). They cannot be re-derived.
+consumer per identity per namespace: each account, and each of its
+applications) and `apis.ferrum_proxy_id` (one proxy per API). They cannot be
+re-derived.
 
 If `FERRUM_ADMIN_URL` points at a different Edge, or the gateway is rebuilt,
 those ids point at nothing. New accounts and new publishes work, but:
 
-- approving access or issuing a credential for an existing account answers
-  `502 EDGE_ERROR` ("The gateway consumer for this account no longer exists");
+- approving access or issuing a credential for an existing account or
+  application answers `502 EDGE_ERROR` ("The gateway consumer for this account
+  no longer exists");
 - existing APIs have proxy ids that `404`, and serve nothing.
 
 ### The signal
@@ -3635,9 +3638,12 @@ POST /api/admin/gateway/reconcile
 ```
 
 `super_admin` only. It returns per-kind `checked`/`orphaned`/`complete` counts
-plus `orphaned_consumers` (`user_id`, `ferrum_consumer_id`, `ferrum_username`)
-and `orphaned_proxies` (`api_id`, `slug`, `ferrum_proxy_id`), and writes a
-`gateway.reconcile` audit row.
+plus `orphaned_consumers` (`user_id`, `application_id`, `ferrum_consumer_id`,
+`ferrum_username`) and `orphaned_proxies` (`api_id`, `slug`, `ferrum_proxy_id`),
+and writes a `gateway.reconcile` audit row. `orphaned_consumers` has one entry
+per identity, so an account with applications can appear several times:
+`application_id` is `null` for the account's own consumer and names the
+application otherwise.
 
 ### The repair
 
@@ -3651,26 +3657,32 @@ POST /api/admin/gateway/repair
 ```
 
 `super_admin` only. Instead of `all`, name targets with `user_ids` and/or
-`api_ids`. It always runs a fresh pass first and refuses with
+`api_ids`; a user id covers every orphaned identity of that account, its
+applications included. It always runs a fresh pass first and refuses with
 `502 EDGE_UNAVAILABLE` if that pass cannot read the gateway.
 
-**For each orphaned account** it:
+**For each orphaned identity** (an account's own consumer, or one of its
+applications') it:
 
-1. takes the account's provisioning lock and re-checks the consumer;
-2. recreates the consumer with the **same identity** (username
-   `nexus-user-<user_id>`, `custom_id` set to the user id, and the same derived
-   consumer id);
-3. replays the `nexus:api:<api_id>:approved` ACL groups of the account's
-   **active** grants;
+1. takes the identity's provisioning lock and re-checks the consumer;
+2. recreates the consumer with the **same identity**: username
+   `nexus-user-<user_id>` and `custom_id` set to the user id for the account,
+   or `nexus-app-<application_id>` and `custom_id` set to the application id
+   for an application, with the same derived consumer id;
+3. replays the ACL groups of that identity's own **active** grants: the
+   `nexus:api:<api_id>:approved` group of each, plus the approved MCP groups
+   of a grant on an agent API. An application gets only its own grants, never
+   its owner's. A grant on an API that is gone or recorded under another
+   namespace adds nothing, and nothing is replayed for a disabled account;
 4. in one transaction, re-links the `consumers` row, revokes every live
    `credential_metadata` row for the old consumer, and writes a
    `gateway.consumer_repair` audit row. If this fails, the recreated consumer is
    deleted again so a later repair starts clean;
-5. notifies the account holder.
+5. notifies the account holder when any credential was revoked.
 
 **Credentials are not replaced.** They are show-once, so the repair revokes the
 portal rows and reports `credentials_requiring_reissue`. Each account holder
-issues new credentials.
+issues new credentials, for the account and for each repaired application.
 
 **If the repair loses its lease** after step 2 (the instance stalled past the
 TTL), step 4's transaction is refused. The recreated consumer is then kept,
@@ -3724,6 +3736,7 @@ The repair response lists every target with a per-target `error`:
   "consumers": [
     {
       "user_id": "…",
+      "application_id": null,
       "previous_ferrum_consumer_id": "…",
       "ferrum_consumer_id": "…",
       "credentials_requiring_reissue": 1,
@@ -3743,9 +3756,13 @@ The repair response lists every target with a per-target `error`:
 3. Start Nexus. `GET /api/health` reports `degraded` with
    `edge.reconciliation.status: "orphaned"`.
 4. `POST /api/admin/gateway/reconcile` and check the orphan counts match what
-   you expect. If not, you may have the wrong gateway or `FERRUM_NAMESPACE`.
+   you expect: at most one consumer per account and one per application (only
+   identities that already had a gateway consumer are counted), and one proxy
+   per published API. If not, you may have the wrong gateway or
+   `FERRUM_NAMESPACE`.
 5. `POST /api/admin/gateway/repair` with `{ "all": true, "reason": "…" }`.
-6. Tell account holders listed in `consumers[]` to issue new credentials, and
+6. Tell account holders listed in `consumers[]` to issue new credentials (for
+   each entry, the account itself or the application it names), and
    restore each API in `apis[]` with `restore-gateway`. Both are also notified
    in the portal.
 7. Re-run step 4 after the restores: `status` should be `ok`, and health `ok`.
