@@ -792,9 +792,9 @@ export function createGodService(deps: GodServiceDeps): GodService {
           );
         }
 
-        // Chunked like the mass-email fan-out: one transaction per chunk keeps
-        // the statement count of the whole announcement off one request's
-        // single connection, and lets other writers in between chunks.
+        // Chunked like the mass-email fan-out: one transaction and one thread
+        // read per chunk, instead of four or five autocommitted statements per
+        // recipient, and other writers get their turn between chunks.
         for (let start = 0; start < recipients.length; start += chunkRecipients) {
           const chunk = recipients.slice(start, start + chunkRecipients);
           let written: { recipient: UserRecord; created: boolean }[];
