@@ -132,6 +132,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   behind one egress address shared 30 usage loads a minute, while one account
   could multiply its allowance by changing address. The `/api/apis` scope now
   keys its limiter per account too.
+- The audit-log `details` filter on SQLite, PostgreSQL and MySQL matches its
+  key and value literally (#681). It was a `LIKE` pattern, so `_` and `%` in a
+  key or value (every caller's keys contain `_`) were wildcards, and on MySQL a
+  value whose JSON holds a backslash did not match itself. It is now a literal
+  substring test, as the search filters already are (#595).
 
 ### Security
 

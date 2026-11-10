@@ -4874,6 +4874,31 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ).total,
         1,
       );
+      // `_` and `%` are literal characters, not wildcards, and a value holding
+      // `\` and `"` matches itself, on every backend (#681).
+      const literal = `parity.details-${newId().slice(0, 8)}`;
+      await store.auditLogs.create({
+        action: literal,
+        target_type: 'credential',
+        details: { reference: 'aXb-100', note: 'say "hi" \\ bye' },
+      });
+      const misses: Record<string, string>[] = [
+        { reference: 'a_b-100' },
+        { reference: 'a%' },
+        { refer_nce: 'aXb-100' },
+      ];
+      for (const details of misses) {
+        const page = await store.auditLogs.list({ action: literal, details });
+        assert.equal(page.total, 0, JSON.stringify(details));
+      }
+      const hits: Record<string, string>[] = [
+        { reference: 'aXb-100' },
+        { note: 'say "hi" \\ bye' },
+      ];
+      for (const details of hits) {
+        const page = await store.auditLogs.list({ action: literal, details });
+        assert.equal(page.total, 1, JSON.stringify(details));
+      }
       assert.equal(
         await store.auditLogs.count({
           actor_user_id: actor.id,
