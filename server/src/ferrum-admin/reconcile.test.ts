@@ -73,7 +73,7 @@ describe('startup gateway reconciliation', () => {
   it('does not let a proxy-scoped config satisfy the global prerequisite', async () => {
     const harness = await buildTestApp();
     try {
-      harness.edge.pluginConfigs.set('nexus|operator-metrics', {
+      harness.edge.pluginConfigs.set('nexus/operator-metrics', {
         id: 'operator-metrics',
         namespace: 'nexus',
         plugin_name: 'prometheus_metrics',

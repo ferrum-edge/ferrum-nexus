@@ -1201,17 +1201,18 @@ describe('upstream destination policy', () => {
   it('refuses an upstream that names or resolves to the public gateway origin', async () => {
     const named = parseUpstreamUrl('https://GATEWAY.EXAMPLE.TEST./api');
     assert.ok(named);
-    await expectSpecInvalidAsync(() =>
+    const namedError = await expectSpecInvalidAsync(() =>
       assertUpstreamAllowed(named, {
         allowPrivate: true,
         getGatewayPublicUrls: async () => ['https://gateway.example.test/'],
         resolve: neverResolve,
       }),
     );
+    assert.equal((namedError.details as { reason?: string }).reason, 'gateway_origin');
 
     const alias = parseUpstreamUrl('https://gateway-alias.example.test');
     assert.ok(alias);
-    await expectSpecInvalidAsync(() =>
+    const aliasError = await expectSpecInvalidAsync(() =>
       assertUpstreamAllowed(alias, {
         allowPrivate: true,
         getGatewayPublicUrls: async () => ['https://gateway.example.test/'],
@@ -1224,6 +1225,7 @@ describe('upstream destination policy', () => {
           ]),
       }),
     );
+    assert.equal((aliasError.details as { reason?: string }).reason, 'gateway_origin');
   });
 
   it('refuses a mapped or NAT64 literal that embeds the gateway address', async () => {

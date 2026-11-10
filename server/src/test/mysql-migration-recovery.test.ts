@@ -780,6 +780,10 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
   });
 
   it('serializes independent upgrades of a populated released schema', async () => {
+    const expected = await fixture(async (pool) => {
+      await runMysqlMigrations(pool);
+      return schema(pool);
+    });
     await fixture(async (pool, url) => {
       await runMysqlMigrations(
         pool,
@@ -806,14 +810,14 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
         assert.ok(next, 'the peer started while the failing runner held its advisory lock');
         await next;
         assert.ok(fired);
-        await restartAndVerify(pool, url, await schema(pool));
+        await restartAndVerify(pool, url, expected);
       } finally {
         await second.end();
       }
     });
   });
 
-  it('serializes two independent migrators and releases the lock after failure', async () => {
+  it('serializes two independent migrators, and the lock is free for a later run', async () => {
     await fixture(async (pool, url) => {
       const second = mysql.createPool(url);
       try {
