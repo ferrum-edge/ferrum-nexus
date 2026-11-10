@@ -121,6 +121,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   publishes no agent tools no longer carry an "Approved tools: all published
   tools" line. A grant that names tools the API has since withdrawn still
   reports them as expired (#693).
+- An image built from a developer checkout matches one built from a fresh
+  clone. The Docker build context no longer carries local `node_modules`,
+  `dist`, `coverage`, `.tsbuildinfo` files, databases, `.env` files, `.git`,
+  docs or the acceptance suite, so a stale file in a local `server/dist` can no
+  longer reach the runtime stage (#696).
 
 ### Security
 
