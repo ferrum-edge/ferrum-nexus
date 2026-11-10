@@ -22,8 +22,8 @@ Literal registry images require a full lowercase SHA-256 digest. Tags must be
 three-part versions unless a specific image and tag has a reason-listed exception
 in `ci/check_image_pins.py`.
 
-The exceptions retain the repository's current Node/PostgreSQL/Alpine distro
-channels and Mailpit's two-part release tag; their digest still fixes the image
+The exceptions retain the repository's current Node/PostgreSQL/MySQL/MongoDB/Alpine
+distro and major channels; their digest still fixes the image
 content. Compose files and workflow `image:`/`container:` fields permit
 `${FERRUM_EDGE_IMAGE:?...}` and `${NEXUS_IMAGE:?...}` required deployment inputs;
 workflow `env:` values and env files must name a pinned image and reject them.
