@@ -297,10 +297,10 @@ export interface BuildServerDeps {
    */
   storeLockWaitMs?: number;
   /**
-   * Most recipients per mass-email fan-out transaction. Defaults to
-   * `MASS_EMAIL_CHUNK_RECIPIENTS` (200). A seam for the tests that drive a
-   * failure between two chunks, which would otherwise need hundreds of
-   * accounts. Nothing in production sets it.
+   * Most recipients per mass-email and god-mode broadcast fan-out
+   * transaction. Defaults to `MASS_EMAIL_CHUNK_RECIPIENTS` (200). A seam for
+   * the tests that drive a failure between two chunks, which would otherwise
+   * need hundreds of accounts. Nothing in production sets it.
    */
   massEmailChunkRecipients?: number;
 }
@@ -682,6 +682,9 @@ export async function buildServer(
     locks,
     broadcastLocks: sendLocks,
     log: warn,
+    ...(deps.massEmailChunkRecipients === undefined
+      ? {}
+      : { chunkRecipients: deps.massEmailChunkRecipients }),
   });
 
   // The worker owns no SMTP knowledge of its own: it asks the email service for
@@ -938,10 +941,10 @@ export async function buildServer(
 
   await app.register(
     async (scope) => {
-      // `global: false` so only the two mail routes carry a limit — the probe
-      // that contacts the relay directly and the campaign composer — bucketed
-      // per account (see `userOrIpKey`). Their durable budgets bound the hour
-      // and the day; this bounds a burst.
+      // `global: false` so only the two mail routes and the email template
+      // save and reset carry a limit, bucketed per account (see
+      // `userOrIpKey`). The mail routes' durable budgets bound the hour and the
+      // day; this bounds a burst.
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }
@@ -1182,9 +1185,9 @@ function logGeneratedBootstrapToken(app: FastifyInstance, token: string): void {
 }
 
 /**
- * Announce each backend egress opt-out that is on.
+ * Announce the backend egress opt-out when it is on.
  *
- * Both admit backend writes the gateway has not proved public-only, and each
+ * It admits backend writes the gateway has not proved public-only, and each
  * write admitted that way records its `egress_profile` in its audit row. No
  * policy detail appears here, only which switch is set.
  */
@@ -1194,14 +1197,6 @@ function logBackendEgressOptOuts(app: FastifyInstance, config: NexusConfig): voi
       { egress_profile: 'private-upstreams-opt-in' },
       'BACKEND EGRESS NOT GUARANTEED: NEXUS_ALLOW_PRIVATE_UPSTREAMS=true admits private ' +
         'upstreams and skips Nexus upstream screening; the gateway alone limits backend egress',
-    );
-  }
-  if (config.allowUnattestedEdgeEgress) {
-    app.log.warn(
-      { egress_profile: 'unattested-edge-opt-in' },
-      'BACKEND EGRESS NOT GUARANTEED: NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true waives the ' +
-        'gateway egress attestation but still requires public_only_guaranteed, so it admits ' +
-        'no control-plane/data-plane pairing; set NEXUS_EXPECTED_DATA_PLANES for one',
     );
   }
 }

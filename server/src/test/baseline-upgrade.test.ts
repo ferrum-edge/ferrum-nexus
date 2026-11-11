@@ -15,19 +15,24 @@
  * restart — must change nothing, ledger included.
  *
  * The suite runs once per release in the manifest, oldest first: every
- * released database is a supported upgrade source. Each release's prefix is
- * read from the manifest — the entries up to its last one, never the pending
- * ones — and the current schema is whatever `store.migrate()` builds, so every
- * forward migration a release has not shipped (from `v0.1.0`,
- * `002_api_gateway_plugins` and `003_messages_thread_latest`; from `v0.1.0`
- * and `v0.2.0`, `004_api_spec_changes`, `005_notification_preferences` and
+ * released database is a supported upgrade source. A source also holds data in
+ * the structures its own release's later migrations added (a change summary,
+ * gateway plugin ownership, an identity-provider link, notification
+ * preferences, agent and tool selections, a request for more tools, a bound
+ * outbox row, an outstanding account recovery), so those survive the upgrade
+ * too, and the migrations it has not shipped run over a populated database.
+ * Each release's prefix is read from the manifest — the entries up to its last
+ * one, never the pending ones — and the current schema is whatever
+ * `store.migrate()` builds, so every forward migration a release has not
+ * shipped (from `v0.1.0`, `002_api_gateway_plugins` and
+ * `003_messages_thread_latest`; from `v0.1.0` and `v0.2.0`,
+ * `004_api_spec_changes`, `005_notification_preferences` and
  * `006_user_identities`; from every release before `v0.4.0`,
  * `007_outbox_recipient` to `011_mcp_tool_subsets`; from every release before
  * `v0.5.0`, `012_access_request_grant`; from every release before `v0.5.1`,
  * `013_account_recovery_jobs`; and, pending, `014_mysql_text_capacity` and
- * `015_access_gateway_jobs`) is
- * applied here on top of a
- * populated database with no change to the harness. `007_outbox_recipient`
+ * `015_access_gateway_jobs`) is applied here on top of a populated database
+ * with no change to the harness. `007_outbox_recipient`
  * adds a nullable account binding without changing retained message contents;
  * `008_email_lifecycle_fence` adds a private account fence without changing user DTOs;
  * `009_outbox_priority` classifies retained mail without changing its delivery state;
@@ -35,19 +40,24 @@
  * `011_mcp_tool_subsets` keeps retained approvals covering every published tool;
  * `012_access_request_grant` keeps every retained request a request for
  * access rather than for more tools on a grant; and `013_account_recovery_jobs`
- * only adds an empty table, so no retained account owes a recovery revocation.
- * `014_mysql_text_capacity` widens eight MySQL text columns in place and changes
- * nothing on the other backends; retained values read back unchanged.
+ * only adds an empty table, so no account upgraded from a release before it
+ * owes a recovery revocation. Each of these sets nothing it finds already set
+ * by a source that shipped it. `014_mysql_text_capacity` widens eight MySQL
+ * text columns in place, among them a retained change summary's multi-byte
+ * version labels, and adds MySQL's missing `apis.circuit_breaker` CHECK; it
+ * changes nothing on the other backends, and retained values read back
+ * unchanged.
  * `015_access_gateway_jobs` (pending) adds an empty table, and the first start
  * after it queues jobs for what an earlier release may have stranded: the
  * fixture's revoked grant, whose group is still on its consumer, and its
- * approved request that no grant was ever made from. The access gateway worker
- * then repairs both, and a regrant's group is left alone.
+ * approved request that no grant was ever made from — but not an approved
+ * request for more tools on a grant. The access gateway worker then repairs
+ * both, and a regrant's group is left alone.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
- *   `NEXUS_TEST_MYSQL_URL` or `NEXUS_TEST_MONGO_URL` is set (the CI
- *   `store-contracts` job sets all three), each in a throwaway database that
+ *   `NEXUS_TEST_MYSQL_URL` or `NEXUS_TEST_MONGO_URL` is set (each CI
+ *   `store-contracts` lane sets its own), each in a throwaway database that
  *   is dropped afterwards. MongoDB needs a replica set, as the store does.
  */
 
@@ -87,6 +97,7 @@ import { buildTestApp } from './helpers.js';
 
 const VERIFY_OR_RESET_KEY = /^(verify:|reset:)/;
 const ROLLBACK_PRIORITY_CLAIMS = /rollback priority claims/;
+const ROLLBACK_CAPACITY_PROBE = /rollback capacity probe/;
 const HYPHENS = /-/g;
 
 const SECRET = 'baseline-upgrade-secret-0123456789abcdef';
@@ -136,6 +147,9 @@ const BOOLEAN_COLUMNS = new Set([
   'broadcast',
   'encrypted',
   'enabled',
+  'provisioned',
+  'api_spec_updated_in_app',
+  'api_spec_updated_email',
 ]);
 
 /** Stable ids, so a failure names the same row on every run. */
@@ -158,6 +172,7 @@ const ID = {
   requestFormer: '00000000-0000-4000-8000-000000000703',
   requestPending: '00000000-0000-4000-8000-000000000704',
   requestStranded: '00000000-0000-4000-8000-000000000705',
+  requestTools: '00000000-0000-4000-8000-000000000706',
   grantAccount: '00000000-0000-4000-8000-000000000801',
   grantApp: '00000000-0000-4000-8000-000000000802',
   grantRevoked: '00000000-0000-4000-8000-000000000803',
@@ -181,6 +196,9 @@ const ID = {
   outboxLookalike: '00000000-0000-4000-8000-000000001408',
   outboxUppercase: '00000000-0000-4000-8000-000000001409',
   outboxNullSchedule: '00000000-0000-4000-8000-000000001410',
+  specChange: '00000000-0000-4000-8000-000000001501',
+  identity: '00000000-0000-4000-8000-000000001601',
+  recoveryJob: '00000000-0000-4000-8000-000000001701',
 } as const;
 
 const T0 = '2026-09-01T09:00:00.000Z';
@@ -189,6 +207,23 @@ const T2 = '2026-09-03T09:00:00.000Z';
 
 const fingerprint = (material: string): string =>
   createHash('sha256').update(material).digest('hex');
+
+/** The agent selection a source that shipped `010_api_agents` holds for Invoices. */
+const INVOICE_AGENTS = {
+  operations: [
+    {
+      id: 'tool-list-invoices',
+      path: '/invoices',
+      method: 'GET',
+      name: 'list_invoices',
+      description: 'List invoices',
+      definition_hash: fingerprint('list_invoices'),
+    },
+  ],
+};
+
+/** The tool subset a source that shipped `011_mcp_tool_subsets` approved for the app. */
+const APP_TOOLS = ['tool-list-invoices'];
 
 /** Edge's ACL group for an approved API; derived from the API id, so the id must survive. */
 const approvedGroup = (apiId: string): string => `nexus:api:${apiId}:approved`;
@@ -199,9 +234,11 @@ const approvedGroup = (apiId: string): string => `nexus:api:${apiId}:approved`;
  * that a source which shipped `009_outbox_priority` stores every outbox row
  * with the priority `009_outbox_priority`'s backfill rule assigns (`verify:` and
  * `reset:` rows high, the rest normal), so the lanes read back the same from
- * every source.
+ * every source. A structure a later migration added holds a row, or a non-default
+ * value, exactly when the source shipped that migration.
  */
 async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
+  const shipped = (id: string): boolean => ids.includes(id);
   const passwordHash = await hashPassword(FIXTURE_PASSWORD);
   const encryptedSmtpPassword = createCrypto(SECRET).encryptJson(
     SMTP_PASSWORD_SETTINGS_KEY,
@@ -282,6 +319,7 @@ async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
         timeouts_json: JSON.stringify({ connect_ms: 2000, read_ms: 15000, write_ms: 15000 }),
         circuit_breaker: 1,
         spec_enforcement: 'routes',
+        ...(shipped('010_api_agents') ? { agents_json: JSON.stringify(INVOICE_AGENTS) } : {}),
         name: 'Invoices',
         slug: 'invoices',
         description: 'Issue and settle invoices',
@@ -424,6 +462,12 @@ async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
         application_id: ID.app,
         justification: 'Reconciliation job',
         status: 'approved',
+        ...(shipped('011_mcp_tool_subsets')
+          ? {
+              requested_tools_json: JSON.stringify(APP_TOOLS),
+              approved_tools_json: JSON.stringify(APP_TOOLS),
+            }
+          : {}),
         ...decided,
         ...stamps,
       },
@@ -500,6 +544,9 @@ async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
         granted_by: ID.provider,
         revoked_by: null,
         revoked_at: null,
+        ...(shipped('011_mcp_tool_subsets')
+          ? { approved_tools_json: JSON.stringify(APP_TOOLS) }
+          : {}),
         ...stamps,
       },
     },
@@ -696,7 +743,12 @@ async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
       last_error: 'relay down',
       created_at: T1,
     }),
-    mail(ID.outboxSent, 'verify:fixture-sent', { status: 'sent', next_attempt_at: null }),
+    mail(ID.outboxSent, 'verify:fixture-sent', {
+      status: 'sent',
+      next_attempt_at: null,
+      // Bound to its account, as every account mail is from `007` on.
+      ...(shipped('007_outbox_recipient') ? { recipient_user_id: ID.client } : {}),
+    }),
     mail(ID.outboxFailed, 'reset:fixture-failed', {
       status: 'failed',
       next_attempt_at: null,
@@ -718,7 +770,125 @@ async function buildFixture(ids: readonly string[]): Promise<FixtureRow[]> {
         ...stamps,
       },
     },
+    ...laterStructures(shipped, stamps),
   ];
+}
+
+/**
+ * Rows in the structures migrations after `001_initial` added, each present
+ * exactly when the source shipped the migration that added it, with values a
+ * reset to the default would change.
+ */
+function laterStructures(
+  shipped: (id: string) => boolean,
+  stamps: { created_at: string; updated_at: string },
+): FixtureRow[] {
+  const rows: FixtureRow[] = [];
+  if (shipped('002_api_gateway_plugins')) {
+    rows.push(
+      {
+        table: 'api_gateway_plugins',
+        row: {
+          api_id: ID.invoices,
+          role: 'auth',
+          ferrum_plugin_config_id: 'edge-auth-invoices',
+          ...stamps,
+        },
+      },
+      // Recorded as owning no config in the role.
+      {
+        table: 'api_gateway_plugins',
+        row: { api_id: ID.invoices, role: 'cors', ferrum_plugin_config_id: null, ...stamps },
+      },
+    );
+  }
+  if (shipped('004_api_spec_changes')) {
+    rows.push({
+      // Multi-byte labels, which `014_mysql_text_capacity` rewrites in place.
+      table: 'api_spec_changes',
+      row: {
+        id: ID.specChange,
+        api_id: ID.invoices,
+        spec_id: ID.specV2,
+        previous_spec_id: ID.specV1,
+        kind: 'update',
+        version: '2.0.0-版本-ü',
+        previous_version: '1.0.0-ß',
+        revision_seq: 2,
+        report_json: JSON.stringify(emptySpecChangeReport()),
+        ...stamps,
+      },
+    });
+  }
+  if (shipped('005_notification_preferences')) {
+    rows.push({
+      // Both channels away from their defaults.
+      table: 'user_notification_preferences',
+      row: {
+        user_id: ID.former,
+        api_spec_updated_in_app: 0,
+        api_spec_updated_email: 1,
+        ...stamps,
+      },
+    });
+  }
+  if (shipped('006_user_identities')) {
+    rows.push({
+      table: 'user_identities',
+      row: {
+        id: ID.identity,
+        user_id: ID.former,
+        provider_id: 'legacy-idp',
+        issuer: 'https://legacy-idp.example.test',
+        subject: 'former-subject',
+        email: 'former@example.test',
+        provisioned: 1,
+        last_login_at: T1,
+        ...stamps,
+      },
+    });
+  }
+  if (shipped('012_access_request_grant')) {
+    rows.push({
+      // A finished request for more tools on the app's grant: the stranded
+      // repair must leave it alone.
+      table: 'access_requests',
+      row: {
+        id: ID.requestTools,
+        api_id: ID.invoices,
+        user_id: ID.client,
+        application_id: ID.app,
+        justification: 'Add the listing tool',
+        status: 'approved',
+        decided_by: ID.provider,
+        decided_at: T2,
+        decision_note: 'Approved',
+        requested_tools_json: JSON.stringify(APP_TOOLS),
+        approved_tools_json: JSON.stringify(APP_TOOLS),
+        grant_id: ID.grantApp,
+        created_at: T1,
+        updated_at: T2,
+      },
+    });
+  }
+  if (shipped('013_account_recovery_jobs')) {
+    rows.push({
+      // Still failing, and no longer refusing issuance.
+      table: 'account_recovery_jobs',
+      row: {
+        id: ID.recoveryJob,
+        generation: 'retained-recovery-generation',
+        user_id: ID.admin,
+        status: 'pending',
+        attempts: 4,
+        next_attempt_at: T2,
+        last_error: 'gateway unavailable',
+        unblocked_at: T2,
+        ...stamps,
+      },
+    });
+  }
+  return rows;
 }
 
 /** The record field a baseline column surfaces as, with its expected decoded value. */
@@ -771,6 +941,32 @@ async function readBack(store: NexusStore, { table, row }: FixtureRow): Promise<
       return store.emailOutbox.findById(id);
     case 'email_templates':
       return store.emailTemplates.get(String(row.key) as EmailTemplateKey);
+    case 'api_gateway_plugins':
+      return (
+        (await store.apiGatewayPlugins.listByApi(String(row.api_id))).find(
+          (entry) => entry.role === row.role,
+        ) ?? null
+      );
+    case 'api_spec_changes': {
+      // The record names the two revisions by what they are, not by column.
+      const change = await store.apiSpecChanges.findByRevision(
+        String(row.api_id),
+        String(row.spec_id),
+      );
+      return (
+        change && {
+          ...change,
+          spec_id: change.revision_id,
+          previous_spec_id: change.previous_revision_id,
+        }
+      );
+    }
+    case 'user_notification_preferences':
+      return store.notificationPreferences.find(String(row.user_id));
+    case 'user_identities':
+      return store.userIdentities.findById(id);
+    case 'account_recovery_jobs':
+      return store.accountRecoveryJobs.findByUser(String(row.user_id));
     default:
       throw new Error(`No reader for fixture table ${table}`);
   }
@@ -784,7 +980,8 @@ async function assertFixturePreserved(
   const records: unknown[] = [];
   for (const entry of fixture) {
     const record = await readBack(store, entry);
-    const label = `${entry.table} ${String(entry.row.id ?? entry.row.key)}`;
+    const { id, key, user_id: userId, api_id: apiId, role } = entry.row;
+    const label = `${entry.table} ${String(id ?? key ?? (role ? `${apiId}/${role}` : userId))}`;
     assert.ok(record !== null && typeof record === 'object', `${label} is missing`);
     const fields = record as Record<string, unknown>;
     for (const [column, value] of Object.entries(entry.row)) {
@@ -796,8 +993,11 @@ async function assertFixturePreserved(
   return records;
 }
 
-/** What the portal needs from that data to keep working, beyond row equality. */
-async function assertPortalInvariants(store: NexusStore): Promise<void> {
+/**
+ * What the portal needs from that data to keep working, beyond row equality,
+ * for a source that shipped the migrations `ids`.
+ */
+async function assertPortalInvariants(store: NexusStore, ids: readonly string[]): Promise<void> {
   assert.equal((await store.emailOutbox.findById(ID.outbox))?.recipient_user_id, null);
   for (const id of [
     ID.outboxReset,
@@ -855,15 +1055,21 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
   assert.ok(await verifyPassword(FIXTURE_PASSWORD, client.password_hash));
   assert.equal(await store.users.countActiveSuperAdmins(), 1);
 
-  // 010 leaves every retained API unexposed to agents.
-  assert.equal((await store.apis.findById(ID.invoices))?.agents, null);
+  // 010 leaves every API it finds unexposed to agents; a selection made by a
+  // release that shipped it is kept.
+  assert.deepEqual(
+    (await store.apis.findById(ID.invoices))?.agents,
+    ids.includes('010_api_agents') ? INVOICE_AGENTS : null,
+  );
   assert.equal((await store.apis.findById(ID.ledger))?.agents, null);
 
-  // 011 preserves retained phase-1 approvals with null (all published tools).
+  // 011 preserves the phase-1 approvals it finds with null (all published
+  // tools); a subset approved by a release that shipped it is kept.
+  const appTools = ids.includes('011_mcp_tool_subsets') ? APP_TOOLS : null;
   assert.equal((await store.accessRequests.findById(ID.requestAccount))?.requested_tools, null);
-  assert.equal((await store.accessRequests.findById(ID.requestApp))?.approved_tools, null);
+  assert.deepEqual((await store.accessRequests.findById(ID.requestApp))?.approved_tools, appTools);
   assert.equal((await store.grants.findById(ID.grantAccount))?.approved_tools, null);
-  assert.equal((await store.grants.findById(ID.grantApp))?.approved_tools, null);
+  assert.deepEqual((await store.grants.findById(ID.grantApp))?.approved_tools, appTools);
 
   // 012 keeps every retained request a request for access, not for more tools.
   assert.equal((await store.accessRequests.findById(ID.requestAccount))?.grant_id, null);
@@ -871,17 +1077,28 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
 
   // Public API identity: slug and gateway proxy still resolve to the same id.
   assert.equal((await store.apis.findBySlug('INVOICES'))?.id, ID.invoices);
-  assert.equal((await store.apis.findByProxyId('edge-proxy-invoices'))?.id, ID.invoices);
+  assert.equal((await store.apis.findById(ID.invoices))?.ferrum_proxy_id, 'edge-proxy-invoices');
   assert.deepEqual(
     [...(await store.apis.listIdsByOwner(ID.provider))].sort(),
     [ID.invoices, ID.ledger].sort(),
   );
   assert.equal((await store.apiSpecs.findCurrentByApi(ID.invoices))?.id, ID.specV2);
-  // An API the baseline published has no first-class plugin ownership record:
-  // `002_api_gateway_plugins` starts it empty, which is what has the publishing
-  // service recognise that API's gateway configs once instead of trusting a
-  // plugin name.
-  assert.deepEqual(await store.apiGatewayPlugins.listByApi(ID.invoices), []);
+  // An API published before `002_api_gateway_plugins` has no first-class plugin
+  // ownership record: the migration starts it empty, which is what has the
+  // publishing service recognise that API's gateway configs once instead of
+  // trusting a plugin name. A record made by a release that shipped it is kept.
+  assert.deepEqual(
+    (await store.apiGatewayPlugins.listByApi(ID.invoices)).map((row) => [
+      row.role,
+      row.ferrum_plugin_config_id,
+    ]),
+    ids.includes('002_api_gateway_plugins')
+      ? [
+          ['auth', 'edge-auth-invoices'],
+          ['cors', null],
+        ]
+      : [],
+  );
 
   // Access: the active grants are the ones Edge's ACL groups are replayed from;
   // the revoked one must not come back.
@@ -891,10 +1108,9 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
   );
 
   // Gateway mapping and show-once metadata.
-  assert.equal(
-    (await store.consumers.findByUsername('nexus', `nexus-user-${ID.client}`))?.id,
-    ID.consumerClient,
-  );
+  const clientConsumer = await store.consumers.findByUserAndNamespace(ID.client, 'nexus');
+  assert.equal(clientConsumer?.id, ID.consumerClient);
+  assert.equal(clientConsumer?.ferrum_username, `nexus-user-${ID.client}`);
   assert.equal(
     (await store.credentials.findByFingerprint(fingerprint('fixture-key-2')))?.id,
     ID.credentialActive,
@@ -1118,14 +1334,19 @@ async function mysqlTarget(adminUrl: string): Promise<UpgradeTarget> {
 
 /**
  * The MongoDB document for a fixture row, in the adapter's physical shape:
- * `_id` for the id (the key, for settings), native booleans and subdocuments
+ * `_id` for the id (the key for settings, the account for notification
+ * preferences), native booleans and subdocuments
  * where SQL keeps 0/1 and JSON text, and the derived lowercase companions its
  * case-insensitive unique indexes are built on.
  */
 function mongoDocument({ table, row }: FixtureRow): Record<string, unknown> {
   const doc: Record<string, unknown> = {};
   for (const [column, value] of Object.entries(row)) {
-    if (column === 'id' || (table === 'app_settings' && column === 'key')) {
+    if (
+      column === 'id' ||
+      (table === 'app_settings' && column === 'key') ||
+      (table === 'user_notification_preferences' && column === 'user_id')
+    ) {
       doc._id = value;
       continue;
     }
@@ -1202,7 +1423,7 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
               baseline,
             );
             preserved = await assertFixturePreserved(store, fixture);
-            await assertPortalInvariants(store);
+            await assertPortalInvariants(store, ids);
 
             // The forward migration's table is usable on the upgraded database,
             // including a role recorded as owning no config.
@@ -1222,25 +1443,31 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
             );
             assert.equal(await store.apiGatewayPlugins.deleteByApi(ID.ledger), 2);
 
-            // `004_api_spec_changes` starts every API's change history empty:
-            // it copies nothing, and the history begins with the next revision.
-            assert.equal((await store.apiSpecChanges.listByApi(ID.invoices)).total, 0);
+            // `004_api_spec_changes` starts the change history of an API it
+            // finds empty: it copies nothing, and the history begins with the
+            // next revision. A history recorded by a release that shipped it
+            // is kept.
+            assert.deepEqual(
+              (await store.apiSpecChanges.listByApi(ID.invoices)).items.map((row) => row.id),
+              ids.includes('004_api_spec_changes') ? [ID.specChange] : [],
+            );
+            assert.equal((await store.apiSpecChanges.listByApi(ID.ledger)).total, 0);
             await store.apiSpecChanges.create({
-              api_id: ID.invoices,
-              revision_id: ID.specV2,
-              previous_revision_id: ID.specV1,
+              api_id: ID.ledger,
+              revision_id: ID.ledgerSpec,
+              previous_revision_id: null,
               kind: 'update',
-              version: '2.0.0',
-              previous_version: '1.0.0',
-              revision_seq: 2,
+              version: '1.0.0',
+              previous_version: null,
+              revision_seq: 1,
               report: emptySpecChangeReport(),
             });
-            const history = await store.apiSpecChanges.listByApi(ID.invoices);
+            const history = await store.apiSpecChanges.listByApi(ID.ledger);
             assert.deepEqual(
               history.items.map((row) => row.revision_id),
-              [ID.specV2],
+              [ID.ledgerSpec],
             );
-            assert.equal(await store.apiSpecChanges.deleteByApi(ID.invoices), 1);
+            assert.equal(await store.apiSpecChanges.deleteByApi(ID.ledger), 1);
             // So is `006_user_identities`: a baseline account can be linked to
             // an identity-provider subject, found by it, and unlinked.
             const identity = await store.userIdentities.create({
@@ -1292,18 +1519,25 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
               wideRows.items.find((row) => row.id === wideAudit.id)?.details,
               wideDetails,
             );
-            const wideSpec = await store.apiSpecs.create({
-              api_id: ID.invoices,
-              version: 'upgrade-capacity',
-              raw_spec: 'openapi: 3.1.0',
-              parsed_title: 'T'.repeat(300),
-              parsed_version: 'v'.repeat(100),
-              is_current: false,
-            });
-            const readSpec = await store.apiSpecs.findById(wideSpec.id);
-            assert.equal(readSpec?.parsed_title, 'T'.repeat(300));
-            assert.equal(readSpec?.parsed_version, 'v'.repeat(100));
-            assert.equal(await store.apiSpecs.delete(wideSpec.id), true);
+            // The revision is written and read back inside a transaction that
+            // is then rolled back, so the retained history is left as it was.
+            await assert.rejects(
+              store.transaction(async (tx) => {
+                const wideSpec = await tx.apiSpecs.create({
+                  api_id: ID.invoices,
+                  version: 'upgrade-capacity',
+                  raw_spec: 'openapi: 3.1.0',
+                  parsed_title: 'T'.repeat(300),
+                  parsed_version: 'v'.repeat(100),
+                  is_current: false,
+                });
+                const readSpec = await tx.apiSpecs.findById(wideSpec.id);
+                assert.equal(readSpec?.parsed_title, 'T'.repeat(300));
+                assert.equal(readSpec?.parsed_version, 'v'.repeat(100));
+                throw new Error('rollback capacity probe');
+              }),
+              ROLLBACK_CAPACITY_PROBE,
+            );
 
             // `015_access_gateway_jobs` adds an empty table; the repair that
             // fills it runs at the first start, below. A decision on a
@@ -1338,7 +1572,7 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
             await restarted.migrate();
             assert.deepEqual(await target.ledger(), upgraded);
             assert.deepEqual(await assertFixturePreserved(restarted, fixture), preserved);
-            await assertPortalInvariants(restarted);
+            await assertPortalInvariants(restarted, ids);
           } finally {
             await restarted.close();
           }
@@ -1369,7 +1603,8 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
                 (await repairing.accessGatewayJobs.findBySubject(ID.requestStranded))?.kind,
                 'approve',
               );
-              // Settled decisions owe nothing.
+              // Settled decisions owe nothing, a finished request for more
+              // tools on a grant included.
               for (const id of [
                 ID.grantAccount,
                 ID.grantApp,
@@ -1377,6 +1612,7 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
                 ID.requestApp,
                 ID.requestFormer,
                 ID.requestPending,
+                ...(ids.includes('012_access_request_grant') ? [ID.requestTools] : []),
               ]) {
                 assert.equal(await repairing.accessGatewayJobs.findBySubject(id), null, id);
               }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import type { ApiErrorBody, PublishApiResponse } from '@ferrum-nexus/shared';
+import type { PublishApiResponse } from '@ferrum-nexus/shared';
 
 import {
   attestedControlPlanePolicy,
@@ -13,7 +13,6 @@ import { buildTestApp, SAMPLE_SPEC_YAML } from '../test/helpers.js';
 import { publicEgressPolicy } from '../test/mock-ferrum-edge.js';
 import { EGRESS_POLICY_MAX_BYTES, gatewayDateMillis } from './client.js';
 import {
-  admitBackendEgress,
   assessBackendEgress,
   CLOCK_SKEW_ALLOWANCE_MS,
   createDataPlaneSightings,
@@ -22,18 +21,34 @@ import {
   describeDataPlaneAttestation,
   isUnsupportedEgressPolicySchema,
   MAX_SIGHTINGS,
-  parseBackendEgressPolicy,
   provesDataPlanePublicEgress,
   provesLocalPublicEgress,
   provesPublicEgress,
   readBackendEgressPolicy,
+  type BackendEgressAdmission,
   type BackendEgressPolicy,
   type DataPlaneAttestationProblem,
   type DataPlaneAttestationVerdict,
   type DataPlaneEgressAttestation,
   type DataPlaneEgressPolicy,
   type DataPlaneFreshness,
+  type EgressAdmissionOptions,
 } from './egress-policy.js';
+
+/** The exact owner shape: a reading with nothing set aside, or `null`. */
+function parseBackendEgressPolicy(value: unknown, namespace: string): BackendEgressPolicy | null {
+  const reading = readBackendEgressPolicy(value, namespace);
+  return reading !== null && reading.attestationProblem === null ? reading.policy : null;
+}
+
+/** The admission verdict for a policy read with nothing set aside. */
+function admitBackendEgress(
+  policy: BackendEgressPolicy,
+  options: EgressAdmissionOptions,
+  freshness: DataPlaneFreshness,
+): BackendEgressAdmission | null {
+  return assessBackendEgress({ policy, attestationProblem: null }, options, freshness).admission;
+}
 
 const REQUIRED_LOCAL_PUBLIC_EGRESS = /required local public egress policy/;
 const INVALID_PROTOCOL = /invalid protocol/;
@@ -213,7 +228,7 @@ describe('closed owner egress contract', () => {
     }
   });
 
-  it('keeps the two opt-outs independent of each other and of the guarantee', () => {
+  it('keeps the opt-out independent of the guarantee', () => {
     const local = parseBackendEgressPolicy(publicEgressPolicy(), 'nexus')!;
     const controlPlane = parseBackendEgressPolicy(controlPlanePolicy(), 'nexus')!;
     const localBoth = parseBackendEgressPolicy(
@@ -240,15 +255,10 @@ describe('closed owner egress contract', () => {
       enforcement_scope: 'local-data-plane',
     };
     assert.deepEqual(admitBackendEgress(local, {}, {}), guaranteed);
-    const bothOptOuts = { allowPrivateUpstreams: true, allowUnattestedEdgeEgress: true };
-    assert.deepEqual(admitBackendEgress(local, bothOptOuts, {}), guaranteed);
+    assert.deepEqual(admitBackendEgress(local, { allowPrivateUpstreams: true }, {}), guaranteed);
     assert.equal(admitBackendEgress(controlPlane, {}, {}), null);
-    // The unattested opt-in still needs public_only_guaranteed=true, which schema 2
-    // reports only for local enforcement: a control plane is never admitted by it.
-    const unattested = { allowUnattestedEdgeEgress: true };
-    assert.equal(admitBackendEgress(controlPlane, unattested, {}), null);
-    assert.equal(admitBackendEgress(localBoth, unattested, {}), null);
-    assert.equal(admitBackendEgress(controlPlaneWithAllowOverrides, unattested, {}), null);
+    assert.equal(admitBackendEgress(localBoth, {}, {}), null);
+    assert.equal(admitBackendEgress(controlPlaneWithAllowOverrides, {}, {}), null);
     assert.deepEqual(admitBackendEgress(controlPlane, { allowPrivateUpstreams: true }, {}), {
       egress_profile: 'private-upstreams-opt-in',
       enforcement_scope: 'admission-only',
@@ -409,71 +419,10 @@ describe('closed owner egress contract', () => {
     await assert.rejects(harness.edgeClient.assertBackendEgress());
   });
 
-  it('unattested opt-in keeps screening and admits no schema 2 control plane', async (t) => {
-    const logLines: string[] = [];
-    const harness = await buildTestApp({
-      env: { NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' },
-      deps: {
-        logger: { level: 'warn', stream: { write: (line: string) => logLines.push(line) } },
-      },
-    });
-    t.after(() => harness.close());
-    assert.ok(logLines.some((line) => line.includes('NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true')));
-    assert.ok(!logLines.some((line) => line.includes('NEXUS_ALLOW_PRIVATE_UPSTREAMS=true')));
-    await harness.registerUser();
-    const provider = await harness.registerUser({ role: 'provider' });
-    const payload = (slug: string): Record<string, unknown> => ({
-      name: `API ${slug}`,
-      slug,
-      version: '1.0.0',
-      spec: SAMPLE_SPEC_YAML,
-      auth_plugin: 'key_auth',
-      requestable: true,
-      visibility: 'public',
-    });
-
-    // Nexus's own screening still refuses a private upstream.
-    const refused = await harness.authed(provider, {
-      method: 'POST',
-      url: '/api/apis',
-      payload: { ...payload('unattested-ssrf'), upstream_url: 'http://169.254.169.254/latest' },
-    });
-    assert.equal(refused.statusCode, 400, refused.body);
-    const error = refused.json<ApiErrorBody>().error;
-    assert.equal(error.code, 'SPEC_INVALID');
-    assert.equal((error.details as { reason?: string }).reason, 'private_upstream');
-    assert.equal(harness.edge.proxies.size, 0, 'nothing reached the gateway');
-
-    // Edge v0.9.13 reports a public-mode control plane as not guaranteed, and
-    // the opt-in never reinterprets that as the schema 1 policy-only value.
-    harness.edge.setBackendEgressPolicy(controlPlanePolicy());
-    const controlPlane = await harness.authed(provider, {
-      method: 'POST',
-      url: '/api/apis',
-      payload: payload('unattested-control-plane'),
-    });
-    assert.notEqual(controlPlane.statusCode, 201, controlPlane.body);
-    assert.equal(harness.edge.proxies.size, 0, 'nothing reached the gateway');
-
-    // A local public-only data plane publishes under the guarantee itself.
-    harness.edge.setBackendEgressPolicy(publicEgressPolicy());
-    const published = await harness.authed(provider, {
-      method: 'POST',
-      url: '/api/apis',
-      payload: payload('unattested'),
-    });
-    assert.equal(published.statusCode, 201, published.body);
-    const apiId = published.json<PublishApiResponse>().api.id;
-    const row = (await harness.auditRows('api.publish')).find((entry) => entry.target_id === apiId);
-    assert.equal(row?.details.egress_profile, 'public-guaranteed');
-    assert.equal(row?.details.enforcement_scope, 'local-data-plane');
-  });
-
-  it('warns at startup for each opt-out that is set, and only for those', async (t) => {
+  it('warns at startup when the opt-out is set, and only then', async (t) => {
     for (const [env, expected] of [
       [{}, []],
       [{ NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' }, ['NEXUS_ALLOW_PRIVATE_UPSTREAMS=true']],
-      [{ NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: 'true' }, ['NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true']],
     ] as const) {
       const logLines: string[] = [];
       const harness = await buildTestApp({
@@ -764,12 +713,6 @@ describe('control-plane data-plane attestation (Edge v0.9.14)', () => {
         name,
       );
       assert.equal(admitBackendEgress(policy, { expectedDataPlanes }, now), null, name);
-      // The unattested opt-in still needs the CP's own guarantee, which is never set.
-      assert.equal(
-        admitBackendEgress(policy, { expectedDataPlanes, allowUnattestedEdgeEgress: true }, now),
-        null,
-        name,
-      );
       assert.deepEqual(
         admitBackendEgress(policy, { expectedDataPlanes, allowPrivateUpstreams: true }, now),
         { egress_profile: 'private-upstreams-opt-in', enforcement_scope: 'admission-only' },

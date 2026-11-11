@@ -486,8 +486,6 @@ export interface EnqueueEmail {
 
 /** Transactional email operations. */
 export interface EmailService {
-  /** True when a host is configured, so the worker has somewhere to send. */
-  isConfigured(): Promise<boolean>;
   /** Environment defaults with the `app_settings` overrides applied. */
   resolveSettings(): Promise<ResolvedSmtpSettings>;
   /** Render a template without queueing it (used by tests and previews). */
@@ -750,11 +748,6 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     resolveSettings,
     render,
     prepareRenderer,
-
-    async isConfigured(): Promise<boolean> {
-      const settings = await resolveSettings();
-      return settings.host !== null && settings.host !== '';
-    },
 
     async enqueue(input) {
       const rendered = await render(input.templateKey, input.vars, input.rawHtmlVars);

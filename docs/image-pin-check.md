@@ -7,7 +7,7 @@ actions and Docker `run`, `create`, and `pull` commands (including backslash
 continuations), plus `FERRUM_EDGE_IMAGE` and `NEXUS_IMAGE` assignments in
 `.env`, `.env.*` and `*.env` files. The same two variables in a workflow `env:`
 block or flow map, at workflow, job or step level, are checked too: a literal value
-must be digest-pinned, the locally built images are allowed, and a `${{ … }}` or
+must be digest-pinned, the locally built image is allowed, and a `${{ … }}` or
 other expression fails closed rather than being treated as pinned. A workflow
 block-form `container:` with an `image:` child is checked as well. Docker options
 before the command, `docker container` commands and `docker image pull` are recognized.
@@ -28,14 +28,13 @@ content. Compose files and workflow `image:`/`container:` fields permit
 `${FERRUM_EDGE_IMAGE:?...}` and `${NEXUS_IMAGE:?...}` required deployment inputs;
 workflow `env:` values and env files must name a pinned image and reject them.
 The acceptance fallback
-`${NEXUS_IMAGE:-ferrum-nexus:e2e}` is allowed as a local image. Workflow commands
-may use the locally built `ferrum-nexus:ci` image, and `e2e/.env.example` may name
-the local `ferrum-nexus:e2e` image.
+`${NEXUS_IMAGE:-ferrum-nexus:e2e}` is allowed as a local image. CI builds the
+production image once, as `ferrum-nexus:e2e` in the `acceptance` job, and
+`e2e/.env.example` may name that local image.
 
-For consistency with those local build inputs, both `ferrum-nexus:ci` and
-`ferrum-nexus:e2e` are accepted when written directly in a tracked Compose or
-workflow `image:`/`container:` field or as a workflow `FERRUM_EDGE_IMAGE` or
-`NEXUS_IMAGE` value. In env files, local images remain limited to
+For consistency with that local build input, `ferrum-nexus:e2e` is accepted when
+written directly in a tracked Compose or workflow `image:`/`container:` field or
+as a workflow `FERRUM_EDGE_IMAGE` or `NEXUS_IMAGE` value. In env files, local images remain limited to
 `NEXUS_IMAGE=ferrum-nexus:e2e` in `e2e/.env.example`.
 
 This is a bounded static scan, not a full YAML or shell interpreter. It does not

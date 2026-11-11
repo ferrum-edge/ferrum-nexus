@@ -324,19 +324,6 @@ export function createOpenApiRefResolver(
 }
 
 /**
- * Follow one value with a resolver of its own. For a single lookup only — a
- * caller resolving several references of one document shares one
- * {@link createOpenApiRefResolver} between them.
- */
-export function resolveOpenApiObject(
-  document: unknown,
-  value: Record<string, unknown>,
-  options: OpenApiResolveOptions = {},
-): OpenApiRefResolution {
-  return createOpenApiRefResolver(document, options).resolve(value);
-}
-
-/**
  * The `(in, name)` identity of a resolved parameter, or `null` when it has none
  * — a reference that cannot be resolved, or an object missing either field. A
  * parameter without an identity is never merged with another one.
@@ -359,14 +346,6 @@ function parameterKeyOf(
   const { compact } = options;
   const where = compact ? compact(location) : location;
   return `${where.length}:${where}\u0000${compact ? compact(folded) : folded}`;
-}
-
-/** See {@link parameterKeyOf}; `parameter` is followed through `resolver`. */
-export function openApiParameterKey(
-  resolver: OpenApiRefResolver,
-  parameter: unknown,
-): string | null {
-  return parameterKeyOf(isPlainRecord(parameter) ? resolver.resolve(parameter) : null);
 }
 
 /** How an {@link OpenApiParameterKeyer} reads and spells identities. */
@@ -393,7 +372,7 @@ export interface OpenApiParameterKeyerOptions {
  * every operation is keyed once, not once per reference.
  */
 export interface OpenApiParameterKeyer {
-  /** See {@link openApiParameterKey}, for a parameter already resolved. */
+  /** The identity of a resolved parameter; see `parameterKeyOf`. */
   keyOf(resolution: OpenApiRefResolution | null): string | null;
 }
 
@@ -424,8 +403,8 @@ export interface KeyedOpenApiParameter {
    */
   resolution: OpenApiRefResolution | null;
   /**
-   * See {@link openApiParameterKey}, spelled as the keyer's `compact` rewrites
-   * it; `null` for an entry with no identity.
+   * See {@link OpenApiParameterKeyer.keyOf}, spelled as the keyer's
+   * `compact` rewrites it; `null` for an entry with no identity.
    */
   key: string | null;
   /** Declared on the path item rather than the operation. */

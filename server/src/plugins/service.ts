@@ -95,11 +95,7 @@ import {
   palettePriority,
 } from '../ferrum-admin/palette.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
-import type {
-  EdgePluginConfig,
-  EdgePluginSettings,
-  EdgePluginTrigger,
-} from '../ferrum-admin/types.js';
+import type { EdgePluginConfig } from '../ferrum-admin/types.js';
 import { conflict, notFound, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import { createEdgePluginBinder } from '../publishing/edge-plugins.js';

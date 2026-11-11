@@ -43,11 +43,12 @@
  * stay live for good. The same sweep is what recovers a job whose store write
  * failed after the claim, with no restart involved at all.
  *
- * Rows are claimed singly, so a claim lives as long as one job; how long that
- * is, against {@link TEARDOWN_STALE_AFTER_MS}, is described there. Recovery
- * replaces the ownership token, so a delayed attempt cannot settle a reclaimed
- * job. This database fence does not fence HTTP writes already in flight after
- * a shared Edge lease expires.
+ * Rows are claimed singly, and an attempt renews its claim before each
+ * identity it tears down, so a claim only looks stale when one identity
+ * outlasts {@link TEARDOWN_STALE_AFTER_MS}. Recovery replaces the ownership
+ * token, so a delayed attempt cannot settle a reclaimed job, and its next
+ * renewal fails and stops it. This database fence does not fence HTTP writes
+ * already in flight after a shared Edge lease expires.
  *
  * ## Why there is no `failed` state
  *
@@ -100,11 +101,12 @@ export const TEARDOWN_MAX_BACKOFF_MS = 5 * 60_000;
  * 55 seconds at the defaults; one with the default ceiling of 20 applications
  * can take several minutes on a slow gateway.
  *
- * Jobs are claimed one at a time, so the threshold only has to outlast one
- * job, and five minutes does for an ordinary account. A longer job is released
- * as stale while its worker is still running and a second attempt repeats the
- * same teardown; the generation fence keeps the outcome correct, so the cost
- * is duplicate gateway work and misleading stale-claim log lines.
+ * So the threshold is not asked to outlast a job. `runGatewayTeardown` renews
+ * the claim (`gatewayTeardownJobs.renewClaim`) before each identity, and the
+ * sweep measures from that renewal: five minutes only has to outlast one
+ * identity, about 55 seconds at the defaults. Should one outlast it anyway, the
+ * claim is released, the attempt's next renewal fails and it stops there, and
+ * the generation fence keeps it from settling the job a new claim now owns.
  */
 export const TEARDOWN_STALE_AFTER_MS = 5 * 60_000;
 
@@ -302,9 +304,10 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
 
     // Claimed one at a time rather than as a batch. A batch's last row sits
     // `sending` for as long as every row before it takes, which would put the
-    // stale threshold at batch size × one job's length; claiming singly keeps
-    // a claim's lifetime equal to one job's, which is what lets a five-minute
-    // threshold be quick (see TEARDOWN_STALE_AFTER_MS for its limits).
+    // stale threshold at batch size × one job's length; claiming singly, with
+    // the claim renewed per identity, keeps the sweep measuring progress,
+    // which is what lets a five-minute threshold be quick
+    // (see TEARDOWN_STALE_AFTER_MS).
     for (let taken = 0; taken < batchSize; taken += 1) {
       let job: GatewayTeardownJobRecord | undefined;
       try {

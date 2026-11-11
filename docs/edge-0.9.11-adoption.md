@@ -155,9 +155,9 @@ Edge v0.9.13 changes two response contracts incompatibly and every snapshot toke
   1 (Edge v0.9.12 and earlier) under `unsupported_egress_policy_schema`, so Nexus
   `v0.4.0` pairs with Edge v0.9.13 only. The guarantee rule is unchanged: Nexus
   still requires `local-data-plane` explicitly together with
-  `public_only_guaranteed=true`. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` still
-  requires `public_only_guaranteed=true` and is never relaxed to the policy-only
-  reading schema 1 reported. Against Edge v0.9.13 it therefore admits no pairing
+  `public_only_guaranteed=true`. `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS=true` (since
+  removed) still required `public_only_guaranteed=true` and was never relaxed to the policy-only
+  reading schema 1 reported. Against Edge v0.9.13 it therefore admitted no pairing
   the public profile refuses: a control plane now reports `false`, so a CP/DP
   pairing has no writes unless the operator sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`
   (see [the compatibility notes](operations.md#backend-egress-admission-and-the-public-only-guarantee)).

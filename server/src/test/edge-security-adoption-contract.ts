@@ -2202,7 +2202,13 @@ export function runEdgeSecurityAdoptionContract(
       for (const operation of ['backend', 'revision', 'conversion', 'plugin-config'] as const) {
         it(`${level}: records repair for refused ${operation} compensation`, async () => {
           const published = await publish(level);
-          const proxyId = published.api.ferrum_proxy_id!;
+          // The request-log length when the policy first turned: every gateway
+          // read after it belongs to the compensation, not to the forward write.
+          let refusedAt: number | undefined;
+          const refuse = (): void => {
+            refusedAt ??= harness.edge.requests.length;
+            refusePolicy();
+          };
           const replaceProxy = harness.edgeClient.proxies.replace;
           const replaceSpec = harness.edgeClient.apiSpecs.replace;
           const replacePlugin = harness.edgeClient.pluginConfigs.replace;
@@ -2210,21 +2216,21 @@ export function runEdgeSecurityAdoptionContract(
           harness.edgeClient.proxies.replace = async (...args) => {
             const result = await replaceProxy(...args);
             // Only after a real admitted write, never substitute a production guard.
-            if (!String(args[1].listen_path).includes('/.staging/')) refusePolicy();
+            if (!String(args[1].listen_path).includes('/.staging/')) refuse();
             return result;
           };
           harness.edgeClient.apiSpecs.replace = async (...args) => {
             const result = await replaceSpec(...args);
-            refusePolicy();
+            refuse();
             return result;
           };
           harness.edgeClient.deployments.replace = async (...args) => {
             await replaceDeployment(...args);
-            refusePolicy();
+            refuse();
           };
           harness.edgeClient.pluginConfigs.replace = async (...args) => {
             const result = await replacePlugin(...args);
-            if (operation === 'plugin-config') refusePolicy();
+            if (operation === 'plugin-config') refuse();
             return result;
           };
           restoreMethods.push(() => {
@@ -2275,8 +2281,13 @@ export function runEdgeSecurityAdoptionContract(
             (await harness.store.apis.findById(published.api.id))?.spec_enforcement,
             level,
           );
-          assert.ok(harness.edge.callsTo('GET', '/backend-egress-policy').length > 0);
-          assert.ok(proxyId);
+          assert.notEqual(refusedAt, undefined, 'a forward write was admitted before the refusal');
+          assert.ok(
+            harness.edge.requests
+              .slice(refusedAt)
+              .some((call) => call.method === 'GET' && call.path === '/backend-egress-policy'),
+            'the compensation read the refused policy before giving up',
+          );
         });
       }
     }

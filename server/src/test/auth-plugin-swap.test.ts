@@ -49,6 +49,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import type { AuditLogRecord } from '../db/store.js';
+import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 const WOULD_LOCK_1_ACCOUNT = /would lock 1 account holding access out of it/;
@@ -66,6 +67,7 @@ function errorBody(body: string): ApiErrorBody['error'] {
 
 describe('auth_plugin swaps and the access they disrupt', () => {
   let harness: TestApp;
+  let faults: FaultInjectingStore;
   let provider: TestSession;
   let clients = 0;
 
@@ -172,7 +174,12 @@ describe('auth_plugin swaps and the access they disrupt', () => {
   }
 
   before(async () => {
-    harness = await buildTestApp();
+    harness = await buildTestApp({
+      wrapStore: (store) => {
+        faults = faultInjectingStore(store);
+        return faults.store;
+      },
+    });
     // The first account registered becomes `super_admin`; the provider must not
     // be it, or ownership and administration stop being distinguishable.
     await harness.registerUser({ email: 'swap-founder@example.test' });
@@ -258,6 +265,45 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     assert.equal(summary.details.api_owned_credentials, 1);
     assert.equal(summary.details.revoked_api_credentials, 1);
     assert.deepEqual(summary.details.failed, []);
+  });
+
+  it('answers 200 for a committed swap whose summary row cannot be written (#687)', async () => {
+    const api = await publish('swap-summary-lost');
+    const created = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/apis/${api.id}/test-consumer`,
+      payload: {},
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const testCredential = created.json<CreateTestConsumerResponse>().credential;
+
+    let refusals = 0;
+    faults.failWhen('auditLogs', 'create', (input) => {
+      const hit = (input as { action?: string }).action === 'api.auth_plugin_changed';
+      if (hit) refusals += 1;
+      return hit;
+    });
+    let response: LightMyRequestResponse;
+    try {
+      response = await patchApi(api.id, { auth_plugin: 'jwt_auth' });
+    } finally {
+      faults.clear();
+    }
+
+    assert.equal(refusals, 1, 'the summary insert was attempted and refused');
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json<UpdateApiResponse>().api.auth_plugin, 'jwt_auth');
+    assert.ok(harness.edge.pluginForProxy(api.proxyId, 'jwt_auth'), 'the swap is live');
+    assert.equal(
+      (await harness.store.credentials.findById(testCredential.id))?.status,
+      'revoked',
+      'the revocation that preceded the summary stands',
+    );
+    assert.ok(
+      (await harness.auditRows('api.update')).some((row) => row.target_id === api.id),
+      'the swap itself is still audited',
+    );
+    assert.deepEqual(await summaryRows(api.id), []);
   });
 
   it('swaps freely when nothing depends on the outgoing plugin', async () => {

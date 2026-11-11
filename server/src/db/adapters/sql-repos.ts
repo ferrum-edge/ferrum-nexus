@@ -140,6 +140,7 @@ import type {
 } from '../store.js';
 import {
   API_GATEWAY_PLUGIN_ROLES,
+  assertAuditDetailsKey,
   assertLeaseKeyLength,
   OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
@@ -211,7 +212,7 @@ function userUpdateColumns(patch: UpdateInput<UserRecord>): Record<string, SqlPa
   };
 }
 
-/** Encoded `SET` columns of an access-request patch, shared by both updates. */
+/** Encoded `SET` columns of an access-request patch for `updateIfStatus`. */
 function accessRequestUpdateColumns(
   patch: UpdateInput<AccessRequestRecord>,
 ): Record<string, SqlParam | undefined> {
@@ -833,7 +834,7 @@ async function countByApplication(
   return counts;
 }
 
-function auditWhere(filter: AuditLogFilter): SqlWhereBuilder {
+function auditWhere(dialect: SqlDialect, filter: AuditLogFilter): SqlWhereBuilder {
   const builder = new SqlWhereBuilder()
     .add(filter.actor_user_id, 'actor_user_id = ?', filter.actor_user_id ?? null)
     .add(filter.action, 'action = ?', filter.action ?? null)
@@ -842,11 +843,22 @@ function auditWhere(filter: AuditLogFilter): SqlWhereBuilder {
     .add(filter.from, 'created_at >= ?', filter.from ?? null)
     .add(filter.to, 'created_at < ?', filter.to ?? null);
   if (filter.actions !== undefined) builder.addIn('action', filter.actions);
-  // A literal substring of the stored JSON, not a LIKE pattern: `_` and `%` in
-  // keys and values are ordinary characters, and a value whose JSON holds `\`
-  // matches itself on MySQL too (issue #681, as for searches in #595).
+  // The top-level member, compared as JSON by type and value (issue #681): a
+  // nested member of the same name, or the text inside another value, never
+  // matches, as on MongoDB. PostgreSQL's `->` takes the key itself; MySQL's
+  // JSON comparison of strings follows the column's binary collation.
   for (const [key, value] of Object.entries(filter.details ?? {})) {
-    builder.add(value, 'POSITION(? IN details_json) > 0', `"${key}":${JSON.stringify(value)}`);
+    assertAuditDetailsKey(key);
+    if (dialect === 'pg') {
+      builder.add(value, '(details_json::jsonb -> ?::text) = ?::jsonb', key, JSON.stringify(value));
+    } else {
+      builder.add(
+        value,
+        'JSON_EXTRACT(details_json, ?) = CAST(? AS JSON)',
+        `$."${key}"`,
+        JSON.stringify(value),
+      );
+    }
   }
   return builder;
 }
@@ -1271,13 +1283,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapOrganization(row) : null;
     },
 
-    findByName: async (name) => {
-      const row = await queryOne(exec, 'SELECT * FROM organizations WHERE lower(name) = ?', [
-        name.trim().toLowerCase(),
-      ]);
-      return row ? mapOrganization(row) : null;
-    },
-
     update: async (id, patch) => {
       const set = setParts({ name: patch.name, description: patch.description });
       if (set) {
@@ -1307,8 +1312,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
       return { items: rows.map(mapOrganization), total };
     },
-
-    delete: async (id) => (await execute(exec, 'DELETE FROM organizations WHERE id = ?', [id])) > 0,
   };
 
   /* ── sessions ───────────────────────────────────────────────────────── */
@@ -1360,9 +1363,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     delete: async (id) => (await execute(exec, 'DELETE FROM sessions WHERE id = ?', [id])) > 0,
 
-    deleteByTokenHash: async (tokenHash) =>
-      (await execute(exec, 'DELETE FROM sessions WHERE token_hash = ?', [tokenHash])) > 0,
-
     deleteForUser: async (userId) =>
       execute(exec, 'DELETE FROM sessions WHERE user_id = ?', [userId]),
 
@@ -1401,15 +1401,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     findById: async (id) => {
       const row = await queryOne(exec, 'SELECT * FROM applications WHERE id = ?', [id]);
-      return row ? mapApplication(row) : null;
-    },
-
-    findByOwnerAndName: async (ownerUserId, name) => {
-      const row = await queryOne(
-        exec,
-        'SELECT * FROM applications WHERE owner_user_id = ? AND lower(name) = ?',
-        [ownerUserId, name.trim().toLowerCase()],
-      );
       return row ? mapApplication(row) : null;
     },
 
@@ -1519,13 +1510,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     findBySlug: async (slug) => {
       const row = await queryOne(exec, 'SELECT * FROM apis WHERE lower(slug) = ?', [
         slug.trim().toLowerCase(),
-      ]);
-      return row ? mapApi(row) : null;
-    },
-
-    findByProxyId: async (ferrumProxyId) => {
-      const row = await queryOne(exec, 'SELECT * FROM apis WHERE ferrum_proxy_id = ?', [
-        ferrumProxyId,
       ]);
       return row ? mapApi(row) : null;
     },
@@ -1737,8 +1721,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     listSummaries: async (filter, options) =>
       listSpecRows(filter, options, API_SPEC_SUMMARY_COLUMNS, mapApiSpecSummary),
-
-    delete: async (id) => (await execute(exec, 'DELETE FROM api_specs WHERE id = ?', [id])) > 0,
 
     deleteByApi: async (apiId) => execute(exec, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
 
@@ -2078,20 +2060,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     findById: async (id) => {
       const row = await queryOne(exec, 'SELECT * FROM access_requests WHERE id = ?', [id]);
       return row ? mapAccessRequest(row) : null;
-    },
-
-    update: async (id, patch) => {
-      const set = setParts(accessRequestUpdateColumns(patch));
-      if (set) {
-        await mapSqlConflict('You already have a pending request for this API', () =>
-          execute(exec, `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ?`, [
-            ...set.params,
-            nowIso(),
-            id,
-          ]),
-        );
-      }
-      return accessRequests.findById(id);
     },
 
     updateIfStatus: async (id, expected, patch) => {
@@ -2562,15 +2530,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapConsumer(row) : null;
     },
 
-    findByUsername: async (namespace, ferrumUsername) => {
-      const row = await queryOne(
-        exec,
-        'SELECT * FROM consumers WHERE namespace = ? AND ferrum_username = ?',
-        [namespace, ferrumUsername],
-      );
-      return row ? mapConsumer(row) : null;
-    },
-
     update: async (id, patch) => {
       const set = setParts({
         ferrum_consumer_id: patch.ferrum_consumer_id,
@@ -2725,23 +2684,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapThread(row) : null;
     },
 
-    update: async (id, patch) => {
-      const set = setParts({
-        subject: patch.subject,
-        api_id: patch.api_id,
-        participant_b: patch.participant_b,
-        last_message_at: patch.last_message_at,
-      });
-      if (set) {
-        await execute(exec, `UPDATE message_threads SET ${set.sql}, updated_at = ? WHERE id = ?`, [
-          ...set.params,
-          nowIso(),
-          id,
-        ]);
-      }
-      return threads.findById(id);
-    },
-
     list: async (filter, options) => {
       const builder = new SqlWhereBuilder();
       if (filter.participant_user_id !== undefined) {
@@ -2791,6 +2733,19 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapThread(row) : null;
     },
 
+    listPlatformByParticipants: async (participantIds) => {
+      if (participantIds.length === 0) return [];
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM message_threads
+         WHERE api_id IS NULL AND participant_b IS NULL
+           AND participant_a IN (${placeholders(participantIds.length)})
+         ORDER BY created_at DESC, id DESC`,
+        participantIds,
+      );
+      return rows.map(mapThread);
+    },
+
     touchLastMessage: async (threadId, at) => {
       await execute(
         exec,
@@ -2798,9 +2753,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         [at, nowIso(), threadId],
       );
     },
-
-    delete: async (id) =>
-      (await execute(exec, 'DELETE FROM message_threads WHERE id = ?', [id])) > 0,
   };
 
   /* ── messages ───────────────────────────────────────────────────────── */
@@ -2863,15 +2815,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return { items: rows.map(mapMessage), total };
     },
 
-    findLatestByThread: async (threadId) => {
-      const row = await queryOne(
-        exec,
-        'SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT 1',
-        [threadId],
-      );
-      return row ? mapMessage(row) : null;
-    },
-
     findLatestByThreads: async (threadIds) => {
       if (threadIds.length === 0) return [];
       const placeholders = threadIds.map(() => '?').join(', ');
@@ -2907,9 +2850,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           WHERE sender_user_id = ? AND created_at >= ? AND broadcast = 0`,
         [senderUserId, sinceIso],
       ),
-
-    deleteByThread: async (threadId) =>
-      execute(exec, 'DELETE FROM messages WHERE thread_id = ?', [threadId]),
   };
 
   /* ── notifications ──────────────────────────────────────────────────── */
@@ -3471,6 +3411,16 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         [at, at, job.id, job.generation],
       )) > 0,
 
+    // A renewal in the claim's own millisecond changes nothing; it still
+    // counts, because MySQL reports matched rows (CLIENT_FOUND_ROWS).
+    renewClaim: async (job, at) =>
+      (await execute(
+        exec,
+        `UPDATE gateway_teardown_jobs SET updated_at = ?
+         WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, job.id, job.generation],
+      )) > 0,
+
     reschedule: async (job, nextAttemptAt, lastError) =>
       (await execute(
         exec,
@@ -3636,9 +3586,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
          WHERE status = 'sending' AND updated_at <= ?`,
         [nowIso(), nowIso(), olderThan],
       ),
-
-    deleteByUser: async (userId) =>
-      (await execute(exec, 'DELETE FROM account_recovery_jobs WHERE user_id = ?', [userId])) > 0,
   };
 
   /* ── accessGatewayJobs ──────────────────────────────────────────────── */
@@ -3840,7 +3787,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     list: async (filter, options) => {
-      const where = auditWhere(filter).build();
+      const where = auditWhere(dialect, filter).build();
       const { limit, offset } = page(options);
       const total = await queryCount(
         exec,
@@ -3856,7 +3803,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     count: async (filter) => {
-      const where = auditWhere(filter).build();
+      const where = auditWhere(dialect, filter).build();
       return queryCount(exec, `SELECT COUNT(*) AS cnt FROM audit_logs${where.sql}`, where.params);
     },
   };
@@ -3886,16 +3833,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     get: async (key) => {
       const row = await queryOne(exec, 'SELECT * FROM app_settings WHERE "key" = ?', [key]);
       return row ? mapSetting(row) : null;
-    },
-
-    getMany: async (keys) => {
-      if (keys.length === 0) return [];
-      const rows = await queryAll(
-        exec,
-        `SELECT * FROM app_settings WHERE "key" IN (${placeholders(keys.length)})`,
-        keys,
-      );
-      return rows.map(mapSetting);
     },
 
     set: async (key, value, encrypted = false) => {

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CSRF_COOKIE, CSRF_HEADER, ERROR_CODES } from '@ferrum-nexus/shared';
 import {
+  adminApi,
   ApiError,
   authApi,
   buildQuery,
@@ -187,6 +188,16 @@ describe('lib/api', () => {
     expect(url).toBe('/api/organizations/org%201');
     expect(init.method).toBe('PATCH');
     expect(JSON.parse(String(init.body))).toEqual({ name: 'Platform' });
+  });
+
+  it('resets an email template through DELETE /api/admin/email-templates/:key', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(jsonResponse({ template: { key: 'mass' } }));
+
+    await adminApi.resetEmailTemplate('mass');
+
+    const [url, init] = lastCall();
+    expect(url).toBe('/api/admin/email-templates/mass');
+    expect(init.method).toBe('DELETE');
   });
 
   it('builds query strings, dropping empty values', () => {

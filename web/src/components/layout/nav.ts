@@ -160,9 +160,3 @@ export function visibleNavItems(role: Role | null): NavItem[] {
 export function navItemsForSection(role: Role | null, section: NavSection): NavItem[] {
   return visibleNavItems(role).filter((item) => item.section === section);
 }
-
-/** The minimum role required to enter `path`, or `null` when it is not a nav path. */
-export function requiredRoleForPath(path: string): Role | null {
-  const match = NAV_ITEMS.find((item) => item.to === path);
-  return match ? match.minRole : null;
-}

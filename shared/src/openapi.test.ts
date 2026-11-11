@@ -9,12 +9,27 @@ import {
   createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
-  openApiParameterKey,
   openApiRefSiblingsApply,
-  resolveOpenApiObject,
   resolveOpenApiPointer,
+  type OpenApiRefResolution,
+  type OpenApiRefResolver,
+  type OpenApiResolveOptions,
   type OpenApiResolveStats,
 } from './openapi.js';
+
+/** One lookup with a resolver of its own. */
+function resolveOnce(
+  document: unknown,
+  value: Record<string, unknown>,
+  options: OpenApiResolveOptions = {},
+): OpenApiRefResolution {
+  return createOpenApiRefResolver(document, options).resolve(value);
+}
+
+/** The identity production code reads for one `parameters` entry. */
+function parameterKey(resolver: OpenApiRefResolver, parameter: unknown): string | null {
+  return keyOpenApiParameters(resolver, [parameter], false)[0]!.key;
+}
 
 const tenant = { name: 'tenant_id', in: 'header', required: true };
 
@@ -87,17 +102,17 @@ describe('OpenAPI JSON pointers', () => {
 
 describe('OpenAPI Reference Objects', () => {
   it('follows chains and reports each kind of failure', () => {
-    const alias = resolveOpenApiObject(spec, { $ref: '#/components/parameters/Alias' });
+    const alias = resolveOnce(spec, { $ref: '#/components/parameters/Alias' });
     assert.deepEqual(alias, { ok: true, value: tenant, overrides: {} });
     assert.equal(alias.ok && alias.value, tenant);
 
-    const self = resolveOpenApiObject(spec, { $ref: '#/components/parameters/Self' });
+    const self = resolveOnce(spec, { $ref: '#/components/parameters/Self' });
     assert.deepEqual(self, { ok: false, ref: '#/components/parameters/Self', reason: 'cycle' });
 
-    const missing = resolveOpenApiObject(spec, { $ref: '#/nothing' });
+    const missing = resolveOnce(spec, { $ref: '#/nothing' });
     assert.deepEqual(missing, { ok: false, ref: '#/nothing', reason: 'missing' });
 
-    const external = resolveOpenApiObject(spec, { $ref: 'x.yaml#/a' });
+    const external = resolveOnce(spec, { $ref: 'x.yaml#/a' });
     assert.deepEqual(external, { ok: false, ref: 'x.yaml#/a', reason: 'external' });
   });
 
@@ -135,7 +150,7 @@ describe('OpenAPI Reference Objects', () => {
     assert.equal(tail.ok && tail.value.name, 'end');
     const result = resolver.resolve({ $ref: '#/links/L0' });
     assert.deepEqual(result, { ok: false, ref: '#/links/L0', reason: 'depth' });
-    const fresh = resolveOpenApiObject({ links }, { $ref: '#/links/L0' });
+    const fresh = resolveOnce({ links }, { $ref: '#/links/L0' });
     assert.deepEqual(fresh, result);
   });
 
@@ -147,13 +162,13 @@ describe('OpenAPI Reference Objects', () => {
     assert.equal(openApiRefSiblingsApply(null), false);
 
     const outer = { $ref: '#/components/parameters/Alias', description: 'outer' };
-    const legacy = resolveOpenApiObject(spec, outer);
+    const legacy = resolveOnce(spec, outer);
     assert.deepEqual(legacy, { ok: true, value: tenant, overrides: {} });
-    const current = resolveOpenApiObject(spec, outer, { siblingsApply: true });
+    const current = resolveOnce(spec, outer, { siblingsApply: true });
     assert.deepEqual(current, { ok: true, value: tenant, overrides: { description: 'outer' } });
 
     const plain = { $ref: '#/components/parameters/Alias' };
-    const inner = resolveOpenApiObject(spec, plain, { siblingsApply: true });
+    const inner = resolveOnce(spec, plain, { siblingsApply: true });
     assert.deepEqual(inner, { ok: true, value: tenant, overrides: { description: 'alias' } });
   });
 
@@ -209,26 +224,26 @@ describe('OpenAPI Reference Objects', () => {
 describe('OpenAPI parameter inheritance', () => {
   it('identifies a parameter by location and name, headers case-insensitively', () => {
     const resolver = createOpenApiRefResolver(spec);
-    assert.equal(openApiParameterKey(resolver, { name: 'id', in: 'path' }), '4:path\u0000id');
+    assert.equal(parameterKey(resolver, { name: 'id', in: 'path' }), '4:path\u0000id');
 
-    const upper = openApiParameterKey(resolver, { name: 'X-Trace', in: 'header' });
-    const lower = openApiParameterKey(resolver, { name: 'x-trace', in: 'header' });
+    const upper = parameterKey(resolver, { name: 'X-Trace', in: 'header' });
+    const lower = parameterKey(resolver, { name: 'x-trace', in: 'header' });
     assert.equal(upper, lower);
 
-    const queryUpper = openApiParameterKey(resolver, { name: 'Id', in: 'query' });
-    const queryLower = openApiParameterKey(resolver, { name: 'id', in: 'query' });
+    const queryUpper = parameterKey(resolver, { name: 'Id', in: 'query' });
+    const queryLower = parameterKey(resolver, { name: 'id', in: 'query' });
     assert.notEqual(queryUpper, queryLower);
 
-    const referenced = openApiParameterKey(resolver, { $ref: '#/components/parameters/Tenant' });
+    const referenced = parameterKey(resolver, { $ref: '#/components/parameters/Tenant' });
     assert.equal(referenced, '6:header\u0000tenant_id');
     // Whatever `in` and `name` hold, two different pairs never share a key.
     assert.notEqual(
-      openApiParameterKey(resolver, { name: 'b', in: 'a\u0000' }),
-      openApiParameterKey(resolver, { name: '\u0000b', in: 'a' }),
+      parameterKey(resolver, { name: 'b', in: 'a\u0000' }),
+      parameterKey(resolver, { name: '\u0000b', in: 'a' }),
     );
-    assert.equal(openApiParameterKey(resolver, { $ref: '#/components/parameters/Self' }), null);
-    assert.equal(openApiParameterKey(resolver, { name: 'id' }), null);
-    assert.equal(openApiParameterKey(resolver, 'not a parameter'), null);
+    assert.equal(parameterKey(resolver, { $ref: '#/components/parameters/Self' }), null);
+    assert.equal(parameterKey(resolver, { name: 'id' }), null);
+    assert.equal(parameterKey(resolver, 'not a parameter'), null);
   });
 
   it('lets operation parameters replace path-level ones with the same identity', () => {

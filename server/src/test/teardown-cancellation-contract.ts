@@ -141,14 +141,18 @@ export function runTeardownCancellationContract(
               audit: harness.services.audit,
               batchSize: 1,
               credentials: {
-                async disableGatewayAccess(id, subject) {
+                async disableGatewayAccess(id, subject, options) {
                   assert.equal(phase, 'after refusal', 'the initial cancel never revokes');
                   await reenable();
                   // Do not pause the credential service's own active check:
                   // the barrier belongs to the worker's post-refusal read.
                   armed = false;
                   try {
-                    return await harness.services.credentials.disableGatewayAccess(id, subject);
+                    return await harness.services.credentials.disableGatewayAccess(
+                      id,
+                      subject,
+                      options,
+                    );
                   } finally {
                     armed = true;
                   }

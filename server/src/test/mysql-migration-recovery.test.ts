@@ -194,11 +194,11 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
     }
   });
 
-  it('replays the LONGTEXT widenings across every interruption, preserving data (#604, #605)', async () => {
+  it('replays the LONGTEXT widenings and the circuit_breaker CHECK across every interruption, preserving data (#604, #605, #677)', async () => {
     const migration = migrations.find((file) => file.id === '014_mysql_text_capacity');
     assert.ok(migration);
     const statements = splitSqlStatements(migration.sql);
-    assert.equal(statements.length, 8);
+    assert.equal(statements.length, 9);
     const expected = await fixture(async (pool) => {
       await runMysqlMigrations(pool);
       return schema(pool);
@@ -280,6 +280,45 @@ describe('MySQL migration recovery', { skip: !adminUrl, timeout: 600_000 }, () =
         assert.deepEqual(after, before);
       });
     }
+  });
+
+  it('refuses a circuit_breaker CHECK it does not recognise without recording 014 (#677)', async () => {
+    for (const definition of [
+      'CHECK (circuit_breaker IN (0, 1, 2))',
+      'CHECK (circuit_breaker >= 0)',
+      'CHECK (circuit_breaker IN (0, 1)) NOT ENFORCED',
+    ]) {
+      await fixture(async (pool) => {
+        await runMysqlMigrations(
+          pool,
+          migrations.filter((file) => file.id < '014_mysql_text_capacity'),
+        );
+        await pool.query(`ALTER TABLE apis ADD CONSTRAINT ck_apis_circuit_breaker ${definition}`);
+        const [before] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
+        await assert.rejects(() => runMysqlMigrations(pool), HAS_INCOMPATIBLE_DEFINITION);
+        const [after] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
+        assert.deepEqual(after, before);
+      });
+    }
+  });
+
+  it('refuses a circuit_breaker outside 0 and 1 once 014 has run (#677)', async () => {
+    await fixture(async (pool) => {
+      await runMysqlMigrations(pool);
+      await pool.query(`INSERT INTO users
+        (id, email, password_hash, display_name, role, created_at, updated_at)
+        VALUES ('breaker-owner', 'breaker@example.test', 'hash', 'Owner', 'provider',
+                '2026-01-01', '2026-01-01')`);
+      await pool.query(`INSERT INTO apis
+        (id, name, slug, owner_user_id, namespace, version, auth_plugin, created_at, updated_at)
+        VALUES ('breaker-api', 'Items', 'items', 'breaker-owner', 'nexus', '1', 'key_auth',
+                '2026-01-01', '2026-01-01')`);
+      await pool.query("UPDATE apis SET circuit_breaker = 1 WHERE id = 'breaker-api'");
+      await assert.rejects(
+        () => pool.query("UPDATE apis SET circuit_breaker = 2 WHERE id = 'breaker-api'"),
+        (error: unknown) => (error as { code?: string }).code === 'ER_CHECK_CONSTRAINT_VIOLATED',
+      );
+    });
   });
 
   it('resumes after every committed CREATE and before recording the baseline', async () => {

@@ -640,7 +640,7 @@ describe('sqlite store', () => {
         (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
       );
 
-      await store.accessRequests.update(request.id, {
+      await store.accessRequests.updateIfStatus(request.id, 'pending', {
         status: 'approved',
         decided_by: owner.id,
         decided_at: nowIso(),
@@ -661,10 +661,7 @@ describe('sqlite store', () => {
         ferrum_username: `nexus-user-${user.id}`,
       });
       assert.deepEqual(await store.consumers.findByUserAndNamespace(user.id, 'nexus'), consumer);
-      assert.deepEqual(
-        await store.consumers.findByUsername('nexus', consumer.ferrum_username),
-        consumer,
-      );
+      assert.deepEqual(await store.consumers.findByFerrumId(user.id), consumer);
 
       await assert.rejects(
         () =>
@@ -797,7 +794,9 @@ describe('sqlite store', () => {
         { key: 'registration', value: { open_registration: false } },
       ]);
       assert.deepEqual((await store.settings.get('branding'))?.value, { portal_name: 'Renamed' });
-      assert.equal((await store.settings.getMany(['branding', 'registration'])).length, 2);
+      assert.deepEqual((await store.settings.get('registration'))?.value, {
+        open_registration: false,
+      });
       assert.equal(await store.settings.delete('branding'), true);
     });
 

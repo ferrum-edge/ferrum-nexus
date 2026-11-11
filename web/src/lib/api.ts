@@ -1,9 +1,14 @@
 /**
  * Typed client for the Nexus HTTP API.
  *
- * Every function here maps 1:1 onto a route from the design document's "HTTP
- * API" section and is typed with the DTOs from `@ferrum-nexus/shared` — the SPA
- * never declares its own wire shapes.
+ * A complete mirror of the server's routes: every route has a function here,
+ * whether or not a page calls it yet, because CLAUDE.md's "Adding a route"
+ * adds the client call with the route. A route can have more than one (`me`
+ * and `meSilent` differ only in how a 401 is handled). The single-sign-on
+ * `start` route is a browser navigation, so it is a URL builder, and the
+ * identity provider's `callback` has none. Every function is typed with the
+ * DTOs from `@ferrum-nexus/shared` — the SPA never declares its own wire
+ * shapes.
  *
  * Transport rules:
  * - same-origin `/api` prefix, cookies always sent (`credentials: 'include'`);
@@ -133,6 +138,7 @@ import {
   type ResendVerificationResponse,
   type ResetPasswordRequest,
   type ResetPasswordResponse,
+  type ResetEmailTemplateResponse,
   type ReleaseUserAddressRequest,
   type ReleaseUserAddressResponse,
   type RetryGatewayTeardownResponse,
@@ -695,6 +701,8 @@ export const adminApi = {
     body: UpdateEmailTemplateRequest,
   ): Promise<UpdateEmailTemplateResponse> =>
     put<UpdateEmailTemplateResponse>(`/admin/email-templates/${encodeURIComponent(key)}`, body),
+  resetEmailTemplate: (key: EmailTemplateKey): Promise<ResetEmailTemplateResponse> =>
+    del<ResetEmailTemplateResponse>(`/admin/email-templates/${encodeURIComponent(key)}`),
   massEmail: (body: MassEmailRequest): Promise<MassEmailResponse> =>
     post<MassEmailResponse>('/admin/mass-email', body),
   auditLogs: (query: ListAuditLogsQuery = {}): Promise<ListAuditLogsResponse> =>

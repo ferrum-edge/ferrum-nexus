@@ -9,8 +9,8 @@
  * with the same default. A handful of extra variables exist for testing and
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
  * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_BRANDING_CACHE_MS`, `NEXUS_HEALTH_PROBE_TIMEOUT_MS`,
- * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`, `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`,
- * `NEXUS_EXPECTED_DATA_PLANES`, `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
+ * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`, `NEXUS_EXPECTED_DATA_PLANES`,
+ * `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
  */
 
@@ -510,20 +510,6 @@ export interface NexusConfig {
    */
   allowPrivateUpstreams: boolean;
   /**
-   * `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS`: waive the gateway's public-only
-   * attestation for backend writes. Defaults to `false`.
-   *
-   * Narrower than {@link allowPrivateUpstreams}: Nexus keeps its own suffix,
-   * IP-literal and resolved-address screening of every upstream. It still
-   * requires `public_only_guaranteed=true`, which egress policy schema 2 reports
-   * only for a local data plane in public mode with no allow CIDRs, the pairing
-   * the public profile already admits, so it admits no control-plane/data-plane
-   * pairing. Those publish under the public profile through
-   * `NEXUS_EXPECTED_DATA_PLANES` (Edge v0.9.14 and later), or under
-   * {@link allowPrivateUpstreams}.
-   */
-  allowUnattestedEdgeEgress: boolean;
-  /**
    * How many distinct data-plane processes (`node_id`) a control plane must
    * report connected for its data-plane attestation to prove public-only egress
    * (`NEXUS_EXPECTED_DATA_PLANES`, a positive integer). Each Edge data-plane
@@ -715,7 +701,6 @@ const envSchema = z.object({
   NEXUS_MAX_MASS_EMAIL_BYTES: intish(DEFAULT_MAX_MASS_EMAIL_BYTES, 0, 17_179_869_184),
   NEXUS_MAX_MASS_EMAILS_PER_DAY: intish(DEFAULT_MAX_MASS_EMAILS_PER_DAY, 0, 100_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
-  NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS: boolish(false),
   NEXUS_EXPECTED_DATA_PLANES: optionalPositiveInt(1_000_000),
   NEXUS_ALLOW_ENV_OVERRIDE: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
@@ -1033,7 +1018,6 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     maxMassEmailBytes: raw.NEXUS_MAX_MASS_EMAIL_BYTES,
     maxMassEmailsPerDay: raw.NEXUS_MAX_MASS_EMAILS_PER_DAY,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
-    allowUnattestedEdgeEgress: raw.NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS,
     expectedDataPlanes: raw.NEXUS_EXPECTED_DATA_PLANES,
     allowEnvOverride: raw.NEXUS_ALLOW_ENV_OVERRIDE,
     webDistPath: raw.NEXUS_WEB_DIST,

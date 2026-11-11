@@ -21,6 +21,19 @@ export interface FaultInjectingStore {
   failNext(repo: keyof NexusStore, method: string, error?: Error): void;
   /** Fail after this many successful calls to the same repository method. */
   failAfter(repo: keyof NexusStore, method: string, successfulCalls: number, error?: Error): void;
+  /**
+   * Reject every call to `repo.method` whose arguments `matches` accepts, until
+   * {@link FaultInjectingStore.clear}: a fault no retry gets past, as when the
+   * database keeps refusing one account's rows. Not listed by `pending`.
+   */
+  failWhen(
+    repo: keyof NexusStore,
+    method: string,
+    matches: (...args: unknown[]) => boolean,
+    error?: Error,
+  ): void;
+  /** Disarm every fault armed with {@link FaultInjectingStore.failWhen}. */
+  clear(): void;
   /** Faults armed but not yet consumed, as `repo.method`. */
   pending(): string[];
 }
@@ -38,6 +51,7 @@ export interface FaultInjectingStore {
  */
 export function faultInjectingStore(base: NexusStore): FaultInjectingStore {
   const armed = new Map<string, { error: Error; remaining: number }>();
+  const persistent = new Map<string, { matches: (...args: unknown[]) => boolean; error: Error }>();
 
   function wrapRepo(repoName: string, repo: object): object {
     return new Proxy(repo, {
@@ -46,6 +60,8 @@ export function faultInjectingStore(base: NexusStore): FaultInjectingStore {
         if (typeof property !== 'string' || typeof value !== 'function') return value;
         const faultKey = `${repoName}.${property}`;
         return (...args: unknown[]): unknown => {
+          const always = persistent.get(faultKey);
+          if (always?.matches(...args)) return Promise.reject(always.error);
           const fault = armed.get(faultKey);
           if (fault?.remaining === 0) {
             armed.delete(faultKey);
@@ -95,6 +111,17 @@ export function faultInjectingStore(base: NexusStore): FaultInjectingStore {
       error = new Error(`injected failure in ${String(repo)}.${method}`),
     ) {
       armed.set(`${String(repo)}.${method}`, { error, remaining: successfulCalls });
+    },
+    failWhen(
+      repo,
+      method,
+      matches,
+      error = new Error(`injected failure in ${String(repo)}.${method}`),
+    ) {
+      persistent.set(`${String(repo)}.${method}`, { matches, error });
+    },
+    clear() {
+      persistent.clear();
     },
     pending() {
       return [...armed.keys()];

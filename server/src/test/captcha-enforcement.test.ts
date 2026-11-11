@@ -94,7 +94,6 @@ describe('CAPTCHA enforcement disabled (break-glass)', () => {
     assert.equal(response.statusCode, 200, response.body);
     assert.equal(response.json<CaptchaConfigResponse>().enabled, false);
     assert.equal(response.json<CaptchaConfigResponse>().site_key, null);
-    assert.equal(await harness.services.captcha.isEnabled(), false);
   });
 
   it('reports itself to an administrator instead of looking like a bug', async () => {

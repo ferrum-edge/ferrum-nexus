@@ -343,14 +343,6 @@ function decryptBlob<T>(key: Buffer, blob: string, aad: string | undefined, pref
   }
 }
 
-/** True when `value` looks like a blob produced by {@link encryptJsonWithKey}. */
-export function isEncryptedBlob(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    (value.startsWith(`${ENCRYPTED_PREFIX}:`) || value.startsWith(`${SETTINGS_ENCRYPTED_PREFIX}:`))
-  );
-}
-
 /* ── Bound helper ───────────────────────────────────────────────────────── */
 
 /** Cryptographic operations bound to a single `NEXUS_SECRET_KEY`. */

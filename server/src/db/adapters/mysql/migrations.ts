@@ -31,6 +31,15 @@ const CREATE_INDEX = /^CREATE INDEX ([a-z][a-z0-9_]*) ON ([a-z][a-z0-9_]*) \((.+
  */
 const WIDEN_TO_LONGTEXT =
   /^ALTER TABLE ([a-z][a-z0-9_]*) MODIFY COLUMN ([a-z][a-z0-9_]*) LONGTEXT (NOT NULL DEFAULT \('\{\}'\)|NOT NULL|DEFAULT NULL)$/i;
+/**
+ * A 0/1 CHECK on a boolean column (`014_mysql_text_capacity` adds the
+ * `apis.circuit_breaker` one the other dialects' baselines declare). Only this
+ * shape, so the replay check below can compare the finished constraint.
+ */
+const ADD_BOOLEAN_CHECK =
+  /^ALTER TABLE ([a-z][a-z0-9_]*) ADD CONSTRAINT ([a-z][a-z0-9_]*) CHECK \(([a-z][a-z0-9_]*) IN \(0, 1\)\)$/i;
+/** What `information_schema.CHECK_CONSTRAINTS` adds around a condition. */
+const CHECK_CLAUSE_NOISE = /[`\s]/g;
 /** The column types a widening may start from: what earlier releases created. */
 const WIDENABLE_TYPES = new Set(['text', 'longtext']);
 const WIDENABLE_VARCHAR = /^varchar\([1-9][0-9]*\)$/;
@@ -71,11 +80,31 @@ interface AddIndex {
   columns: { name: string; direction: 'A' | 'D' }[];
 }
 
-type MigrationStep = string | AddColumn | AddIndex | WidenColumn;
+interface AddCheck {
+  kind: 'check';
+  statement: string;
+  table: string;
+  name: string;
+  /** The condition as {@link checkClause} normalises it. */
+  clause: string;
+}
+
+type MigrationStep = string | AddColumn | AddIndex | WidenColumn | AddCheck;
 
 /**
- * Only replay-verifiable additions, LONGTEXT widenings and the idempotent
- * priority backfill are supported.
+ * A CHECK condition without identifier quotes, whitespace, case or enclosing
+ * parentheses: `circuit_breaker IN (0, 1)` and MySQL's own
+ * ``(`circuit_breaker` in (0,1))`` both become `circuit_breakerin(0,1)`.
+ */
+function checkClause(text: string): string {
+  let clause = text.replace(CHECK_CLAUSE_NOISE, '').toLowerCase();
+  while (clause.startsWith('(') && clause.endsWith(')')) clause = clause.slice(1, -1);
+  return clause;
+}
+
+/**
+ * Only replay-verifiable additions, LONGTEXT widenings, boolean CHECKs and the
+ * idempotent priority backfill are supported.
  */
 function migrationSteps(migration: MigrationFile): MigrationStep[] {
   return splitSqlStatements(migration.sql).map<MigrationStep>((sql) => {
@@ -93,6 +122,16 @@ function migrationSteps(migration: MigrationFile): MigrationStep[] {
         column: widen[2]!,
         nullable: widen[3]!.toUpperCase() === 'DEFAULT NULL',
         jsonDefault: widen[3]!.toUpperCase().includes('DEFAULT ('),
+      };
+    }
+    const check = ADD_BOOLEAN_CHECK.exec(statement);
+    if (check) {
+      return {
+        kind: 'check',
+        statement,
+        table: check[1]!,
+        name: check[2]!,
+        clause: checkClause(`${check[3]!} IN (0, 1)`),
       };
     }
     const index = CREATE_INDEX.exec(statement);
@@ -212,6 +251,36 @@ async function columnWidened(
   return type === 'longtext';
 }
 
+/**
+ * Whether a CHECK already landed. `ADD CONSTRAINT` commits on its own, so a
+ * replay after an interruption finds it and skips it. A constraint of that name
+ * on another table, not enforced, or with another condition is refused.
+ */
+async function checkExists(connection: mysql.PoolConnection, step: AddCheck): Promise<boolean> {
+  const [rows] = await connection.execute<mysql.RowDataPacket[]>(
+    `SELECT t.TABLE_NAME, t.ENFORCED, c.CHECK_CLAUSE
+       FROM information_schema.TABLE_CONSTRAINTS t
+       JOIN information_schema.CHECK_CONSTRAINTS c
+         ON c.CONSTRAINT_SCHEMA = t.CONSTRAINT_SCHEMA AND c.CONSTRAINT_NAME = t.CONSTRAINT_NAME
+      WHERE t.CONSTRAINT_SCHEMA = DATABASE() AND t.CONSTRAINT_TYPE = 'CHECK'
+        AND t.CONSTRAINT_NAME = ?`,
+    [step.name],
+  );
+  const constraint = rows[0];
+  if (!constraint) return false;
+  if (
+    rows.length !== 1 ||
+    constraint.TABLE_NAME !== step.table ||
+    constraint.ENFORCED !== 'YES' ||
+    checkClause(String(constraint.CHECK_CLAUSE)) !== step.clause
+  ) {
+    throw new Error(
+      `MySQL migration check ${step.table}.${step.name} has an incompatible definition`,
+    );
+  }
+  return true;
+}
+
 async function indexExists(connection: mysql.PoolConnection, step: AddIndex): Promise<boolean> {
   const [rows] = await connection.execute<mysql.RowDataPacket[]>(
     `SELECT COLUMN_NAME, COLLATION, NON_UNIQUE, SUB_PART, INDEX_TYPE, IS_VISIBLE, EXPRESSION
@@ -261,7 +330,9 @@ async function applyMigration(
           ? columnExists(connection, step)
           : step.kind === 'widen'
             ? columnWidened(connection, step)
-            : indexExists(connection, step);
+            : step.kind === 'check'
+              ? checkExists(connection, step)
+              : indexExists(connection, step);
       if (!(await present())) {
         await connection.query(step.statement);
         if (!(await present())) {

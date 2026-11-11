@@ -258,7 +258,7 @@ FROM build AS runtime
     def test_workflow_non_container_docker_commands_are_ignored(self):
         workflow = (
             'steps:\n'
-            '  - run: docker build -t ferrum-nexus:ci -f docker/Dockerfile .\n'
+            '  - run: docker build -t ferrum-nexus:e2e -f docker/Dockerfile .\n'
             '  - run: docker version && docker ps  # never run a container here\n'
             '  - run: docker exec app npm run test\n'
             '  - run: docker network create ci\n'
@@ -329,9 +329,11 @@ FROM build AS runtime
     def test_local_images_are_allowed_in_workflow_and_compose_image_fields(self):
         for path in (Path('docker-compose.yml'), Path('.github/workflows/ci.yml')):
             with self.subTest(path=path):
-                refs = list(image_fields(path, 'image: ferrum-nexus:ci\n'))
-                self.assertEqual([ref for _, ref in refs], ['ferrum-nexus:ci'])
+                refs = list(image_fields(path, 'image: ferrum-nexus:e2e\n'))
+                self.assertEqual([ref for _, ref in refs], ['ferrum-nexus:e2e'])
                 self.assertIsNone(error_for(refs[0][1]))
+                retired = list(image_fields(path, 'image: ferrum-nexus:ci\n'))
+                self.assertIsNotNone(error_for(retired[0][1]))
 
     def test_workflow_option_value_with_substitution_is_consumed(self):
         for command in (

@@ -185,12 +185,10 @@ describe('ferrum admin client', () => {
     assert.deepEqual(stored.credentials.basicauth?.[1], {
       password_hash: mockBasicPasswordHash('appended-password'),
     });
-    await client.consumers.replaceCredentials('basic-hashing', 'basicauth', [
-      { password: 'replacement-password' },
-    ]);
     const snapshot = await client.consumers.verification('basic-hashing');
     assert.deepEqual(snapshot?.consumer.credentials.basicauth, [
-      { password_hash: mockBasicPasswordHash('replacement-password') },
+      { password_hash: mockBasicPasswordHash('initial-password') },
+      { password_hash: mockBasicPasswordHash('appended-password') },
     ]);
     await client.consumers.replace(
       'basic-hashing',
@@ -203,10 +201,11 @@ describe('ferrum admin client', () => {
       snapshot!.etag,
     );
     assert.deepEqual(stored.credentials.basicauth, [
-      { password_hash: mockBasicPasswordHash('replacement-password') },
+      { password_hash: mockBasicPasswordHash('initial-password') },
+      { password_hash: mockBasicPasswordHash('appended-password') },
     ]);
     assert.deepEqual(stored.acl_groups, ['approved']);
-    assert.ok(!JSON.stringify(stored).includes('replacement-password'));
+    assert.ok(!JSON.stringify(stored).includes('appended-password'));
     const refreshed = await client.consumers.verification(stored.id);
     const response = await rawConsumerPut(
       stored.id,
@@ -237,7 +236,6 @@ describe('ferrum admin client', () => {
       const stored = edge.consumers.get(`nexus/closed-${type}`)!;
       const before = structuredClone(stored);
       await assert.rejects(client.consumers.addCredential(stored.id, type, entry));
-      await assert.rejects(client.consumers.replaceCredentials(stored.id, type, [entry]));
       const snapshot = await client.consumers.verification(stored.id);
       const response = await rawConsumerPut(stored.id, { [type]: [entry] }, snapshot!.etag);
       assert.equal(response.status, 400);
@@ -2404,5 +2402,40 @@ describe('ferrum admin client', () => {
       await assert.rejects(() => serialize('k', async () => Promise.reject(new Error('nope'))));
       assert.equal(await serialize('k', async () => 'recovered'), 'recovered');
     });
+  });
+});
+
+describe('ferrum admin client audience', () => {
+  it('stamps the configured aud, and only then, as the gateway requires', async () => {
+    // The configured half of "no `aud` unless configured": a gateway that sets
+    // an audience accepts the client that names it and refuses the one that
+    // does not; the default gateway refuses any `aud` at all.
+    const audienced = createMockFerrumEdge({
+      jwtSecret: SECRET,
+      issuer: 'ferrum-edge',
+      audience: 'ferrum-admin',
+    });
+    const plain = createMockFerrumEdge({ jwtSecret: SECRET, issuer: 'ferrum-edge' });
+    const audiencedUrl = await audienced.start();
+    const plainUrl = await plain.start();
+    const naming = createFerrumAdminClient(
+      configFor(audiencedUrl, { jwtAudience: 'ferrum-admin' }),
+    );
+    const silent = createFerrumAdminClient(configFor(audiencedUrl));
+    const stray = createFerrumAdminClient(configFor(plainUrl, { jwtAudience: 'ferrum-admin' }));
+    const refused = (error: unknown): boolean => isNexusError(error) && error.code === 'EDGE_ERROR';
+    try {
+      assert.equal(await naming.consumers.get('missing'), null);
+      assert.equal(audienced.requests.at(-1)?.claims?.aud, 'ferrum-admin');
+
+      await assert.rejects(() => silent.consumers.get('missing'), refused);
+      await assert.rejects(() => stray.consumers.get('missing'), refused);
+    } finally {
+      await naming.close();
+      await silent.close();
+      await stray.close();
+      await audienced.stop();
+      await plain.stop();
+    }
   });
 });

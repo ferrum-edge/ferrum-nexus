@@ -196,8 +196,3 @@ export function specProblem(text: string): string | null {
   }
   return null;
 }
-
-/** True when `text` is an OpenAPI document the portal will accept. */
-export function isSpecValid(text: string): boolean {
-  return specProblem(text) === null;
-}

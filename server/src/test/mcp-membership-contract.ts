@@ -31,7 +31,13 @@ import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
 import { proxyLockKey, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { heldLeaseFences, outsideHeldLeases } from '../lib/lease-fence.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
-import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
+import {
+  buildTestApp,
+  dropAccountRecoveryJob,
+  SAMPLE_SPEC_YAML,
+  type TestApp,
+  type TestSession,
+} from './helpers.js';
 
 /** Production revocation and consumer repair, with native transactions on every store. */
 export function runMcpMembershipContract(
@@ -603,7 +609,7 @@ export function runMcpMembershipContract(
           const after = await target.store.accessRequests.findById(t.pending.id);
           assert.equal(after?.status, 'cancelled');
         } finally {
-          await target.store.accountRecoveryJobs.deleteByUser(userId);
+          await dropAccountRecoveryJob(target.store, userId);
         }
       });
 
@@ -703,7 +709,7 @@ export function runMcpMembershipContract(
           assert.equal(recovered?.cancelled_access_requests, 1);
         } finally {
           resume();
-          await target.store.accountRecoveryJobs.deleteByUser(userId);
+          await dropAccountRecoveryJob(target.store, userId);
         }
       });
 
