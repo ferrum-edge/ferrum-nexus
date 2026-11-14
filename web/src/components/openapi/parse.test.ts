@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { MAX_SPEC_BYTES, MAX_SPEC_EXPANDED_BYTES } from '@ferrum-nexus/shared';
+import {
+  MAX_SPEC_BYTES,
+  MAX_SPEC_EXPANDED_BYTES,
+  MAX_SPEC_RENDER_UNITS,
+} from '@ferrum-nexus/shared';
 import {
   CATALOG_SPEC_LIMITS,
   displayedRef,
@@ -88,6 +92,43 @@ describe('parseSpecText', () => {
     expect(second?.responses).toBe(first?.responses);
     expect(second?.parameters).toBe(first?.parameters);
     expect(third?.parameters).toBe(first?.parameters);
+  });
+
+  it('refuses tag groups past the render ceiling before building any', () => {
+    // One shared operation carries its tags to every path that references it.
+    // At the ceiling the groups are built; one entry past it, nothing is.
+    const spec = (paths: number, tags: number): string =>
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Tagged', version: '1.0.0' },
+        paths: Object.fromEntries(
+          Array.from({ length: paths }, (_, index) => [
+            `/p${index}`,
+            { $ref: '#/components/pathItems/Tagged' },
+          ]),
+        ),
+        components: {
+          pathItems: {
+            Tagged: {
+              get: { tags: Array.from({ length: tags }, (_, index) => `${index}`) },
+            },
+          },
+        },
+      });
+
+    const atLimit = parseSpecText(spec(MAX_SPEC_RENDER_UNITS / 1_000, 1_000));
+    expect(atLimit.ok).toBe(true);
+    if (!atLimit.ok) return;
+    expect(atLimit.spec.groups).toHaveLength(1_000);
+    expect(atLimit.spec.groups[0]?.operations).toHaveLength(MAX_SPEC_RENDER_UNITS / 1_000);
+
+    const overLimit = parseSpecText(spec(MAX_SPEC_RENDER_UNITS / 1_000 + 1, 1_000));
+    expect(overLimit).toEqual({
+      ok: false,
+      error:
+        `The specification lists its operations under more than ${MAX_SPEC_RENDER_UNITS} ` +
+        'tag entries, more than the documentation viewer can render.',
+    });
   });
 
   it('reports a Path Item reference it cannot follow and reads that path as written', () => {

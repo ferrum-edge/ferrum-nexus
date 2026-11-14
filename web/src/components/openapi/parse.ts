@@ -18,6 +18,7 @@ import {
   MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_EXPANDED_BYTES,
+  MAX_SPEC_RENDER_UNITS,
   agentPathItemMember,
   createOpenApiParameterKeyer,
   createOpenApiRefResolver,
@@ -369,6 +370,19 @@ function readOperations(
   return operations;
 }
 
+/**
+ * The tag entries {@link groupByTag} would make, one per tag of each operation,
+ * or `limit + 1` as soon as there are more than `limit`.
+ */
+function countTagEntries(operations: readonly SpecOperation[], limit: number): number {
+  let entries = 0;
+  for (const operation of operations) {
+    entries += operation.tags.length;
+    if (entries > limit) return limit + 1;
+  }
+  return entries;
+}
+
 function groupByTag(
   operations: SpecOperation[],
   descriptions: Map<string, string>,
@@ -539,6 +553,20 @@ function parseSpecTextUncached(text: string, limits: SpecParseLimits): SpecParse
 
   const pathItems = paths ? readPathItems(doc, paths) : { items: [], unresolved: [] };
   const operations = readOperations(doc, specVersion, pathItems.items);
+  // Each operation is listed once under each of its tags, and through Path Item
+  // references one operation brings its tags to every path that reaches it, so
+  // the groups could hold paths times tags entries. They are counted before any
+  // is built. The server charges a render unit per tag entry, duplicates
+  // included, so a document past this is one it refuses too.
+  const tagEntries = countTagEntries(operations, MAX_SPEC_RENDER_UNITS);
+  if (tagEntries > MAX_SPEC_RENDER_UNITS) {
+    return {
+      ok: false,
+      error:
+        `The specification lists its operations under more than ${MAX_SPEC_RENDER_UNITS} ` +
+        'tag entries, more than the documentation viewer can render.',
+    };
+  }
   const components = asRecord(doc.components);
   const schemas = components ? asRecord(components.schemas) : null;
 
