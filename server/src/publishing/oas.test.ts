@@ -627,6 +627,39 @@ describe('OpenAPI parsing', () => {
     assert.equal((inlineFailure.details as { tags: number }).tags, MAX_SPEC_RENDER_UNITS + 1);
   });
 
+  it('reads a shared Path Item parameter list once, however many paths reference it', () => {
+    // A Path Item of parameters and no operation costs no render unit, so
+    // reading its list again at every path that references it would be work
+    // nothing pays for: 2,000 paths times this list is twenty million reads.
+    const parameters = Array.from({ length: 10_000 }, () => ({}));
+    const sharing = (shared: unknown[]) => {
+      const paths: Record<string, unknown> = {};
+      for (let index = 0; index < MAX_SPEC_PATHS; index += 1) {
+        paths[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+      }
+      const components = { pathItems: { Shared: { parameters: shared } } };
+      return { document: { paths, components }, paths };
+    };
+
+    const { document, paths } = sharing(parameters);
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
+    assertRenderCost(document, paths, stats);
+    assert.equal(stats.parameterEntryReads, parameters.length);
+
+    // Read once is still read: a name over the limit in the shared list is
+    // refused, though no operation sits beneath it.
+    const named = sharing([
+      { name: 'n'.repeat(MAX_OPENAPI_PARAMETER_NAME_LENGTH + 1), in: 'query' },
+    ]);
+    const failure = expectSpecInvalid(() => assertRenderCost(named.document, named.paths));
+    assert.equal((failure.details as { reason: string }).reason, 'parameter_name_too_long');
+  });
+
   it('accepts a document at the path limit and rejects one just over it', () => {
     // One operation per path, so only the path ceiling can be the one that trips.
     assert.equal(parseOpenApiSpec(specWithPaths(MAX_SPEC_PATHS)).pathCount, 2_000);
@@ -938,7 +971,12 @@ describe('OpenAPI parsing', () => {
     };
 
     assert.equal(parseOpenApiSpec(JSON.stringify(spec)).operationCount, 500);
-    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
     assertRenderCost(spec, paths, stats);
     // One lookup per distinct reference string, whichever operation uses it.
     assert.equal(stats.schemaRefLookups, Object.keys(schemas).length);
@@ -952,7 +990,12 @@ describe('OpenAPI parsing', () => {
     const target = { Target: { type: 'object', properties: { id: { type: 'string' } } } };
     const { document, paths } = respondingWith({ type: 'object', properties }, target);
 
-    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
     assertRenderCost(document, paths, stats);
     assert.equal(stats.schemaRefLookups, 1);
     // The root, five thousand references, and the target and its property:
@@ -1149,7 +1192,12 @@ describe('OpenAPI parsing', () => {
       components: { responses: { Wide: { description: 'Wide', content } } },
     };
 
-    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
     assertRenderCost(document, document.paths, stats);
     assert.equal(stats.contentWalks, 1);
 
@@ -1171,7 +1219,12 @@ describe('OpenAPI parsing', () => {
     }
     const document = { openapi: '3.1.0', info: { title: 'Wide', version: '1.0.0' }, paths };
 
-    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
     const failure = expectSpecInvalid(() => assertRenderCost(document, paths, stats));
     assert.deepEqual(failure.details, {
       field: 'paths',

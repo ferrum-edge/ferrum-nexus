@@ -1485,6 +1485,8 @@ export interface RenderCostStats {
   schemaWalks: number;
   /** Schema `$ref` strings resolved against the document. */
   schemaRefLookups: number;
+  /** Entries of `parameters` lists read for their names and locations. */
+  parameterEntryReads: number;
 }
 
 /** What one `content` map costs to render. */
@@ -1536,9 +1538,10 @@ interface ContentCost {
  * reference, must have a `name` of at most
  * {@link MAX_OPENAPI_PARAMETER_NAME_LENGTH} characters and an `in` of at most
  * {@link MAX_OPENAPI_PARAMETER_IN_LENGTH}, the two halves of its identity,
- * counted in UTF-16 code units. That is checked on
- * every list, a path item's even when it has no operation (the viewer and the
- * review comparison key those too), and once per parameter object.
+ * counted in UTF-16 code units. That is checked on every list, a path item's
+ * even when it has no operation (the viewer and the review comparison key
+ * those too), once per list however many paths reach it, and once per
+ * parameter object.
  */
 export function assertRenderCost(
   document: Record<string, unknown>,
@@ -1625,13 +1628,20 @@ export function assertRenderCost(
     return target;
   };
 
-  // Each parameter object's identity is read once, however many lists name it.
+  // Each parameter object's identity is read once, however many lists name it,
+  // and each list is read once, however many paths reach it: a Path Item that
+  // many paths reference hands every one of them the same list, and one that
+  // declares no operation is charged nothing for it, so reading it again at
+  // every path would be work no unit pays for.
   const namedParameters = new WeakSet<object>();
   const assertParameterIdentities = (list: unknown): void => {
-    if (!Array.isArray(list)) return;
+    if (!Array.isArray(list) || readParameterLists.has(list)) return;
+    readParameterLists.add(list);
+  const readParameterLists = new WeakSet<object>();
     for (const entry of list) {
       if (!isRecord(entry)) continue;
       if (typeof entry.$ref === 'string' && entry.$ref.length > MAX_OPENAPI_REF_LENGTH) {
+      if (stats) stats.parameterEntryReads += 1;
         throw refTooLong(entry.$ref);
       }
       const resolution = resolver.resolve(entry);
