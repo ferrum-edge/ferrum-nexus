@@ -34,11 +34,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   every name and config-schema pointer. Edge v0.9.19 and v0.9.20 refuse
   configuration and traffic earlier releases accepted: plugin configs are
   closed at every depth (every config Nexus writes was checked against the
-  v0.9.20 schemas and passes), `routes` validators check request parameters
-  and `format`, `jwt_auth` refuses a token whose `aud` is not configured
-  (leave `aud` out), a request carrying two credentials is refused, MCP tool
-  calls no longer forward the caller's credentials to the backend, and
-  idempotency records written before the upgrade are not replayed after it.
+  v0.9.20 schemas and passes), a document whose required parameter uses a
+  serialization the validator cannot read is refused at import (Nexus keeps
+  request validation off, so `routes` APIs still enforce paths and methods
+  only, not parameters or `format`), `jwt_auth` refuses a token whose `aud`
+  is not configured (leave `aud` out), a request carrying two credentials is
+  refused, MCP tool calls no longer forward the caller's credentials to the
+  backend, and idempotency records written before the upgrade are not
+  replayed after it.
   `jwt_auth` gains `hide_credentials`, which defaults to `false`; Nexus does
   not set it, so a bearer token still reaches the backend, and the docs that
   said Edge cannot hide it are corrected. See

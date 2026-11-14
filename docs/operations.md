@@ -1048,12 +1048,18 @@ is needed. What changes for Nexus:
   and an `ip_restriction` prefix length that is not canonical decimal (`/08`).
   A palette row saved earlier with one of these values fails on the gateway;
   edit or remove it before upgrading.
-- **Request parameters on `routes` APIs** (v0.9.19). The generated
-  `openapi_validator` now validates the document's path, query, header and
-  cookie parameters, and checks `format` under every JSON Schema draft. A
-  request that passed before can now get `400`. Publishing a document whose
-  required parameter uses a serialization the validator cannot enforce is
-  refused by the gateway; an unsupported optional parameter is skipped.
+- **Request parameters on `routes` APIs** (v0.9.19). Edge's generated
+  `openapi_validator` can now validate path, query, header and cookie
+  parameters and check `format` under every JSON Schema draft, but only where
+  request validation is on. Nexus keeps it off (`x-ferrum-validate` sends
+  `request.enabled: false`, and the agent validator `validate_request: false`),
+  so a `routes` API still enforces its paths and methods only: requests are not
+  refused for their parameters, so do not rely on the gateway to check them.
+  What does change is the import: the gateway reads every operation's
+  parameters when it imports the document, and refuses one whose required
+  parameter uses a serialization the validator cannot read (a `content` map, a
+  non-default `style`, an exploded object in a query or cookie); an
+  unsupported optional parameter is skipped.
 - **JWT credentials** (v0.9.19). A Consumer's `jwt` secret must be unique in
   the namespace and carry 32 non-whitespace characters; Nexus issues 43
   random characters, so its credentials qualify. `jwt_auth` pins `HS256` by
