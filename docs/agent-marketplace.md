@@ -191,7 +191,7 @@ charge past the budget with `400 SPEC_INVALID` (`reason: "agent_document_too_lar
 Every uploaded document has at most 3,000 (`MAX_SPEC_OPERATIONS`) operations after Path
 Item references resolve: the upload limit counts every operation each path's resolved
 Path Item holds, so a Path Item that 1,000 paths reference counts 1,000 times (see the
-document limits in [api.md](api.md#post-apiapis)). An agent selection is checked only
+document limits in [api.md](api.md#post-apiapis)). An agent selection is admitted only
 against a document that passed it, so there is no separate operation cap for agents;
 the provider's operation picker applies the same count and will not enable agents past
 it.
@@ -202,3 +202,10 @@ status, name, description and the other catalog or proxy settings) is not bounde
 either. So an agent API published before the bound, whose document is larger, can still
 be edited and retired. Turning its agents off submits the document without copies, and
 is the way to revise it again.
+
+The same holds for an agent API whose current revision no longer passes the upload
+limits, one stored before Path Item references were counted at upload, for example. A
+PATCH that keeps its selection checks that selection against the operations the stored
+revision declares, read as the gateway holds it, instead of refusing every selected
+operation as missing. A PATCH that submits a selection admits it, so the upload limits
+apply, and it is refused with their `400 SPEC_INVALID`.
