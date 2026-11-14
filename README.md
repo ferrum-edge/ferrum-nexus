@@ -246,7 +246,7 @@ The bootstrap token is printed to the container log (`docker logs`). Pass
 
 The Compose example runs Nexus, PostgreSQL and Ferrum Edge. The
 [compatibility record](release/compatibility.env) selects the Edge image by
-digest — `v0.9.17` on `main`, `v0.9.15` at the `v0.5.2` tag — the same image
+digest — `v0.9.20` on `main`, `v0.9.15` at the `v0.5.2` tag — the same image
 CI tests for that checkout. The Nexus image is built from your
 checkout, so check out the release tag first
 (`git checkout --detach v0.5.2`).
@@ -286,13 +286,13 @@ Cross-repo contracts — shared vocabularies, JSON schemas and fixtures — live
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) store. Nexus vendors the
 Ferrum Edge vocabularies it speaks under
 [`contracts/ferrum-contracts/`](contracts/ferrum-contracts/), pinned by tag
-(`contracts-edge-0.9.17`) and per-file SHA-256 in
+(`contracts-edge-0.9.20`) and per-file SHA-256 in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN). The `shared` contract test
 verifies every digest and checks Nexus's local names against the vendored vocabularies; the
 vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). The read-only
 [service-manifest preview](docs/service-manifest-preview.md) separately pins its shared v1
-schema and fixtures to `contracts-edge-0.9.17`, commit
-`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`, in
+schema and fixtures to `contracts-edge-0.9.20`, commit
+`39da322083044c2e92617209e62983c92387f0ad`, in
 [`contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`](contracts/ferrum-contracts/SERVICE-MANIFEST-PIN).
 A shared contract changes in ferrum-contracts first and is then re-vendored here — never edited
 locally.

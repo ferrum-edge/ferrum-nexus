@@ -1,51 +1,62 @@
-# Edge v0.9.17 adoption
+# Edge v0.9.20 adoption
 
-The next Nexus release pairs with published Edge v0.9.17 and `contracts-edge-0.9.17`.
+The next Nexus release pairs with published Edge v0.9.20 and `contracts-edge-0.9.20`.
 Nexus `v0.5.2` pairs with Edge v0.9.15 and `contracts-edge-0.9.15`, Nexus
 `v0.5.0` and `v0.5.1` paired with Edge v0.9.14 and `contracts-edge-0.9.14`,
 and Nexus `v0.4.0` paired with Edge v0.9.13 and `contracts-edge-0.9.13`. The
 filename preserves existing links from the Edge v0.9.11 adoption; Nexus PR #522
 adopted Edge v0.9.12, PR #529 advanced the pin to Edge v0.9.13, PR #542 to Edge
-v0.9.14, PR #552 to Edge v0.9.15, and this adoption advances it to Edge v0.9.17.
-There is no published Edge v0.9.16 release to pair with: its production ARM64
-build failed and v0.9.17 is its replacement.
+v0.9.14, PR #552 to Edge v0.9.15, PR #618 to Edge v0.9.17, and this adoption
+advances it to Edge v0.9.20. There is no published Edge v0.9.16 or v0.9.18
+release to pair with: each production ARM64 build failed, and v0.9.17 and
+v0.9.19 replaced them. Edge v0.9.19 was published but never paired; its changes
+are reviewed below with v0.9.20's.
 The public-only guarantee is granted to a local data plane, or to a control plane
 whose data-plane attestation proves every expected data plane public-only (see the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
 
 ## Published identities
 
-- [Edge v0.9.17](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.17)
-  was published on 2026-10-10 at tag source
-  `669c574c1d1e88e84dccb26a8159939e6694644d`, the merge of Edge #6162. The
+- [Edge v0.9.20](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.20)
+  was published on 2026-11-03 at tag source
+  `e4a606a00352674daaef08636e3e359e6c48ba18`, the merge of Edge #7016. The
   default Docker Hub multi-architecture index in
   [`release/compatibility.env`](../release/compatibility.env) is
-  `sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1`; it
+  `sha256:32a0b0574bb2ed105d315888fab12e33242e1cec3ae9f1ae34c1fb4d0c9a2689`; it
   resolves to
-  `sha256:64f958ef6c594b7da44345182035318611f2741463cbd1d5e7a77b3e109d22d2` on
+  `sha256:d3e3e7e8409d0583b23e0fa4eee4b85c7b20885a314d4ada2ca8aad66bd33e1c` on
   `linux/amd64` and
-  `sha256:2f80952c2aaaf450980c7d2fad9f28977416ac6ebb1e07dbe8c890c6e05e8ec0` on
-  `linux/arm64`. Edge's release run published the release assets and checksum
-  sidecars and the default and `-ebpf` image indexes. Nexus does not independently
-  verify image signatures or attestations.
-- [contracts-edge-0.9.17](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17)
-  was published on 2026-10-10 at tag commit
-  `f7ba1a9b9885900d1e110f76d38e37a02eda13c8`, the merge of contracts #25, and
-  reads every Edge-owned file at Edge `v0.9.17`. No contract gets a new major and no
-  schema changes its wire rules: the schemas record their shapes unchanged at
-  v0.9.17, the plugin-catalog and `ErrorClass` name sets are unchanged, and
-  the vocabularies add the gateway-owned `X-Ferrum-Hops` header plus the
-  `loop_detected` error token. The
-  five vocabularies, the egress v2, deployment snapshot v2 and acknowledgement
-  schemas change only in provenance, descriptions and vocabulary entries, and
-  `fixtures/invalid-expectations.json` only in other
-  contracts' entries. All are copied byte for byte; every other vendored fixture is
-  unchanged. `PIN` still records 123
-  adopted paths and hashes; `SERVICE-MANIFEST-PIN` moves to the same tag, and the
-  shared manifest v1 schema and fixtures are byte-identical to
-  `contracts-edge-0.9.12`.
+  `sha256:406d8335e60f15ee024141762a7b280bea4abe76fef37ac26b65c45085ae7426` on
+  `linux/arm64`. The index digest was read from the registry, and its bytes hash to
+  that digest. Nexus does not independently verify image signatures or
+  attestations.
+- [contracts-edge-0.9.20](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.20)
+  was published on 2026-11-03 at tag commit
+  `39da322083044c2e92617209e62983c92387f0ad`, the merge of contracts #47, and
+  reads every Edge-owned file at Edge `v0.9.20`. No contract gets a new major and no
+  schema Nexus vendors changes its wire rules: the egress v2, deployment snapshot v2
+  and acknowledgement schemas change only in provenance, recording their shapes
+  unchanged at v0.9.19 and v0.9.20. The plugin catalog keeps its 82 plugin names,
+  removed names and config-schema pointers, and changes only in per-plugin
+  metadata (phases, one failure policy, one priority).
+  `gateway-headers` adds the mesh assertion headers (`x-ferrum-source-*`,
+  `x-ferrum-peer-spiffe-id`, `x-ferrum-request-principal`); `gateway-errors`
+  rewords six error-class meanings, and its `connection_failure` token now also
+  covers `504` (a pre-wire connect timeout) and `503`; `backend-egress-policy` and
+  `provisioned-by` change only in provenance; and
+  `fixtures/invalid-expectations.json` only in other contracts' entries. The nine
+  changed files are copied byte for byte; every other vendored fixture is
+  unchanged. `PIN` still records 123 adopted paths and hashes;
+  `SERVICE-MANIFEST-PIN` moves to the same tag, and the shared manifest v1 schema
+  and fixtures are byte-identical to `contracts-edge-0.9.12`.
 - The released owner OpenAPI SHA-256 is
-  `297b312ac1e7b2a7b7cfef74cdf4550063da0676edcee07d9652e3fb16d806b1`.
+  `8fa7232d96e1094578dee03cfa1966a4fdd9df77b8e027a9625f56ce6bfd355e`, the
+  document the plugin catalog pins for every `config_schema` pointer.
+- Edge v0.9.17, which the previous `main` pinned, has tag source
+  `669c574c1d1e88e84dccb26a8159939e6694644d`, index
+  `sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1`, with
+  `contracts-edge-0.9.17` at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8` (owner
+  OpenAPI SHA-256 `297b312ac1e7b2a7b7cfef74cdf4550063da0676edcee07d9652e3fb16d806b1`).
 - Nexus `v0.5.2` pins
   [Edge v0.9.15](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15), tag
   source `25b37395ff61bfea0f3ffd189d9011c4984fa755`, index
@@ -58,6 +69,46 @@ whose data-plane attestation proves every expected data plane public-only (see t
   `sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8`, with
   `contracts-edge-0.9.14` at `ddbdd845733b7046c4393ac951011dafb774db33` (owner
   OpenAPI SHA-256 `6d286649ae744691e2eeb7d16607c538ca02e31bdeaafe98ab07fc861e7b9da4`).
+
+## What changed for Nexus in Edge v0.9.19 and v0.9.20
+
+Both releases keep every contract Nexus depends on: egress policy schema 2 and
+its data-plane attestation, deployment snapshot v2 and its
+`deployment_snapshot.v2` tokens, and the acknowledgement shape; the ConfigSync
+protocol revision stays `3`
+([Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20/docs/upgrade_guide.md#upgrading-to-0920)).
+Both refuse configuration earlier releases accepted. The full review is in
+[Upgrading to Edge v0.9.20](operations.md#upgrading-to-edge-v0920); in short:
+
+- **Closed plugin configs.** v0.9.20 refuses an unknown key at every depth of a
+  plugin config. Every config Nexus writes was checked against the pinned
+  v0.9.20 `openapi.yaml` schemas, at every depth: the `{}` auth configs,
+  `access_control`, `rate_limiting` (portal quota and agent tool budget, local
+  and Redis), `cors`, every palette plugin, the agent `openapi_validator`,
+  `mcp_gateway`, `ai_tool_governor` and `ai_prompt_shield`, and
+  `prometheus_metrics`. None sends a key or value v0.9.20 refuses, so no write
+  changes.
+- **Palette admission.** v0.9.19 refuses repeated `compression` algorithms and
+  content types and `*` outside a whole-subtype `type/*`, `X-Real-IP` and
+  `X-Geo-Country` as a `correlation_id` `header_name`, and non-canonical
+  `ip_restriction` prefix lengths. The shared palette rules, the plugin form and
+  the mock gateway now refuse the same values.
+- **Other admission changes Nexus already meets.** An `access_control`
+  allow-list that is present must be non-empty (Nexus sends one group);
+  `openapi_validator` `bypass.header_present` values must be 16-character
+  secrets (Nexus sets `bypass.paths` only); plugin-config replaces and deletes
+  must carry `expected_proxy_ids` (Nexus already sends it); `cors` lists are
+  bounded at 128 entries of 256 bytes (Nexus sends at most 70 headers); and a
+  Consumer's `jwt` secret must be unique and carry 32 non-whitespace characters
+  (Nexus issues 43 random characters).
+- **Traffic.** `routes` validators check request parameters and `format`;
+  `jwt_auth` refuses a token with an unconfigured `aud`; two credentials in one
+  request are refused; MCP tool calls no longer carry the caller's credentials
+  to the backend; and idempotency records written before the upgrade are not
+  replayed after it.
+
+The mock gateway (`server/src/test/mock-ferrum-edge.ts`) mirrors the v0.9.20 key
+sets and the admission rules above that a Nexus write could reach.
 
 ## What changed for Nexus in Edge v0.9.17
 
@@ -186,7 +237,7 @@ Edge v0.9.13 changes two response contracts incompatibly and every snapshot toke
 
 Journals written by Nexus `v0.4.0` and later carry `authorityFormat: 2`: every
 deployment snapshot they hold is authority in the Edge v0.9.13 format, which Edge
-v0.9.14, v0.9.15 and v0.9.17 keep. Journals written before carry no
+v0.9.14, v0.9.15, v0.9.17, v0.9.19 and v0.9.20 keep. Journals written before carry no
 marker and may hold Edge v0.9.12 authority (inline spec bytes, no
 `api_spec_contents`). They remain readable, so custody checks, inspection and key
 rotation keep working, and a journal whose recorded operations are all
@@ -224,7 +275,7 @@ See
 
 ## Release status
 
-[`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.17 image
+[`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.20 image
 above for the next Nexus release, and the packaged acceptance suite runs against it. The record
 at the `v0.5.2` tag pins Edge v0.9.15, at the `v0.5.1` and `v0.5.0` tags Edge v0.9.14, and at the
 `v0.4.0` tag Edge v0.9.13. The

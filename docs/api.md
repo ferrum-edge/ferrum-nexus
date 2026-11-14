@@ -375,7 +375,7 @@ writes without changing that verdict. Egress policy schema 1 (Edge v0.9.12 and e
 `unsupported_egress_policy_schema`.
 See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
-Published Edge v0.9.17 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+Published Edge v0.9.20 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
@@ -2779,7 +2779,16 @@ before any `;` parameter (`/..;x`, `/a//b` and `/;x/b` are refused, as Edge
 A `correlation_id` or `request_deduplication` `header_name` in the
 gateway-owned `x-consumer-*` namespace, or `X-Authenticated-Identity` (Edge
 v0.9.15), is `400 VALIDATION_FAILED` (any case, `_` and `-` alike): Edge strips
-those headers from every client request.
+those headers from every client request. A `correlation_id` `header_name` is
+also refused when it is a protocol, forwarding or credential header Edge
+reserves, `X-Ferrum-Hops` (Edge v0.9.17), or `X-Real-IP` or `X-Geo-Country`
+(Edge v0.9.19).
+
+Edge v0.9.19 also refuses, and Nexus therefore answers `400 VALIDATION_FAILED`
+for, a `compression` algorithm or content type listed twice (content types
+compare case-insensitively), a content type with `*` anywhere but a whole
+subtype (`text/*` is accepted), and an `ip_restriction` prefix length that is
+not canonical decimal (`/08`).
 
 Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
 `request_size_limiting`, `response_size_limiting`, `compression`,
@@ -3236,9 +3245,10 @@ bearer token**:
 | `basicauth`       | **No** — `basic_auth` likewise strips `Authorization: Basic`                                |
 | `jwt`             | **Yes** — `Authorization: Bearer <token>` is forwarded unchanged                            |
 
-This is Edge's behaviour, not a Nexus setting: `jwt_auth` has no
-credential-hiding option. The signing secret is never forwarded, so a provider
-cannot mint tokens as the client, but it can replay a token it received until
+This is Edge's default, which Nexus keeps: `jwt_auth`'s `hide_credentials`
+(Edge v0.9.19 and later) defaults to `false`, and Nexus does not set it. The
+signing secret is never forwarded, so a provider cannot mint tokens as the
+client, but it can replay a token it received until
 its `exp` — which Edge requires by default but does not cap. Keep `exp` short
 and put nothing in a claim you would not show the provider. See the
 [client guide](guides/client-guide.md).

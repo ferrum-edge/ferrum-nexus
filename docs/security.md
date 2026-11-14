@@ -1331,8 +1331,9 @@ recovered.
 
 **What the provider's upstream sees differs by type.** Edge strips `X-API-Key`
 (`key_auth`) and `Authorization: Basic` (`basic_auth`) before proxying, because
-both run with `hide_credentials` at its default `true`. `jwt_auth` has no such
-option, so `Authorization: Bearer <token>` reaches the backend. The provider
+both run with `hide_credentials` at its default `true`. `jwt_auth`'s
+`hide_credentials` (Edge v0.9.19 and later) defaults to `false` and Nexus does
+not set it, so `Authorization: Bearer <token>` reaches the backend. The provider
 cannot mint tokens (the HS256 secret stays with the client) but can replay a
 token until its `exp`. `e2e/src/dataplane.test.ts` pins this behaviour.
 
