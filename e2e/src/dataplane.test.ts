@@ -321,7 +321,10 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         plugin.plugin_name === 'openapi_validator',
     );
     assert.ok(validator);
-    const operator = await gatewayAdmin('PUT', `/plugins/config/${validator.id}`, {
+    // Edge v0.9.19 requires every plugin-config replace to name the proxies it
+    // expects to reference the config.
+    const expected = `expected_proxy_ids=${encodeURIComponent(stored.api.ferrum_proxy_id)}`;
+    const operator = await gatewayAdmin('PUT', `/plugins/config/${validator.id}?${expected}`, {
       plugin_name: 'openapi_validator',
       scope: 'proxy',
       proxy_id: stored.api.ferrum_proxy_id,
