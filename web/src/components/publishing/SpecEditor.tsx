@@ -148,7 +148,9 @@ export function SpecEditor({
       {/* What the document parsed as, read back to the provider. */}
       <div className="flex min-h-6 flex-wrap items-center gap-x-3 gap-y-2">
         {result?.ok ? (
-          <Badge tone={status === 'Valid' ? 'success' : 'danger'} dot>{status}</Badge>
+          <Badge tone={status === 'Valid' ? 'success' : 'danger'} dot>
+            {status}
+          </Badge>
         ) : null}
         {result?.ok ? (
           <span className="text-xs text-fg-muted">
@@ -175,8 +177,8 @@ export function SpecEditor({
       {tooManyOperations ? (
         <FormNotice tone="danger">
           This document declares more than {MAX_SPEC_OPERATIONS.toLocaleString()} operations,
-          counting each path that references a shared Path Item, which the portal will not
-          publish. Split it into several APIs.
+          counting each path that references a shared Path Item, which the portal will not publish.
+          Split it into several APIs.
         </FormNotice>
       ) : null}
     </div>
