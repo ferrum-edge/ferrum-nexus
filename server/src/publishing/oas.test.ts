@@ -627,6 +627,39 @@ describe('OpenAPI parsing', () => {
     assert.equal((inlineFailure.details as { tags: number }).tags, MAX_SPEC_RENDER_UNITS + 1);
   });
 
+  it('reads a shared Path Item parameter list once, however many paths reference it', () => {
+    // A Path Item of parameters and no operation costs no render unit, so
+    // reading its list again at every path that references it would be work
+    // nothing pays for: 2,000 paths times this list is twenty million reads.
+    const parameters = Array.from({ length: 10_000 }, () => ({}));
+    const sharing = (shared: unknown[]) => {
+      const paths: Record<string, unknown> = {};
+      for (let index = 0; index < MAX_SPEC_PATHS; index += 1) {
+        paths[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+      }
+      const components = { pathItems: { Shared: { parameters: shared } } };
+      return { document: { paths, components }, paths };
+    };
+
+    const { document, paths } = sharing(parameters);
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
+    assertRenderCost(document, paths, stats);
+    assert.equal(stats.parameterEntryReads, parameters.length);
+
+    // Read once is still read: a name over the limit in the shared list is
+    // refused, though no operation sits beneath it.
+    const named = sharing([
+      { name: 'n'.repeat(MAX_OPENAPI_PARAMETER_NAME_LENGTH + 1), in: 'query' },
+    ]);
+    const failure = expectSpecInvalid(() => assertRenderCost(named.document, named.paths));
+    assert.equal((failure.details as { reason: string }).reason, 'parameter_name_too_long');
+  });
+
   it('accepts a document at the path limit and rejects one just over it', () => {
     // One operation per path, so only the path ceiling can be the one that trips.
     assert.equal(parseOpenApiSpec(specWithPaths(MAX_SPEC_PATHS)).pathCount, 2_000);
@@ -938,7 +971,12 @@ describe('OpenAPI parsing', () => {
     };
 
     assert.equal(parseOpenApiSpec(JSON.stringify(spec)).operationCount, 500);
-    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
     assertRenderCost(spec, paths, stats);
     // One lookup per distinct reference string, whichever operation uses it.
     assert.equal(stats.schemaRefLookups, Object.keys(schemas).length);
@@ -952,7 +990,12 @@ describe('OpenAPI parsing', () => {
     const target = { Target: { type: 'object', properties: { id: { type: 'string' } } } };
     const { document, paths } = respondingWith({ type: 'object', properties }, target);
 
-    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
     assertRenderCost(document, paths, stats);
     assert.equal(stats.schemaRefLookups, 1);
     // The root, five thousand references, and the target and its property:
@@ -1075,6 +1118,44 @@ describe('OpenAPI parsing', () => {
     });
   });
 
+  it('charges an inline path-item parameter schema at every path that reaches it', () => {
+    // Two paths reference one Path Item of one operation and one inline
+    // parameter whose schema has N empty properties: a row and the schema
+    // (1 + 2N) at each path, as an inline copy at each would cost: 4 + 4N.
+    const sharing = (propertyCount: number) => {
+      const properties: Record<string, unknown> = {};
+      for (let index = 0; index < propertyCount; index += 1) properties[`p${index}`] = {};
+      const schema = { type: 'object', properties };
+      const paths = {
+        '/a': { $ref: '#/components/pathItems/Shared' },
+        '/b': { $ref: '#/components/pathItems/Shared' },
+      };
+      const shared = {
+        parameters: [{ name: 'filter', in: 'query', schema }],
+        get: { responses: {} },
+      };
+      return { document: { paths, components: { pathItems: { Shared: shared } } }, paths };
+    };
+
+    const atLimit = sharing(24_999);
+    assertRenderCost(atLimit.document, atLimit.paths);
+    // The first path's row and schema, then the second path's row: the second
+    // schema is the charge that crosses the ceiling.
+    const overLimit = sharing(25_000);
+    const failure = expectSpecInvalid(() => assertRenderCost(overLimit.document, overLimit.paths));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 1,
+      parameters: 2,
+      media_types: 0,
+      responses: 0,
+      tags: 0,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+  });
+
   it('charges a referenced parameter for the object it names, once', () => {
     // Twenty references to one wide component parameter, with nothing inline
     // and no `components.schemas`: the target's schema is charged at the first
@@ -1149,7 +1230,12 @@ describe('OpenAPI parsing', () => {
       components: { responses: { Wide: { description: 'Wide', content } } },
     };
 
-    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
     assertRenderCost(document, document.paths, stats);
     assert.equal(stats.contentWalks, 1);
 
@@ -1171,7 +1257,12 @@ describe('OpenAPI parsing', () => {
     }
     const document = { openapi: '3.1.0', info: { title: 'Wide', version: '1.0.0' }, paths };
 
-    const stats = { contentWalks: 0, schemaWalks: 0, schemaRefLookups: 0 };
+    const stats = {
+      contentWalks: 0,
+      schemaWalks: 0,
+      schemaRefLookups: 0,
+      parameterEntryReads: 0,
+    };
     const failure = expectSpecInvalid(() => assertRenderCost(document, paths, stats));
     assert.deepEqual(failure.details, {
       field: 'paths',

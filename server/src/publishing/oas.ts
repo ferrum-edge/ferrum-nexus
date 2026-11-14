@@ -1485,6 +1485,8 @@ export interface RenderCostStats {
   schemaWalks: number;
   /** Schema `$ref` strings resolved against the document. */
   schemaRefLookups: number;
+  /** Entries of `parameters` lists read for their names and locations. */
+  parameterEntryReads: number;
 }
 
 /** What one `content` map costs to render. */
@@ -1519,11 +1521,13 @@ interface ContentCost {
  * the viewer follows it — one memoised resolver for the document — and each
  * distinct object so named has its schemas and media types charged once, at its
  * first reference; every later reference to it costs only its own parameter or
- * response entry. Path-item parameters cost a row under every operation and
- * their schemas once per path. A schema `$ref` costs two units at every
- * occurrence and its target's own cost once per document. Those repetitions are
- * what the viewer's own page budget absorbs; charging them in full here would
- * refuse documents that merely reuse their components.
+ * response entry. Path-item parameters cost a row under every operation; an
+ * inline one's schemas cost once per path that reaches it, not once per
+ * operation, and a referenced one's once per document, as above. A schema
+ * `$ref` costs two units at every occurrence and its target's own cost once
+ * per document. Those repetitions are what the viewer's own page budget
+ * absorbs; charging them in full here would refuse documents that merely
+ * reuse their components.
  *
  * Each `content` map's cost is computed once and cached, as each schema's is,
  * so neither is enumerated twice however often it is referenced or aliased, and
@@ -1536,9 +1540,10 @@ interface ContentCost {
  * reference, must have a `name` of at most
  * {@link MAX_OPENAPI_PARAMETER_NAME_LENGTH} characters and an `in` of at most
  * {@link MAX_OPENAPI_PARAMETER_IN_LENGTH}, the two halves of its identity,
- * counted in UTF-16 code units. That is checked on
- * every list, a path item's even when it has no operation (the viewer and the
- * review comparison key those too), and once per parameter object.
+ * counted in UTF-16 code units. That is checked on every list, a path item's
+ * even when it has no operation (the viewer and the review comparison key
+ * those too), once per list however many paths reach it, and once per
+ * parameter object.
  */
 export function assertRenderCost(
   document: Record<string, unknown>,
@@ -1625,11 +1630,18 @@ export function assertRenderCost(
     return target;
   };
 
-  // Each parameter object's identity is read once, however many lists name it.
+  // Each parameter object's identity is read once, however many lists name it,
+  // and each list is read once, however many paths reach it: a Path Item that
+  // many paths reference hands every one of them the same list, and one that
+  // declares no operation is charged nothing for it, so reading it again at
+  // every path would be work no unit pays for.
   const namedParameters = new WeakSet<object>();
+  const readParameterLists = new WeakSet<object>();
   const assertParameterIdentities = (list: unknown): void => {
-    if (!Array.isArray(list)) return;
+    if (!Array.isArray(list) || readParameterLists.has(list)) return;
+    readParameterLists.add(list);
     for (const entry of list) {
+      if (stats) stats.parameterEntryReads += 1;
       if (!isRecord(entry)) continue;
       if (typeof entry.$ref === 'string' && entry.$ref.length > MAX_OPENAPI_REF_LENGTH) {
         throw refTooLong(entry.$ref);

@@ -199,6 +199,7 @@ import {
   DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
   DEFAULT_SPEC_ENFORCEMENT,
   MAX_PAGE_SIZE,
+  MAX_SPEC_PATHS,
   RATE_LIMIT_PLUGIN,
   SPEC_CHANGE_HISTORY_LIMIT,
   aclGroupForApi,
@@ -987,6 +988,40 @@ function restorableSpecDocument(rawSpec: string): Record<string, unknown> {
     return parseOpenApiSpec(rawSpec).document;
   } catch {
     return parseStoredSpecStructure(rawSpec) ?? {};
+  }
+}
+
+/**
+ * The current revision's document for a PATCH's agent checks.
+ *
+ * A PATCH that submits a selection admits it, so the document must pass the
+ * upload checks, and their refusal is the answer. One that keeps or turns off
+ * the selection only re-checks that the selection still names the document's
+ * operations, so a revision stored before a limit it now breaks (Path Item
+ * references counted at upload, say) is read for its structure, as
+ * {@link restorableSpecDocument} reads it: what the gateway holds. Read as
+ * `{}` instead, it would name no operation, and the API could no longer be
+ * renamed or retired. The structure is used only within the path limit every
+ * stored revision passed, which bounds the operations the selection check
+ * enumerates.
+ */
+function agentPatchDocument(rawSpec: string, admitting: boolean): Record<string, unknown> {
+  try {
+    return parseOpenApiSpec(rawSpec).document;
+  } catch (error) {
+    if (admitting) throw error;
+    const structure = parseStoredSpecStructure(rawSpec);
+    const paths = structure?.paths;
+    if (
+      structure === null ||
+      typeof paths !== 'object' ||
+      paths === null ||
+      Array.isArray(paths) ||
+      Object.keys(paths).length > MAX_SPEC_PATHS
+    ) {
+      return {};
+    }
+    return structure;
   }
 }
 
@@ -3518,13 +3553,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // against it, and so is the selection being replaced.
         const currentSpec =
           (patch.agents ?? api.agents) ? await store.apiSpecs.findCurrentByApi(api.id) : null;
-        const agentDocument = currentSpec ? safeSpecDocument(currentSpec.raw_spec) : {};
+        // Only a submitted selection is admitted against the upload checks; a
+        // kept one is re-checked against what the stored revision declares.
+        const agentDocument = currentSpec
+          ? agentPatchDocument(currentSpec.raw_spec, patch.agents != null)
+          : {};
         // Validated before hashing, which reads every selection: a duplicate
         // or missing one is refused before it costs anything. The stamped
         // document's size is bounded below, only if this PATCH admits a new
-        // selection or rebuilds the document. The operations the document
-        // resolves to were bounded when it was uploaded (MAX_SPEC_OPERATIONS
-        // counts them after Path Item references resolve).
+        // selection or rebuilds the document. Hashing runs only for a
+        // submitted selection, so only ever over a document that passed the
+        // upload checks, whose MAX_SPEC_OPERATIONS limit counts the operations
+        // Path Item references resolve to.
         validateAgents(
           patch.agents === undefined ? (api.agents ?? null) : patch.agents,
           agentDocument,

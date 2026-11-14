@@ -461,14 +461,25 @@ export const PLUGIN_ADMISSION_RULES: Readonly<Record<string, PluginAdmissionRule
   },
 
   /**
-   * `CompressionConfig` (Edge `v0.9.19`) lists each algorithm once and each
-   * `content_types` rule once, compared case-insensitively. A repeat is
-   * refused rather than ignored.
+   * `CompressionConfig` (Edge `v0.9.19`) lists each algorithm once, `brotli`
+   * counting as `br`, and each `content_types` rule once, compared
+   * case-insensitively. A repeat is refused rather than ignored. A
+   * `content_types` list that is present must not be empty: the gateway's
+   * default list applies only when the key is absent.
    */
   compression: (config) => {
-    const algorithms = listOf(config.algorithms).map(String);
+    const algorithms = listOf(config.algorithms).map((algorithm) =>
+      algorithm === 'brotli' ? 'br' : String(algorithm),
+    );
     if (new Set(algorithms).size !== algorithms.length) {
       return { field: 'algorithms', message: 'List each compression algorithm only once' };
+    }
+    if (Array.isArray(config.content_types) && config.content_types.length === 0) {
+      return {
+        field: 'content_types',
+        message:
+          'The gateway refuses an empty content-type list; leave the field out for its default list',
+      };
     }
     const types = listOf(config.content_types).map((type) => String(type).toLowerCase());
     const repeated = types.find((type, index) => types.indexOf(type) !== index);

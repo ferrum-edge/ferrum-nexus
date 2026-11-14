@@ -924,9 +924,11 @@ export function stampedAgentDocumentBytes(
  * Every operation of `document` an agent selection may name, after Path Item
  * references resolve. An unresolvable document is refused.
  *
- * Not capped here: every document a selection is checked against passed
+ * Not capped here: every document a selection is admitted against passed
  * `parseOpenApiSpec`, whose `MAX_SPEC_OPERATIONS` limit already counts the
- * operations Path Item references resolve to, as this does.
+ * operations Path Item references resolve to, as this does. A PATCH that keeps
+ * a selection re-checks it against the stored revision's structure when that
+ * revision no longer passes, within the `MAX_SPEC_PATHS` it was stored under.
  */
 function resolvedAgentOperations(document: Record<string, unknown>): AgentOperation[] {
   try {
@@ -949,7 +951,9 @@ function resolvedAgentOperations(document: Record<string, unknown>): AgentOperat
  * it knows the gateway document will be rebuilt.
  *
  * `document` must be one `parseOpenApiSpec` accepted, which bounds the
- * operations its Path Item references resolve to (`MAX_SPEC_OPERATIONS`).
+ * operations its Path Item references resolve to (`MAX_SPEC_OPERATIONS`),
+ * except for a PATCH that keeps the selection already admitted: it may pass
+ * the structure of a stored revision stored before a limit it now breaks.
  */
 export function validateAgents(
   agents: ApiAgents | null | undefined,

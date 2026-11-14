@@ -34,11 +34,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   every name and config-schema pointer. Edge v0.9.19 and v0.9.20 refuse
   configuration and traffic earlier releases accepted: plugin configs are
   closed at every depth (every config Nexus writes was checked against the
-  v0.9.20 schemas and passes), `routes` validators check request parameters
-  and `format`, `jwt_auth` refuses a token whose `aud` is not configured
-  (leave `aud` out), a request carrying two credentials is refused, MCP tool
-  calls no longer forward the caller's credentials to the backend, and
-  idempotency records written before the upgrade are not replayed after it.
+  v0.9.20 schemas and passes), a document whose required parameter uses a
+  serialization the validator cannot read is refused at import (Nexus keeps
+  request validation off, so `routes` APIs still enforce paths and methods
+  only, not parameters or `format`), `jwt_auth` refuses a token whose `aud`
+  is not configured (leave `aud` out), a request carrying two credentials is
+  refused, MCP tool calls no longer forward the caller's credentials to the
+  backend, and idempotency records written before the upgrade are not
+  replayed after it.
   `jwt_auth` gains `hide_credentials`, which defaults to `false`; Nexus does
   not set it, so a bearer token still reaches the backend, and the docs that
   said Edge cannot hide it are corrected. See
@@ -47,7 +50,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **Palette plugins refuse the values Edge v0.9.19 refuses** (#706), with
   `400 VALIDATION_FAILED` from the server and a field message in the form,
   instead of a gateway `400` mid-write: a `compression` algorithm or content
-  type listed twice (content types compare case-insensitively), a content
+  type listed twice (content types compare case-insensitively, and `brotli`
+  is `br`), an empty `content_types` list (leave the key out), a content
   type with `*` anywhere but a whole subtype (`*/*`, `*/json`,
   `application/*+json`; `text/*` is now accepted), `X-Real-IP` or
   `X-Geo-Country` (any case, `_` or `-`) as a `correlation_id` `header_name`,
@@ -201,6 +205,26 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   operations, parameters and responses, and a shared Path Item is read once however many
   paths use it. The publish form's operation count uses the same resolved count as the
   server.
+
+- **A shared Path Item's `parameters` list is read once at upload** (#692 follow-up).
+  The render count read it again at every path that referenced the Path Item, and
+  charged nothing for it when the Path Item declared no operation, so a small document
+  of 2,000 paths sharing one long list could hold the server's event loop for seconds
+  on every parse. Each list is now read once per document; its parameter names and
+  locations are still checked.
+
+- **The publish form refuses a document whose tag groups pass the render ceiling**
+  (#692 follow-up). An operation shared by many paths brings its tags to each of them,
+  and the editor built every group entry before the server could refuse the document,
+  which could freeze the tab. Past 100,000 tag entries, which the server refuses too,
+  the editor now reports the problem without building any group.
+
+- **An agent API whose stored revision now breaks an upload limit can still be edited**
+  (#692 follow-up). A PATCH that keeps its agent selection (a rename, a visibility or
+  status change) read such a revision as empty and refused with "Unsupported or missing
+  agent operation". It now checks the selection against the operations the stored
+  revision declares. A PATCH that submits a selection still needs a revision that
+  passes the upload limits.
 
 - Re-enabling an account no longer restores an approval group for a grant whose
   API row is missing or is recorded under another namespace than the portal's

@@ -220,6 +220,15 @@ describe('pluginAdmissionProblem', () => {
     assert.ok(type);
     assert.equal(type.field, 'content_types');
     assert.match(type.message, /'application\/json' is listed more than once/);
+    // `brotli` is Edge's alias of `br`, so the two are one algorithm.
+    const alias = pluginAdmissionProblem('compression', { algorithms: ['br', 'brotli'] });
+    assert.ok(alias);
+    assert.equal(alias.field, 'algorithms');
+    // Present but empty is refused; only an absent list takes the default.
+    const empty = pluginAdmissionProblem('compression', { content_types: [] });
+    assert.ok(empty);
+    assert.equal(empty.field, 'content_types');
+    assert.match(empty.message, /empty content-type list/);
     for (const config of [
       {},
       { algorithms: ['gzip', 'br'] },

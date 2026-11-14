@@ -874,6 +874,8 @@ describe('provider plugin palette', () => {
         { content_types: ['*/json'] },
         { content_types: ['application/*+json'] },
         { content_types: ['text/html', 'Text/HTML'] },
+        // Present but empty: only an absent list takes the gateway's default.
+        { content_types: [] },
       ]) {
         const response = await setPlugin('compression', { config });
         assert.equal(response.statusCode, 400, JSON.stringify(config));

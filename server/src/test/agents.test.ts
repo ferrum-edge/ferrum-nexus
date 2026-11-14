@@ -26,6 +26,7 @@ const ONE_AGENT_TOOL_CHANGED = /1 agent tool changed \(list_items\)\./;
 const REQUEST_YOUR_EXISTING_GRANT = /request it on your existing grant/;
 const RENAMED_1_AGENT_TOOL = /renamed 1 agent tool \(list_items to items_list\)/;
 const OVER_OPERATION_LIMIT = new RegExp(`more than the ${MAX_SPEC_OPERATIONS} operation limit`);
+const UNSUPPORTED_OR_MISSING_ITEMS = /Unsupported or missing agent operation: GET \/items/;
 
 const AGENTS: ApiAgents = {
   operations: [{ path: '/items', method: 'GET', name: 'list_items', description: 'List items' }],
@@ -337,6 +338,72 @@ describe('agent publishing and Nexus authorization', () => {
         false,
       );
     }
+  });
+
+  it('keeps metadata edits open on an agent API whose stored revision now breaks a limit', async () => {
+    // An agent API whose current revision was stored before Path Item
+    // references were counted at upload: it now resolves past the operation
+    // limit, though the operation its selection names is still in it.
+    const { api } = await publish();
+    const storeRevision = async (version: string, document: Record<string, unknown>) => {
+      await harness.store.apiSpecs.create({
+        api_id: api.id,
+        version,
+        raw_spec: JSON.stringify(document),
+        parsed_title: 'Agent API',
+        parsed_version: version,
+        is_current: true,
+        created_by: provider.user.id,
+        rolled_back_from_id: null,
+      });
+    };
+    await storeRevision('over-cap', overCapDocument());
+
+    const metadata = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { name: 'Renamed agent API', visibility: 'internal' },
+    });
+    assert.equal(metadata.statusCode, 200, metadata.body);
+    const renamed = await harness.store.apis.findById(api.id);
+    assert.equal(renamed?.name, 'Renamed agent API');
+    assert.equal(renamed?.visibility, 'internal');
+    const retired = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { status: 'retired' },
+    });
+    assert.equal(retired.statusCode, 200, retired.body);
+    assert.equal((await harness.store.apis.findById(api.id))?.status, 'retired');
+
+    // A submitted selection is admitted, so the upload checks answer it.
+    const reselected = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: {
+        agents: {
+          operations: [{ ...AGENTS.operations[0], description: 'Updated description' }],
+        },
+      },
+    });
+    assert.equal(reselected.statusCode, 400, reselected.body);
+    assert.equal(errorCode(reselected.body), 'SPEC_INVALID');
+    assert.match(reselected.body, OVER_OPERATION_LIMIT);
+
+    // A kept selection is still checked against what the revision declares.
+    const moved = overCapDocument();
+    const paths = moved.paths as Record<string, unknown>;
+    paths['/things'] = paths['/items'];
+    delete paths['/items'];
+    await storeRevision('over-cap-moved', moved);
+    const missing = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { name: 'Renamed again' },
+    });
+    assert.equal(missing.statusCode, 400, missing.body);
+    assert.equal(errorCode(missing.body), 'SPEC_INVALID');
+    assert.match(missing.body, UNSUPPORTED_OR_MISSING_ITEMS);
   });
 
   it('keeps namespace metacharacters literal in the MCP validator bypass', () => {

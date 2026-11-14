@@ -88,8 +88,9 @@ Both refuse configuration earlier releases accepted. The full review is in
   `mcp_gateway`, `ai_tool_governor` and `ai_prompt_shield`, and
   `prometheus_metrics`. None sends a key or value v0.9.20 refuses, so no write
   changes.
-- **Palette admission.** v0.9.19 refuses repeated `compression` algorithms and
-  content types and `*` outside a whole-subtype `type/*`, `X-Real-IP` and
+- **Palette admission.** v0.9.19 refuses repeated `compression` algorithms
+  (`brotli` is `br`) and content types, an empty `content_types` list, and `*`
+  outside a whole-subtype `type/*`, `X-Real-IP` and
   `X-Geo-Country` as a `correlation_id` `header_name`, and non-canonical
   `ip_restriction` prefix lengths. The shared palette rules, the plugin form and
   the mock gateway now refuse the same values.
@@ -101,11 +102,15 @@ Both refuse configuration earlier releases accepted. The full review is in
   bounded at 128 entries of 256 bytes (Nexus sends at most 70 headers); and a
   Consumer's `jwt` secret must be unique and carry 32 non-whitespace characters
   (Nexus issues 43 random characters).
-- **Traffic.** `routes` validators check request parameters and `format`;
-  `jwt_auth` refuses a token with an unconfigured `aud`; two credentials in one
-  request are refused; MCP tool calls no longer carry the caller's credentials
-  to the backend; and idempotency records written before the upgrade are not
-  replayed after it.
+- **Spec import.** The gateway refuses a document whose required parameter
+  uses a serialization its validator cannot read, and skips an unsupported
+  optional one. Validators can now check request parameters and `format`, but
+  Nexus keeps request validation off, so `routes` APIs still enforce paths and
+  methods only.
+- **Traffic.** `jwt_auth` refuses a token with an unconfigured `aud`; two
+  credentials in one request are refused; MCP tool calls no longer carry the
+  caller's credentials to the backend; and idempotency records written before
+  the upgrade are not replayed after it.
 
 The mock gateway (`server/src/test/mock-ferrum-edge.ts`) mirrors the v0.9.20 key
 sets and the admission rules above that a Nexus write could reach.

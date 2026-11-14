@@ -1321,6 +1321,11 @@ describe('ferrum admin client', () => {
         ['compression', { algorithms: ['br', 'brotli'] }],
         ['compression', { content_types: ['*/*'] }],
         ['compression', { content_types: ['text/html', 'TEXT/HTML'] }],
+        // A present content-type list must be non-empty; omit it instead.
+        ['compression', { content_types: [] }],
+        // A prefix length is canonical decimal.
+        ['ip_restriction', { allow: ['10.0.0.0/08'] }],
+        ['ip_restriction', { deny: ['2001:db8::/096'] }],
         // X-Real-IP and X-Geo-Country never reach the backend.
         ['correlation_id', { header_name: 'X-Real-IP' }],
         ['correlation_id', { header_name: 'x_geo_country' }],
@@ -1345,6 +1350,7 @@ describe('ferrum admin client', () => {
         ['access_control', { allowed_groups: [aclGroupForApi(randomUUID())] }],
         ['compression', { algorithms: ['gzip', 'br'], content_types: ['text/*'] }],
         ['correlation_id', { header_name: 'x-request-id' }],
+        ['ip_restriction', { allow: ['10.0.0.0/8', '0.0.0.0/0', '2001:db8::/32', '10.1.2.3'] }],
       ] as const) {
         const created = await client.pluginConfigs.create({
           plugin_name: pluginName,
