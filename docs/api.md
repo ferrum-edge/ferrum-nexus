@@ -2798,9 +2798,11 @@ reserves, `X-Ferrum-Hops` (Edge v0.9.17), or `X-Real-IP` or `X-Geo-Country`
 
 Edge v0.9.19 also refuses, and Nexus therefore answers `400 VALIDATION_FAILED`
 for, a `compression` algorithm or content type listed twice (content types
-compare case-insensitively), a content type with `*` anywhere but a whole
-subtype (`text/*` is accepted), and an `ip_restriction` prefix length that is
-not canonical decimal (`/08`).
+compare case-insensitively, and `brotli` is the same algorithm as `br`), an
+empty `compression` `content_types` list (leave the key out for the gateway's
+default list), a content type with `*` anywhere but a whole subtype (`text/*`
+is accepted), and an `ip_restriction` prefix length that is not canonical
+decimal (`/08`).
 
 Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
 `request_size_limiting`, `response_size_limiting`, `compression`,

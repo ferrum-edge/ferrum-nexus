@@ -50,7 +50,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **Palette plugins refuse the values Edge v0.9.19 refuses** (#706), with
   `400 VALIDATION_FAILED` from the server and a field message in the form,
   instead of a gateway `400` mid-write: a `compression` algorithm or content
-  type listed twice (content types compare case-insensitively), a content
+  type listed twice (content types compare case-insensitively, and `brotli`
+  is `br`), an empty `content_types` list (leave the key out), a content
   type with `*` anywhere but a whole subtype (`*/*`, `*/json`,
   `application/*+json`; `text/*` is now accepted), `X-Real-IP` or
   `X-Geo-Country` (any case, `_` or `-`) as a `correlation_id` `header_name`,

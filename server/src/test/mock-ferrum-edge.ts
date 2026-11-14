@@ -83,6 +83,8 @@ const AUTHENTICATED_IDENTITY_HEADER = /^x[-_]authenticated[-_]identity$/i;
 const FERRUM_HOPS_HEADER = /^x[-_]ferrum[-_]hops$/i;
 const GEO_COUNTRY_HEADER = /^x[-_]geo[-_]country$/i;
 /** Edge v0.9.19 `CompressionConfig.content_types` item grammar (`type/subtype` or `type/*`). */
+/** An `ip_restriction` prefix length in canonical decimal: no sign, no leading zero. */
+const CANONICAL_PREFIX_LENGTH = /^(?:0|[1-9][0-9]{0,2})$/;
 const COMPRESSION_CONTENT_TYPE = /^[!#$%&'+.^_`|~0-9A-Za-z-]+\/(?:[!#$%&'+.^_`|~0-9A-Za-z-]+|\*)$/;
 /** Edge v0.9.19 `bypass.header_present` value: 16-4096 visible ASCII characters. */
 const VALIDATOR_BYPASS_SECRET = /^[!-~]{16,4096}$/;
@@ -1488,6 +1490,13 @@ function palettePluginError(pluginName: string, config: Record<string, unknown>)
       ) {
         return `ip_restriction: unsupported mode '${String(config.mode)}'`;
       }
+      // Edge v0.9.19: a prefix length is canonical decimal (`/8`, not `/08`).
+      for (const entry of [...allow, ...deny]) {
+        const prefix = String(entry).split('/')[1];
+        if (prefix !== undefined && !CANONICAL_PREFIX_LENGTH.test(prefix)) {
+          return `ip_restriction: '${String(entry)}' has a non-canonical prefix length`;
+        }
+      }
       return null;
     }
 
@@ -1528,8 +1537,9 @@ function palettePluginError(pluginName: string, config: Record<string, unknown>)
       }
       const types = config.content_types;
       if (types !== undefined) {
-        if (!Array.isArray(types) || types.length > 64) {
-          return "compression: 'content_types' must be an array of at most 64 rules";
+        // Present means non-empty: only an absent list takes the default.
+        if (!Array.isArray(types) || types.length === 0 || types.length > 64) {
+          return "compression: 'content_types' must be a non-empty array of at most 64 rules";
         }
         const seen = new Set<string>();
         for (const type of types) {

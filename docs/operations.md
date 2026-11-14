@@ -1041,7 +1041,8 @@ is needed. What changes for Nexus:
   the v0.9.20 schemas, so no write changes.
 - **Stricter palette admission** (v0.9.19). Nexus now refuses, with
   `400 VALIDATION_FAILED`, what the gateway refuses: a `compression` algorithm
-  or content type listed twice (content types compare case-insensitively), a
+  or content type listed twice (content types compare case-insensitively), an
+  empty `content_types` list (leave the key out for the default list), a
   content type with `*` anywhere but a whole subtype (`*/*`, `*/json`,
   `application/*+json`; `text/*` is accepted and now matches), `X-Real-IP` or
   `X-Geo-Country` (any case, `_` or `-`) as a `correlation_id` `header_name`,

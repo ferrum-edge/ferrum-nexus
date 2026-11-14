@@ -88,8 +88,9 @@ Both refuse configuration earlier releases accepted. The full review is in
   `mcp_gateway`, `ai_tool_governor` and `ai_prompt_shield`, and
   `prometheus_metrics`. None sends a key or value v0.9.20 refuses, so no write
   changes.
-- **Palette admission.** v0.9.19 refuses repeated `compression` algorithms and
-  content types and `*` outside a whole-subtype `type/*`, `X-Real-IP` and
+- **Palette admission.** v0.9.19 refuses repeated `compression` algorithms
+  (`brotli` is `br`) and content types, an empty `content_types` list, and `*`
+  outside a whole-subtype `type/*`, `X-Real-IP` and
   `X-Geo-Country` as a `correlation_id` `header_name`, and non-canonical
   `ip_restriction` prefix lengths. The shared palette rules, the plugin form and
   the mock gateway now refuse the same values.
