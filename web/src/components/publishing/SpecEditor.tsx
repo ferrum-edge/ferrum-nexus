@@ -56,9 +56,13 @@ export function SpecEditor({
     () => (!tooLarge && value.trim() ? parseSpecText(value) : null),
     [tooLarge, value],
   );
-  // The server enforces this too; saying it here avoids a round trip and tells
+  // The server enforces these too; saying it here avoids a round trip and tells
   // the provider the number before they hit it.
   const tooManyOperations = result?.ok === true && result.spec.operationCount > MAX_SPEC_OPERATIONS;
+  const unresolvedPath = result?.ok === true ? result.spec.unresolvedPaths[0] : undefined;
+  let status = 'Valid';
+  if (tooManyOperations) status = 'Too many operations';
+  if (unresolvedPath !== undefined) status = 'Unresolvable path reference';
 
   const onFile = (event: ChangeEvent<HTMLInputElement>): void => {
     const file = event.target.files?.[0];
@@ -144,9 +148,7 @@ export function SpecEditor({
       {/* What the document parsed as, read back to the provider. */}
       <div className="flex min-h-6 flex-wrap items-center gap-x-3 gap-y-2">
         {result?.ok ? (
-          <Badge tone={tooManyOperations ? 'danger' : 'success'} dot>
-            {tooManyOperations ? 'Too many operations' : 'Valid'}
-          </Badge>
+          <Badge tone={status === 'Valid' ? 'success' : 'danger'} dot>{status}</Badge>
         ) : null}
         {result?.ok ? (
           <span className="text-xs text-fg-muted">
@@ -167,13 +169,29 @@ export function SpecEditor({
 
       {uploadError ? <FormNotice tone="danger">{uploadError}</FormNotice> : null}
       {result && !result.ok ? <FormNotice tone="danger">{result.error}</FormNotice> : null}
+      {unresolvedPath !== undefined ? (
+        <FormNotice tone="danger">{unresolvablePathMessage(unresolvedPath)}</FormNotice>
+      ) : null}
       {tooManyOperations ? (
         <FormNotice tone="danger">
-          This document declares more than {MAX_SPEC_OPERATIONS.toLocaleString()} operations, which
-          the portal will not publish. Split it into several APIs.
+          This document declares more than {MAX_SPEC_OPERATIONS.toLocaleString()} operations,
+          counting each path that references a shared Path Item, which the portal will not
+          publish. Split it into several APIs.
         </FormNotice>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Why the server refuses a path whose Path Item `$ref` chain cannot be
+ * followed (`unresolvable_path_item_ref`), in the words the provider sees here.
+ */
+function unresolvablePathMessage(path: string): string {
+  return (
+    `The path '${path}' references a Path Item that cannot be followed. A path's $ref must ` +
+    "be a local chain of at most 32 references into '#/paths/', '#/components/pathItems/' " +
+    "or '#/webhooks/', with no cycle."
   );
 }
 
@@ -191,6 +209,8 @@ export function specProblem(text: string): string | null {
   }
   const result = parseSpecText(text);
   if (!result.ok) return 'The OpenAPI document could not be parsed.';
+  const [unresolvedPath] = result.spec.unresolvedPaths;
+  if (unresolvedPath !== undefined) return unresolvablePathMessage(unresolvedPath);
   if (result.spec.operationCount > MAX_SPEC_OPERATIONS) {
     return `The OpenAPI document declares more than ${MAX_SPEC_OPERATIONS.toLocaleString()} operations.`;
   }
