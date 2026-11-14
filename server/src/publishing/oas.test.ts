@@ -40,7 +40,11 @@ const NOT_VALID_YAML = /not valid YAML/;
 const LARGER_THAN = /larger than/;
 const OPERATION_LIMIT_EXCEEDED = /3001 operations, more than the 3000 operation limit/;
 const PATH_LIMIT_EXCEEDED = /2001 paths, more than the 2000 path limit/;
-const SCHEMA_NODE_COUNTS = /99989 schema nodes, 6 parameters, 5 media types and 1 responses/;
+const RESOLVED_OPERATION_LIMIT_EXCEEDED = /3002 operations, more than the 3000 operation limit/;
+const UNFOLLOWABLE_PATH_ITEM = /'\/broken' references a Path Item that cannot be followed/;
+const TAG_ENTRY_COUNTS = /0 responses and 100100 tag entries, more than the 100000/;
+const SCHEMA_NODE_COUNTS =
+  /99989 schema nodes, 6 parameters, 5 media types, 1 responses and 0 tag entries/;
 const MORE_THAN_100000_DOCUMENTATION = /more than the 100000 the documentation viewer can render/;
 const OVER_2048_CHARACTERS = /2049 characters long, more than the 2048/;
 const OVER_1024_CHARACTERS = /1025 characters long, more than the 1024/;
@@ -448,6 +452,181 @@ describe('OpenAPI parsing', () => {
     });
   });
 
+  it('counts the operations each path resolves to through Path Item references', () => {
+    // 1,499 paths share one Path Item of two operations, and one path declares
+    // two of its own: exactly the limit once resolved, though only one path
+    // declares a method key itself.
+    const shared = (extra: number): string => {
+      const paths: Record<string, unknown> = { '/own': { get: OPERATION, post: OPERATION } };
+      for (let index = 0; index < MAX_SPEC_OPERATIONS / 2 - 1 + extra; index += 1) {
+        paths[`/shared/${index}`] = { $ref: '#/components/pathItems/Shared' };
+      }
+      return JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Shared', version: '1.0.0' },
+        paths,
+        components: { pathItems: { Shared: { get: OPERATION, post: OPERATION } } },
+      });
+    };
+
+    const accepted = parseOpenApiSpec(shared(0));
+    assert.equal(accepted.operationCount, MAX_SPEC_OPERATIONS);
+    // The routes Edge's importer generates for a referenced path.
+    assert.deepEqual(accepted.paths[1], { path: '/shared/0', methods: ['GET', 'POST'] });
+
+    const failure = expectSpecInvalid(() => parseOpenApiSpec(shared(1)));
+    assert.match(failure.message, RESOLVED_OPERATION_LIMIT_EXCEEDED);
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      operations: MAX_SPEC_OPERATIONS + 2,
+      limit: MAX_SPEC_OPERATIONS,
+    });
+  });
+
+  it('reads a referenced Path Item through its chain, the outermost member winning', () => {
+    const spec = parseOpenApiSpec(
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Chains', version: '1.0.0' },
+        paths: {
+          '/a': { get: OPERATION },
+          // Into `paths`, with a sibling operation on the reference.
+          '/alias': { $ref: '#/paths/~1a', delete: OPERATION },
+          // Into `webhooks`, then on into `components.pathItems`.
+          '/hook': { $ref: '#/webhooks/Hook' },
+          // A specification extension among the paths: its `$ref` is data.
+          'x-notes': { $ref: 'notes.yaml#/anything' },
+        },
+        webhooks: { Hook: { $ref: '#/components/pathItems/Item' } },
+        components: { pathItems: { Item: { put: OPERATION, patch: OPERATION } } },
+      }),
+    );
+    assert.equal(spec.operationCount, 5);
+    assert.deepEqual(spec.paths, [
+      { path: '/a', methods: ['GET'] },
+      { path: '/alias', methods: ['GET', 'DELETE'] },
+      { path: '/hook', methods: ['PUT', 'PATCH'] },
+    ]);
+  });
+
+  it('refuses a path whose Path Item reference cannot be followed', () => {
+    // `I0` to `I<length - 1>`, each referencing the next, the last inline:
+    // a path referencing `I0` follows `length` references.
+    const chain = (length: number): Record<string, unknown> => {
+      const items: Record<string, unknown> = {};
+      for (let index = 0; index < length - 1; index += 1) {
+        items[`I${index}`] = { $ref: `#/components/pathItems/I${index + 1}` };
+      }
+      items[`I${length - 1}`] = { get: OPERATION };
+      return items;
+    };
+    const loop = { Loop: { $ref: '#/components/pathItems/Loop' } };
+    const cases: [string, unknown, Record<string, unknown>][] = [
+      ['cyclic', '#/components/pathItems/Loop', loop],
+      ['dangling', '#/components/pathItems/Missing', {}],
+      ['external', 'shared.yaml#/components/pathItems/Item', {}],
+      ['outside the Path Item containers', '#/components/schemas/Item', {}],
+      ['not a string', 42, {}],
+      // 33 references: one past the 32 Edge follows.
+      ['too long', '#/components/pathItems/I0', chain(33)],
+    ];
+    for (const [label, $ref, pathItems] of cases) {
+      const text = JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Broken', version: '1.0.0' },
+        paths: { '/ok': { get: OPERATION }, '/broken': { $ref, get: OPERATION } },
+        components: { pathItems, schemas: { Item: { get: OPERATION } } },
+      });
+      const failure = expectSpecInvalid(() => parseOpenApiSpec(text));
+      assert.match(failure.message, UNFOLLOWABLE_PATH_ITEM, label);
+      assert.deepEqual(
+        failure.details,
+        { field: 'paths', path: '/broken', reason: 'unresolvable_path_item_ref' },
+        label,
+      );
+    }
+
+    // The longest chain Edge follows, 32 references, is accepted.
+    const longest = JSON.stringify({
+      openapi: '3.1.0',
+      info: { title: 'Long', version: '1.0.0' },
+      paths: { '/long': { $ref: '#/components/pathItems/I0' } },
+      components: { pathItems: chain(32) },
+    });
+    assert.equal(parseOpenApiSpec(longest).operationCount, 1);
+  });
+
+  it('charges a shared Path Item at every path that references it', () => {
+    // One operation of 100 response entries, shared by `count` paths: 100
+    // units a path, as an inline copy at each would cost.
+    const responses = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [`${200 + index}`, { description: 'OK' }]),
+    );
+    const sharing = (count: number) => {
+      const paths: Record<string, unknown> = {};
+      for (let index = 0; index < count; index += 1) {
+        paths[`/p${index}`] = { $ref: '#/components/pathItems/Shared' };
+      }
+      const components = { pathItems: { Shared: { get: { responses } } } };
+      return { document: { paths, components }, paths };
+    };
+
+    const atLimit = sharing(MAX_SPEC_RENDER_UNITS / 100);
+    assertRenderCost(atLimit.document, atLimit.paths);
+
+    const overLimit = sharing(MAX_SPEC_RENDER_UNITS / 100 + 1);
+    const failure = expectSpecInvalid(() => assertRenderCost(overLimit.document, overLimit.paths));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: 0,
+      parameters: 0,
+      media_types: 0,
+      responses: MAX_SPEC_RENDER_UNITS + 1,
+      tags: 0,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+  });
+
+  it('charges one unit per tag entry at every operation that carries it', () => {
+    // The viewer lists an operation once under each of its tags, so a shared
+    // operation with many tags costs its tags at every path that reaches it.
+    const tags = Array.from({ length: 100 }, (_, index) => `tag-${index}`);
+    const sharing = (count: number) => {
+      const paths: Record<string, unknown> = {};
+      for (let index = 0; index < count; index += 1) {
+        paths[`/p${index}`] = { $ref: '#/components/pathItems/Tagged' };
+      }
+      const components = { pathItems: { Tagged: { get: { tags } } } };
+      return { document: { paths, components }, paths };
+    };
+
+    const atLimit = sharing(MAX_SPEC_RENDER_UNITS / 100);
+    assertRenderCost(atLimit.document, atLimit.paths);
+
+    const overLimit = sharing(MAX_SPEC_RENDER_UNITS / 100 + 1);
+    const failure = expectSpecInvalid(() => assertRenderCost(overLimit.document, overLimit.paths));
+    assert.match(failure.message, TAG_ENTRY_COUNTS);
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: 0,
+      parameters: 0,
+      media_types: 0,
+      responses: 0,
+      tags: MAX_SPEC_RENDER_UNITS + 100,
+      units: MAX_SPEC_RENDER_UNITS + 100,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+
+    // Inline, one operation's tags are charged the same way.
+    const many = Array.from({ length: MAX_SPEC_RENDER_UNITS + 1 }, () => 't');
+    const inline = { '/a': { get: { tags: many } } };
+    const inlineFailure = expectSpecInvalid(() => assertRenderCost({ paths: inline }, inline));
+    assert.equal((inlineFailure.details as { tags: number }).tags, MAX_SPEC_RENDER_UNITS + 1);
+  });
+
   it('accepts a document at the path limit and rejects one just over it', () => {
     // One operation per path, so only the path ceiling can be the one that trips.
     assert.equal(parseOpenApiSpec(specWithPaths(MAX_SPEC_PATHS)).pathCount, 2_000);
@@ -481,6 +660,7 @@ describe('OpenAPI parsing', () => {
       parameters: 6,
       media_types: 5,
       responses: 1,
+      tags: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -502,6 +682,7 @@ describe('OpenAPI parsing', () => {
       parameters: 0,
       media_types: 1,
       responses: 1,
+      tags: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -552,6 +733,7 @@ describe('OpenAPI parsing', () => {
       parameters: 0,
       media_types: 1,
       responses: 1,
+      tags: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -597,6 +779,7 @@ describe('OpenAPI parsing', () => {
       parameters: 1,
       media_types: 2,
       responses: 1,
+      tags: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -886,6 +1069,7 @@ describe('OpenAPI parsing', () => {
       parameters: 2,
       media_types: 0,
       responses: 0,
+      tags: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -936,6 +1120,7 @@ describe('OpenAPI parsing', () => {
       parameters: 20,
       media_types: 0,
       responses: 0,
+      tags: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -995,6 +1180,7 @@ describe('OpenAPI parsing', () => {
       parameters: 0,
       media_types: 100_000,
       responses: 100,
+      tags: 0,
       units: 100_100,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -1036,6 +1222,7 @@ describe('OpenAPI parsing', () => {
       parameters: 0,
       media_types: 0,
       responses: MAX_SPEC_RENDER_UNITS + 1,
+      tags: 0,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });

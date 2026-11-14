@@ -47,21 +47,28 @@ The portal checks only what publishing depends on:
 - `openapi` is a **3.x** version. **Swagger 2.0 is rejected**;
 - `info.title` (the catalog title) and `info.version` (the version label) are
   present;
-- `paths` is an object.
+- `paths` is an object;
+- every path that is a `$ref` to a Path Item resolves inside the document: a
+  chain of at most 32 references into `#/paths/`, `#/components/pathItems/` or
+  `#/webhooks/`, with no cycle.
 
-Schema correctness and `$ref` resolution are not checked. Size limits:
+Schema correctness and other `$ref` resolution are not checked. Size limits:
 
-| Limit                                               | Value   |
-| --------------------------------------------------- | ------- |
-| Document size                                       | 2 MiB   |
-| Nesting depth (the root is level one)               | 200     |
-| Paths                                               | 2,000   |
-| Operations                                          | 3,000   |
-| Schema nodes + parameters + media types + responses | 100,000 |
+| Limit                                                      | Value   |
+| ---------------------------------------------------------- | ------- |
+| Document size                                              | 2 MiB   |
+| Nesting depth (the root is level one)                      | 200     |
+| Paths                                                      | 2,000   |
+| Operations                                                 | 3,000   |
+| Schema nodes + parameters + media types + responses + tags | 100,000 |
 
-The last limit protects catalog readers, whose browsers render the document.
+Operations are counted after Path Item references resolve: a path that is a
+`$ref` counts the operations of the Path Item it points at, so a Path Item
+that 1,000 paths reference counts 1,000 times. The last limit counts them the
+same way, and protects catalog readers, whose browsers render the document.
 It counts what the documentation page shows for each operation: parameter
-rows, responses, media types, and each schema node (including primitives),
+rows, responses, media types, one entry per tag the operation is listed under,
+and each schema node (including primitives),
 property, `items` and `oneOf`/`anyOf`/`allOf` entry and enum value (up to 12)
 of the schemas they hold. Reuse is cheap: a `$ref` to a component costs two
 units wherever it appears, and the component itself is counted once, however
@@ -358,11 +365,11 @@ For a document declaring `GET /invoices` and `GET /invoices/{id}`, published at
   make every operation answer `400`). Your stored document is unchanged, and
   `servers[0]` still names the upstream. Servers inside operation callbacks are
   left alone.
-- **Path `$ref`s must stay inside the document's path items.** At `routes`, a
-  path whose `$ref` points anywhere other than `#/paths/`,
+- **Path `$ref`s must stay inside the document's path items.** At either
+  level, a path whose `$ref` points anywhere other than `#/paths/`,
   `#/components/pathItems/` or `#/webhooks/` (including another file) is refused
-  with a `400` naming the path. Inline it, move it under
-  `components.pathItems`, or publish at `docs_only`.
+  with a `400` naming the path. Inline it, or move it under
+  `components.pathItems`.
 
 In the catalog, clients at either level see the document with its `servers`
 replaced by the gateway address (or the listen path when no gateway address is

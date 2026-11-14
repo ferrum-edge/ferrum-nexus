@@ -415,16 +415,20 @@ export const MAX_UPSTREAM_URL_LENGTH = 2_000;
 export const MAX_SPEC_PATHS = 2_000;
 
 /**
- * Maximum number of operations (path item × HTTP method) an uploaded OpenAPI
- * document may declare. Sized against the same real-world APIs as
- * {@link MAX_SPEC_PATHS}, allowing a healthy average of methods per path.
+ * Maximum number of operations (path × HTTP method) an uploaded OpenAPI
+ * document may declare, counted after Path Item references resolve: a path
+ * that is a `$ref` counts the operations of the Path Item it resolves to, as
+ * the documentation viewer lists them and Edge routes them, so a Path Item that
+ * many paths reference counts once per path. Sized against the same real-world
+ * APIs as {@link MAX_SPEC_PATHS}, allowing a healthy average of methods per
+ * path.
  */
 export const MAX_SPEC_OPERATIONS = 3_000;
 
 /**
  * Maximum number of things the documentation viewer has to walk in one uploaded
- * document: schema nodes, parameter entries, media types and response entries,
- * added together.
+ * document: schema nodes, parameter entries, media types, response entries and
+ * tag entries, added together.
  *
  * Paths and operations are not a bound on render cost. One operation can carry
  * thousands of parameters, dozens of media types per body, and schemas whose
@@ -459,6 +463,11 @@ export const MAX_SPEC_OPERATIONS = 3_000;
  *   one each. The schemas and media types of a referenced parameter, request
  *   body or response, and the schemas of path-item parameters, are charged
  *   once.
+ * - Each entry of an operation's `tags` costs one: the viewer lists the
+ *   operation once under each tag.
+ * - Operations are read through each path's Path Item references, so a Path
+ *   Item that several paths reference costs, at every one of them, what an
+ *   inline copy would.
  *
  * The count is therefore what rendering each part of the document once costs.
  * It is not an upper bound on what the viewer spends across all of a

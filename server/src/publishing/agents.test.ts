@@ -10,7 +10,6 @@ import {
   agentToolDefinitionDigests,
   definitionHashStats,
   identifyAgentTools,
-  resolvedAgentOperations,
   stampAgentDocument,
   stampedAgentDocumentBytes,
   validateAgents,
@@ -859,7 +858,7 @@ describe('the stamped agent document', () => {
     assert.ok(stampedAgentDocumentBytes(document, LISTEN_PATHS, agents) > charged);
   });
 
-  it('admits exactly the operation cap after resolving Path Item references', () => {
+  it('leaves the resolved operation cap to the upload limit', () => {
     // 1,499 paths share one Path Item of two operations, and the selected
     // path declares two more: exactly the cap once resolved.
     const paths: Record<string, unknown> = {};
@@ -868,23 +867,26 @@ describe('the stamped agent document', () => {
     }
     paths['/orders'] = { get: { responses: OK }, post: { responses: OK } };
     const document = {
+      openapi: '3.1.0',
+      info: { title: 'Shared', version: '1' },
       paths,
       components: { pathItems: { Shared: { get: { responses: OK }, post: { responses: OK } } } },
     };
     const over = { ...document, paths: { ...paths, '/one-more': { get: { responses: OK } } } };
     const agents = { operations: [TOOL] };
 
-    assert.doesNotThrow(() => validateAgents(agents, document, 'routes', true, null, null));
+    const parsed = parseOpenApiSpec(JSON.stringify(document));
+    assert.equal(parsed.operationCount, MAX_SPEC_OPERATIONS);
+    assert.doesNotThrow(() => validateAgents(agents, parsed.document, 'routes', true, null, null));
+    // One more resolved operation is refused at upload, before any selection
+    // is read: the agent checks see only documents within the cap.
     assert.throws(
-      () => validateAgents(agents, over, 'routes', true, null, null),
+      () => parseOpenApiSpec(JSON.stringify(over)),
       (error: unknown) =>
         error instanceof NexusError &&
         error.code === 'SPEC_INVALID' &&
-        error.message.includes(`${MAX_SPEC_OPERATIONS} operations`),
+        error.message.includes(`more than the ${MAX_SPEC_OPERATIONS} operation limit`),
     );
-    // A selection already admitted, re-checked by a PATCH, is not capped.
-    assert.doesNotThrow(() => validateAgents(agents, over, 'routes', true, null, null, null));
-    assert.equal(resolvedAgentOperations(over, null).length, MAX_SPEC_OPERATIONS + 1);
   });
 });
 

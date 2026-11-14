@@ -28,23 +28,30 @@
  *   catalog's display title and the spec revision label;
  * - `paths` is an object, because a document with no operations cannot be
  *   rendered or usefully proxied;
+ * - every path's Path Item `$ref` chain is one Edge follows: local, acyclic,
+ *   at most 32 hops, into `#/paths/`, `#/components/pathItems/` or
+ *   `#/webhooks/` (see {@link resolvePathItem}). The limits below count what
+ *   each path resolves to, so a reference they cannot follow is refused rather
+ *   than counted as nothing;
  * - the document declares no more than {@link MAX_SPEC_PATHS} paths and
- *   {@link MAX_SPEC_OPERATIONS} operations. That is a *client* protection
- *   rather than a gateway one: `MAX_SPEC_BYTES` bounds the transfer but not the
- *   structure, and a server-valid 2 MiB document holding tens of thousands of
- *   minimal operations would freeze every catalog viewer that renders one card
- *   per operation.
+ *   {@link MAX_SPEC_OPERATIONS} operations, counted after Path Item references
+ *   resolve: a Path Item that many paths reference counts at every one of them.
+ *   That is a *client* protection rather than a gateway one: `MAX_SPEC_BYTES`
+ *   bounds the transfer but not the structure, and a server-valid 2 MiB
+ *   document holding tens of thousands of minimal operations, or 2,000 paths
+ *   that all reference one large Path Item, would freeze every catalog viewer
+ *   that renders one card per operation.
  * - the document costs no more than {@link MAX_SPEC_RENDER_UNITS} to *render*.
  *   Paths and operations are the wrong unit for that: the documentation viewer
- *   walks one row per schema node, per parameter and per media type and one
- *   card per response, and a single declared operation can carry any number of
- *   all four. A document is provider-authored and is read back by every
- *   signed-in viewer of the catalog entry, so this counts what the viewer walks
- *   and refuses past the ceiling.
+ *   walks one row per schema node, per parameter and per media type, one card
+ *   per response and one group entry per tag, and a single declared operation
+ *   can carry any number of all five. A document is provider-authored and is
+ *   read back by every signed-in viewer of the catalog entry, so this counts
+ *   what the viewer walks and refuses past the ceiling.
  *
- * Everything else (schema correctness, `$ref` resolution, operation shape) is
- * left alone: an over-strict portal would reject specs the gateway is perfectly
- * happy to sit in front of.
+ * Everything else (schema correctness, other `$ref` resolution, operation
+ * shape) is left alone: an over-strict portal would reject specs the gateway is
+ * perfectly happy to sit in front of.
  *
  * The first usable `servers[].url` is read as the **default upstream** after
  * substituting server variable defaults, but only when it is an
@@ -92,11 +99,14 @@ import {
   MAX_SPEC_RENDER_UNITS,
   MAX_UPSTREAM_URL_LENGTH,
   OPENAPI_OPERATION_METHODS,
+  agentPathItemMember,
   createOpenApiRefResolver,
   expandServerUrl,
   firstUsableSpecServerUrl,
   parseAbsoluteHttpUrl,
+  resolveAgentPathItem,
   resolveOpenApiPointer,
+  type AgentPathItem,
 } from '@ferrum-nexus/shared';
 
 export { slugify } from '@ferrum-nexus/shared';
@@ -151,10 +161,15 @@ export interface ParsedSpec {
   defaultUpstream: SpecUpstream | null;
   /** Number of path items — surfaced in audit details and the provider UI. */
   pathCount: number;
-  /** Number of operations (path item × HTTP method) across the whole document. */
+  /**
+   * Number of operations (path × HTTP method) across the whole document, after
+   * Path Item references resolve: each path counts the methods of the Path Item
+   * it resolves to.
+   */
   operationCount: number;
   /**
-   * Every declared path item with the methods it carries, in document order.
+   * Every declared path item with the methods it carries, in document order,
+   * read through its Path Item references as Edge reads them.
    *
    * This is what `routes` enforcement is generated from. A path item that is
    * not an object, or that declares no HTTP-method key at all, is omitted
@@ -1248,6 +1263,70 @@ function parameterInTooLong(location: string): NexusError {
   );
 }
 
+/** `SPEC_INVALID` for a path whose Path Item reference chain cannot be followed. */
+function unresolvablePathItem(path: string): NexusError {
+  return specInvalid(
+    `The path '${path}' references a Path Item that cannot be followed: a path's $ref must ` +
+      'be a local, acyclic chain of at most 32 references into ' +
+      "'#/paths/', '#/components/pathItems/' or '#/webhooks/'",
+    { field: 'paths', path, reason: 'unresolvable_path_item_ref' },
+  );
+}
+
+/**
+ * The Path Item `value` at `path` resolves to, read in place through its chain
+ * of Path Item references exactly as Edge follows it and as the documentation
+ * viewer does (`resolveAgentPathItem`): at most 32 hops, acyclic, into
+ * `#/paths/`, `#/components/pathItems/` or `#/webhooks/`, the outermost
+ * reference that sets a member winning. `memo` serves one document, so a Path
+ * Item many paths reference is followed once and each later path costs only
+ * its own reference.
+ *
+ * Every upload limit that reads a path's operations reads them through this,
+ * so a path counts what it resolves to: the operations, parameters, responses
+ * and tags of a shared Path Item count at every path that names it, exactly as
+ * an inline copy at each would.
+ *
+ * @throws NexusError `SPEC_INVALID` (`reason: 'unresolvable_path_item_ref'`)
+ * for any other chain (external, dangling, cyclic, too long, or a `$ref` that
+ * is not a string): what it resolves to cannot be counted, so it is refused
+ * rather than counted as nothing.
+ */
+function resolvePathItem(
+  document: Record<string, unknown>,
+  path: string,
+  value: Record<string, unknown>,
+  memo: WeakMap<object, AgentPathItem>,
+): AgentPathItem {
+  try {
+    return resolveAgentPathItem(document, path, value, { memo });
+  } catch {
+    throw unresolvablePathItem(path);
+  }
+}
+
+/**
+ * Every object-valued entry of `paths`, in document order: each path template
+ * (a key starting with `/`) resolved by {@link resolvePathItem}, and any other
+ * key, a specification extension whose `$ref` is data, read as written.
+ */
+function resolvePathItems(
+  document: Record<string, unknown>,
+  paths: Record<string, unknown>,
+): [string, AgentPathItem][] {
+  const memo = new WeakMap<object, AgentPathItem>();
+  const items: [string, AgentPathItem][] = [];
+  for (const path of Object.keys(paths)) {
+    const value = paths[path];
+    if (!isRecord(value)) continue;
+    const item = path.startsWith('/')
+      ? resolvePathItem(document, path, value, memo)
+      : { chain: [], target: value };
+    items.push([path, item]);
+  }
+  return items;
+}
+
 /** Unwinds a schema walk whose cost has passed the caller's limit. */
 class RenderLimitReached {}
 
@@ -1385,12 +1464,14 @@ export function schemaRenderUnits(schema: unknown, document: Record<string, unkn
   return counter.occurrence(schema, Infinity) + counter.targets(Infinity);
 }
 
-/** The four things the documentation viewer walks, counted separately. */
+/** The five things the documentation viewer walks, counted separately. */
 interface RenderUnits {
   schemaNodes: number;
   parameters: number;
   mediaTypes: number;
   responses: number;
+  /** Entries of the operations' `tags` lists: the viewer lists an operation under each. */
+  tags: number;
 }
 
 /**
@@ -1416,21 +1497,30 @@ interface ContentCost {
  * Refuse a document that costs more to render than {@link MAX_SPEC_RENDER_UNITS}.
  *
  * Counted over the parts the viewer renders from each declared operation — its
- * parameters, request body and responses, their media types, and the schemas
- * those hold — rather than over the document as a whole, so a component no
- * operation reaches costs nothing. What each part costs, and how that relates
- * to what the viewer spends, is the contract {@link MAX_SPEC_RENDER_UNITS}
- * describes. Every response entry costs one unit, as it costs the viewer a
- * card, whether or not it declares any `content`: an entry that cost nothing
- * could be repeated without bound, and a YAML alias repeats the whole
- * `responses` map at every operation that names it.
+ * parameters, request body and responses, their media types, the schemas those
+ * hold, and one group entry per entry of its `tags` — rather than over the
+ * document as a whole, so a component no operation reaches costs nothing.
+ *
+ * Each path's operations are read through its Path Item references (see
+ * {@link resolvePathItem}), as the viewer reads them, so a Path Item that many
+ * paths reference costs what an inline copy at each of them would: its
+ * operations' parameter rows, response entries and tag entries at every path,
+ * as a YAML alias repeating it would. A chain that cannot be followed is
+ * refused.
+ *
+ * What each part costs, and how that relates to what the viewer spends, is the
+ * contract {@link MAX_SPEC_RENDER_UNITS} describes. Every response entry costs
+ * one unit, as it costs the viewer a card, whether or not it declares any
+ * `content`: an entry that cost nothing could be repeated without bound, and a
+ * YAML alias repeats the whole `responses` map at every operation that names
+ * it.
  *
  * A parameter, request body or response written as a `$ref` is followed the way
  * the viewer follows it — one memoised resolver for the document — and each
  * distinct object so named has its schemas and media types charged once, at its
  * first reference; every later reference to it costs only its own parameter or
  * response entry. Path-item parameters cost a row under every operation and
- * their schemas once per path item. A schema `$ref` costs two units at every
+ * their schemas once per path. A schema `$ref` costs two units at every
  * occurrence and its target's own cost once per document. Those repetitions are
  * what the viewer's own page budget absorbs; charging them in full here would
  * refuse documents that merely reuse their components.
@@ -1458,7 +1548,13 @@ export function assertRenderCost(
   const contentCosts = new WeakMap<object, ContentCost>();
   const chargedParameters = new WeakSet<object>();
   const chargedContent = new WeakSet<object>();
-  const units: RenderUnits = { schemaNodes: 0, parameters: 0, mediaTypes: 0, responses: 0 };
+  const units: RenderUnits = {
+    schemaNodes: 0,
+    parameters: 0,
+    mediaTypes: 0,
+    responses: 0,
+    tags: 0,
+  };
   const resolver = createOpenApiRefResolver(document);
   const schemas = createSchemaCostCounter(document, stats);
 
@@ -1467,17 +1563,20 @@ export function assertRenderCost(
     parameters: number,
     mediaTypes: number,
     responses = 0,
+    tags = 0,
   ): void => {
     units.schemaNodes += schemaNodes;
     units.parameters += parameters;
     units.mediaTypes += mediaTypes;
     units.responses += responses;
-    const total = units.schemaNodes + units.parameters + units.mediaTypes + units.responses;
+    units.tags += tags;
+    const total =
+      units.schemaNodes + units.parameters + units.mediaTypes + units.responses + units.tags;
     if (total <= MAX_SPEC_RENDER_UNITS) return;
     throw specInvalid(
       `The document declares ${units.schemaNodes} schema nodes, ${units.parameters} parameters, ` +
-        `${units.mediaTypes} media types and ${units.responses} responses, more than the ` +
-        `${MAX_SPEC_RENDER_UNITS} the documentation viewer can render`,
+        `${units.mediaTypes} media types, ${units.responses} responses and ${units.tags} tag ` +
+        `entries, more than the ${MAX_SPEC_RENDER_UNITS} the documentation viewer can render`,
       {
         field: 'paths',
         reason: 'too_much_to_render',
@@ -1485,6 +1584,7 @@ export function assertRenderCost(
         parameters: units.parameters,
         media_types: units.mediaTypes,
         responses: units.responses,
+        tags: units.tags,
         units: total,
         limit: MAX_SPEC_RENDER_UNITS,
       },
@@ -1496,7 +1596,8 @@ export function assertRenderCost(
     units.schemaNodes -
     units.parameters -
     units.mediaTypes -
-    units.responses;
+    units.responses -
+    units.tags;
 
   // Called after every charge that may have queued `$ref` targets, so each is
   // charged before the count moves on.
@@ -1593,13 +1694,13 @@ export function assertRenderCost(
     chargeTargets();
   };
 
-  for (const item of objectValues(paths)) {
-    if (!isRecord(item)) continue;
-    assertParameterIdentities(item.parameters);
-    const inherited = Array.isArray(item.parameters) ? item.parameters : [];
+  for (const [, item] of resolvePathItems(document, paths)) {
+    const shared = agentPathItemMember(item, 'parameters');
+    assertParameterIdentities(shared);
+    const inherited = Array.isArray(shared) ? shared : [];
     let inheritedSchemasCharged = false;
     for (const method of OPENAPI_OPERATION_METHODS) {
-      const operation = item[method];
+      const operation = agentPathItemMember(item, method);
       if (!isRecord(operation)) continue;
       // The viewer lists path-item parameters under every operation beneath
       // them; the schemas they carry are the same objects each time.
@@ -1608,6 +1709,11 @@ export function assertRenderCost(
         inheritedSchemasCharged = true;
         addParameterSchemas(inherited);
       }
+      // The viewer groups operations by tag, listing this one once under
+      // each: a tag entry costs a unit at every operation that carries it, so
+      // one operation with many tags, shared by many paths, cannot multiply
+      // past the ceiling. Charged per entry, duplicates included.
+      if (Array.isArray(operation.tags)) charge(0, 0, 0, 0, operation.tags.length);
       assertParameterIdentities(operation.parameters);
       addParameters(operation.parameters);
       addContent(operation.requestBody);
@@ -1695,7 +1801,10 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
       { field: 'paths', paths: pathCount, limit: MAX_SPEC_PATHS },
     );
   }
-  const operationCount = countOperations(paths);
+  // Every path's Path Item reference chain, followed once: a chain that cannot
+  // be followed is refused here, before anything is counted.
+  const pathItems = resolvePathItems(value, paths);
+  const operationCount = countOperations(pathItems);
   if (operationCount > MAX_SPEC_OPERATIONS) {
     throw specInvalid(
       `The document declares ${operationCount} operations, more than the ${MAX_SPEC_OPERATIONS} operation limit`,
@@ -1714,9 +1823,9 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
     defaultUpstream: readDefaultUpstream(value.servers),
     pathCount,
     operationCount,
-    // Walked only after both limits have been cleared, so a document built to
-    // be expensive to enumerate is rejected before it is enumerated.
-    paths: readPaths(paths),
+    // Read only after every limit has been cleared, so a document built to be
+    // expensive to enumerate is rejected before it is enumerated.
+    paths: readPaths(pathItems),
     contentType,
     raw,
     document: value,
@@ -1916,44 +2025,50 @@ export function parseUploadedOpenApiSpec(text: string): ParsedSpec {
 }
 
 /**
- * Operations across every path item.
+ * Operations across every path, each read through its Path Item references
+ * ({@link resolvePathItem}): a Path Item that several paths reference counts
+ * once per path, as the viewer and Edge's importer list it once per path.
  *
- * Only the eight OpenAPI HTTP-method keys count; `parameters`, `summary`,
- * `servers`, `$ref` and `x-` extensions are path-item metadata, not operations.
- * A non-object path item contributes nothing rather than failing the document —
- * Nexus is not a spec linter (see the module docblock).
+ * Only the eight OpenAPI HTTP-method keys count, present whatever their value;
+ * `parameters`, `summary`, `servers`, `$ref` and `x-` extensions are path-item
+ * metadata, not operations. A non-object path item contributes nothing rather
+ * than failing the document — Nexus is not a spec linter (see the module
+ * docblock).
  */
-function countOperations(paths: Record<string, unknown>): number {
+function countOperations(items: readonly [string, AgentPathItem][]): number {
   let count = 0;
-  for (const item of Object.values(paths)) {
-    if (!isRecord(item)) continue;
+  for (const [, item] of items) {
     for (const method of OPENAPI_OPERATION_METHODS) {
-      if (item[method] !== undefined) count += 1;
+      if (agentPathItemMember(item, method) !== undefined) count += 1;
     }
   }
   return count;
 }
 
 /**
- * Every path item that declares at least one operation, with its methods.
+ * Every path whose resolved Path Item declares at least one operation, with
+ * its methods.
  *
- * A second walk over `paths` rather than a by-product of {@link countOperations},
- * deliberately: that function's exact counting rule (a method *key* present,
- * whatever its value) is what the `MAX_SPEC_OPERATIONS` limit has always meant,
- * and reusing one traversal for both would tie the two together. The two agree
- * on which keys count, and this one is only reached once the limits pass.
+ * A second walk over the resolved items rather than a by-product of
+ * {@link countOperations}, deliberately: that function's exact counting rule (a
+ * method *key* present, whatever its value) is what the `MAX_SPEC_OPERATIONS`
+ * limit means, and reusing one traversal for both would tie the two together.
+ * The two agree on which keys count, and this one is only reached once the
+ * limits pass.
  *
  * Path items that are not objects, and objects declaring no method key, are
  * skipped: they contribute no operation to enforce, and rejecting them would
- * make the portal stricter than the gateway it fronts.
+ * make the portal stricter than the gateway it fronts. A path that is a `$ref`
+ * carries the methods of the Path Item it resolves to, which are the routes
+ * Edge's importer generates for it.
  */
-function readPaths(paths: Record<string, unknown>): SpecPath[] {
+function readPaths(items: readonly [string, AgentPathItem][]): SpecPath[] {
   const declared: SpecPath[] = [];
-  for (const [path, item] of Object.entries(paths)) {
-    if (!isRecord(item)) continue;
-    const methods = OPENAPI_OPERATION_METHODS.filter((method) => item[method] !== undefined).map(
-      (method) => method.toUpperCase(),
-    );
+  for (const [path, item] of items) {
+    const methods: string[] = [];
+    for (const method of OPENAPI_OPERATION_METHODS) {
+      if (agentPathItemMember(item, method) !== undefined) methods.push(method.toUpperCase());
+    }
     if (methods.length > 0) declared.push({ path, methods });
   }
   return declared;

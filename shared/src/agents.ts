@@ -180,9 +180,10 @@ export function agentPathItems(document: Record<string, unknown>): Record<string
 /** Options for {@link agentOperations}. */
 export interface AgentOperationOptions {
   /**
-   * Refuse a document that resolves to more operations than this. Only an
-   * agent selection being admitted passes it: a document already on the
-   * gateway is read in full, whatever it resolves to.
+   * Refuse a document that resolves to more operations than this. The
+   * provider's operation picker passes `MAX_SPEC_OPERATIONS` for a document
+   * not yet uploaded; the server's upload limit counts operations the same
+   * way, so a document it accepted never passes the cap.
    */
   maxOperations?: number;
 }
