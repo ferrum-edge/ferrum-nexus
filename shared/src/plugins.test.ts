@@ -5,17 +5,19 @@ import {
   CORRELATION_ID_RESERVED_HEADERS,
   PLUGIN_ADMISSION_RULES,
   isGatewayOwnedConsumerHeader,
+  isGeoCountryHeader,
   isProxyHopsHeader,
   pluginAdmissionProblem,
 } from './plugins.js';
 
 /**
- * Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.9`, copied verbatim from
- * `src/plugins/correlation_id.rs:18-63` (lowercased, in Edge's order). Nexus
- * has no vendored contract for header names, so this literal is the pin: a
- * change on either side must be reconciled here, not silently drift.
+ * Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.20`, copied verbatim from
+ * `src/plugins/correlation_id.rs:20-69` (lowercased, in Edge's order; `v0.9.19`
+ * added `x-real-ip`). Nexus has no vendored contract for header names, so this
+ * literal is the pin: a change on either side must be reconciled here, not
+ * silently drift.
  */
-const EDGE_V099_RESERVED_HEADER_NAMES: readonly string[] = [
+const EDGE_V0920_RESERVED_HEADER_NAMES: readonly string[] = [
   'api-key',
   'authentication-info',
   'authorization',
@@ -59,12 +61,13 @@ const EDGE_V099_RESERVED_HEADER_NAMES: readonly string[] = [
   'x-forwarded-proto',
   'x-goog-api-key',
   'x-grpc-web-mode',
+  'x-real-ip',
   'x-xsrf-token',
 ];
 
 describe('CORRELATION_ID_RESERVED_HEADERS', () => {
-  it('matches the reserved set Ferrum Edge v0.9.9 refuses, exactly', () => {
-    assert.deepEqual([...CORRELATION_ID_RESERVED_HEADERS], [...EDGE_V099_RESERVED_HEADER_NAMES]);
+  it('matches the reserved set Ferrum Edge v0.9.20 refuses, exactly', () => {
+    assert.deepEqual([...CORRELATION_ID_RESERVED_HEADERS], [...EDGE_V0920_RESERVED_HEADER_NAMES]);
   });
 
   it('holds every header lowercase so lookups can lowercase the input once', () => {
@@ -115,10 +118,23 @@ describe('isProxyHopsHeader', () => {
   });
 });
 
+describe('isGeoCountryHeader', () => {
+  it('matches X-Geo-Country exactly, case- and separator-insensitively', () => {
+    // Edge v0.9.19 reserves its GeoIP assertion as a correlation destination.
+    for (const name of ['X-Geo-Country', 'x_geo_country', 'x-Geo_country', ' x-geo-country ']) {
+      assert.equal(isGeoCountryHeader(name), true, name);
+    }
+    for (const name of ['x-geo-country-code', 'x-geo', 'x-country', 'x-real-ip']) {
+      assert.equal(isGeoCountryHeader(name), false, name);
+    }
+  });
+});
+
 describe('pluginAdmissionProblem', () => {
-  it('has rules for exactly the four plugins Edge refuses beyond their key sets', () => {
+  it('has rules for exactly the five plugins Edge refuses beyond their key sets', () => {
     assert.deepEqual(Object.keys(PLUGIN_ADMISSION_RULES).sort(), [
       'bot_detection',
+      'compression',
       'correlation_id',
       'ip_restriction',
       'request_deduplication',
@@ -166,10 +182,13 @@ describe('pluginAdmissionProblem', () => {
     assert.equal(pluginAdmissionProblem('bot_detection', { allow_list: ['GoogleBot'] }), null);
   });
 
-  it('correlation_id: refuses reserved, consumer and hop-count headers on header_name', () => {
+  it('correlation_id: refuses reserved, consumer, hop and GeoIP headers on header_name', () => {
     for (const [header, pattern] of [
       ['  AUTHORIZATION ', /gateway owns 'AUTHORIZATION'/],
       ['x-forwarded-for', /gateway owns 'x-forwarded-for'/],
+      // Edge v0.9.19 refuses the literal X-Real-IP and every X-Geo-Country spelling.
+      ['X-Real-IP', /gateway owns 'X-Real-IP'/],
+      ['X_Geo-Country', /X-Geo-Country/],
       ['X-Consumer-Trace', /x-consumer-\*/],
       ['x_authenticated-identity', /X-Authenticated-Identity/],
       ['x_ferrum-hops', /X-Ferrum-Hops/],
@@ -184,8 +203,29 @@ describe('pluginAdmissionProblem', () => {
       { header_name: '' },
       { header_name: '  ' },
       { header_name: 'x-request-id' },
+      // Only the hyphenated X-Real-IP is in Edge's closed set.
+      { header_name: 'x_real_ip' },
     ]) {
       assert.equal(pluginAdmissionProblem('correlation_id', config), null, JSON.stringify(config));
+    }
+  });
+
+  it('compression: refuses a repeated algorithm or content type, as Edge v0.9.19 does', () => {
+    const algorithm = pluginAdmissionProblem('compression', { algorithms: ['gzip', 'br', 'gzip'] });
+    assert.ok(algorithm);
+    assert.equal(algorithm.field, 'algorithms');
+    const type = pluginAdmissionProblem('compression', {
+      content_types: ['application/json', 'Application/JSON'],
+    });
+    assert.ok(type);
+    assert.equal(type.field, 'content_types');
+    assert.match(type.message, /'application\/json' is listed more than once/);
+    for (const config of [
+      {},
+      { algorithms: ['gzip', 'br'] },
+      { content_types: ['application/json', 'text/*', 'text/plain'] },
+    ]) {
+      assert.equal(pluginAdmissionProblem('compression', config), null, JSON.stringify(config));
     }
   });
 

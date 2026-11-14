@@ -858,6 +858,50 @@ describe('provider plugin palette', () => {
       }
     });
 
+    it('refuses the correlation headers Edge v0.9.19 reserves: X-Real-IP and X-Geo-Country', async () => {
+      for (const header of ['X-Real-IP', 'x-geo-country', 'X_Geo_Country']) {
+        const response = await setPlugin('correlation_id', { config: { header_name: header } });
+        assert.equal(response.statusCode, 400, `correlation_id should refuse ${header}`);
+        assert.match(errorMessage(response.body), CORRELATION_ID_CONFIGURATION_NOT);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'correlation_id'), undefined);
+      }
+    });
+
+    it('enforces compression’s Edge v0.9.19 content-type grammar and repeat rules', async () => {
+      for (const config of [
+        { algorithms: ['gzip', 'gzip'] },
+        { content_types: ['*/*'] },
+        { content_types: ['*/json'] },
+        { content_types: ['application/*+json'] },
+        { content_types: ['text/html', 'Text/HTML'] },
+      ]) {
+        const response = await setPlugin('compression', { config });
+        assert.equal(response.statusCode, 400, JSON.stringify(config));
+        assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'compression'), undefined);
+      }
+      // A whole-subtype range is honoured from Edge v0.9.19.
+      const response = await setPlugin('compression', {
+        config: { content_types: ['text/*', 'application/json'] },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.deepEqual(edgeConfig('compression').config, {
+        content_types: ['text/*', 'application/json'],
+      });
+    });
+
+    it('refuses a non-canonical ip_restriction prefix length, as Edge v0.9.19 does', async () => {
+      for (const allow of [['10.0.0.0/08'], ['2001:db8::/096']]) {
+        const response = await setPlugin('ip_restriction', { config: { allow } });
+        assert.equal(response.statusCode, 400, allow[0]);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'ip_restriction'), undefined);
+      }
+      const response = await setPlugin('ip_restriction', {
+        config: { allow: ['10.0.0.0/8', '0.0.0.0/0', '2001:db8::/32'] },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+    });
+
     it('validates the body even when the plugin is being saved switched off', async () => {
       // Edge does not construct a disabled plugin strictly, so a bad config
       // would be stored and only fail the day it is switched back on.

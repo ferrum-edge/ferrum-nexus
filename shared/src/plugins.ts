@@ -57,6 +57,7 @@ import type { IsoTimestamp } from './entities.js';
 const CONSUMER_HEADER_PREFIX = /^x[-_]consumer[-_]/i;
 const AUTHENTICATED_IDENTITY_HEADER = /^x[-_]authenticated[-_]identity$/i;
 const FERRUM_HOPS_HEADER = /^x[-_]ferrum[-_]hops$/i;
+const GEO_COUNTRY_HEADER = /^x[-_]geo[-_]country$/i;
 
 /* ── Field specs ────────────────────────────────────────────────────────── */
 
@@ -235,11 +236,23 @@ export interface ProviderPluginDescriptor {
 /** RFC 9110 field-name token — the grammar Edge accepts for a header name. */
 const HTTP_FIELD_NAME_PATTERN = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
 
-/** A media type without parameters, e.g. `application/json`. */
-const MEDIA_TYPE_PATTERN = "[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+";
+/**
+ * A `compression.content_types` rule: a media type without parameters, e.g.
+ * `application/json`, or a whole-subtype range such as `text/*`.
+ *
+ * Edge `v0.9.19`'s `CompressionConfig` grammar: neither token may contain an
+ * asterisk, except that the whole subtype may be one (`text/*`). A wildcard
+ * type or a partial subtype such as `application/*+json` can never match, and
+ * Edge refuses it.
+ */
+const MEDIA_TYPE_PATTERN = "[!#$%&'+.^_`|~0-9A-Za-z-]+/(?:[!#$%&'+.^_`|~0-9A-Za-z-]+|\\*)";
 
-/** IPv4/IPv6 address or CIDR range. Edge does the authoritative parse. */
-const IP_OR_CIDR_PATTERN = '[0-9A-Fa-f:.]+(?:/[0-9]{1,3})?';
+/**
+ * IPv4/IPv6 address or CIDR range. Edge does the authoritative parse; from
+ * `v0.9.19` it refuses a non-canonical prefix length (`/08`, `/096`), so the
+ * prefix is held to canonical decimal here too.
+ */
+const IP_OR_CIDR_PATTERN = '[0-9A-Fa-f:.]+(?:/(?:0|[1-9][0-9]{0,2}))?';
 
 /** Printable ASCII plus HTAB — Edge's `HeaderValue` builder rule. */
 const HEADER_VALUE_PATTERN = '[\\t\\u0020-\\u007E]*';
@@ -247,12 +260,14 @@ const HEADER_VALUE_PATTERN = '[\\t\\u0020-\\u007E]*';
 /**
  * Header names Edge rejects for `correlation_id.header_name`.
  *
- * An exact copy of Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.9`,
- * lowercased in Edge's own order (`src/plugins/correlation_id.rs:18-63`).
- * {@link isGatewayOwnedConsumerHeader} covers the separate `x-consumer-*`
- * prefix rule. Edge also refuses the effective `FERRUM_REAL_IP_HEADER`, which
- * is deployment-specific and so unknown to the portal; everything else is
- * caught here, turning a gateway `400` mid-write into a field-level message.
+ * An exact copy of Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.20`,
+ * lowercased in Edge's own order (`src/plugins/correlation_id.rs:20-69`);
+ * `v0.9.19` added `x-real-ip`. {@link isGatewayOwnedConsumerHeader} covers the
+ * separate `x-consumer-*` prefix rule, and {@link isGeoCountryHeader} and
+ * {@link isProxyHopsHeader} the other gateway-owned names. Edge also refuses
+ * the effective `FERRUM_REAL_IP_HEADER`, which is deployment-specific and so
+ * unknown to the portal; everything else is caught here, turning a gateway
+ * `400` mid-write into a field-level message.
  */
 export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
   'api-key',
@@ -298,6 +313,7 @@ export const CORRELATION_ID_RESERVED_HEADERS: readonly string[] = [
   'x-forwarded-proto',
   'x-goog-api-key',
   'x-grpc-web-mode',
+  'x-real-ip',
   'x-xsrf-token',
 ];
 
@@ -326,6 +342,16 @@ export function isGatewayOwnedConsumerHeader(name: string): boolean {
  */
 export function isProxyHopsHeader(name: string): boolean {
   return FERRUM_HOPS_HEADER.test(name.trim());
+}
+
+/**
+ * Whether `name` is the gateway's GeoIP assertion `X-Geo-Country`. Edge
+ * `v0.9.19` refuses it as a `correlation_id` `header_name`: outbound refresh
+ * strips and regenerates it, so an id written there never reaches the backend.
+ * Case is ignored, and `_` and `-` are equivalent.
+ */
+export function isGeoCountryHeader(name: string): boolean {
+  return GEO_COUNTRY_HEADER.test(name.trim());
 }
 
 /* ── Admission rules beyond the key set ─────────────────────────────────── */
@@ -423,6 +449,33 @@ export const PLUGIN_ADMISSION_RULES: Readonly<Record<string, PluginAdmissionRule
       return {
         field: 'header_name',
         message: `The gateway owns X-Ferrum-Hops, its loop-guard hop count, and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`,
+      };
+    }
+    if (isGeoCountryHeader(header)) {
+      return {
+        field: 'header_name',
+        message: `The gateway owns X-Geo-Country, its GeoIP assertion, and rejects '${header}' as a correlation header; choose a name of your own, such as x-request-id`,
+      };
+    }
+    return null;
+  },
+
+  /**
+   * `CompressionConfig` (Edge `v0.9.19`) lists each algorithm once and each
+   * `content_types` rule once, compared case-insensitively. A repeat is
+   * refused rather than ignored.
+   */
+  compression: (config) => {
+    const algorithms = listOf(config.algorithms).map(String);
+    if (new Set(algorithms).size !== algorithms.length) {
+      return { field: 'algorithms', message: 'List each compression algorithm only once' };
+    }
+    const types = listOf(config.content_types).map((type) => String(type).toLowerCase());
+    const repeated = types.find((type, index) => types.indexOf(type) !== index);
+    if (repeated !== undefined) {
+      return {
+        field: 'content_types',
+        message: `'${repeated}' is listed more than once; the gateway refuses a repeated content type`,
       };
     }
     return null;
@@ -670,7 +723,7 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         item_pattern: '\\S(?:.*\\S)?',
         item_max_length: 200,
         // Edge's own default list (`default_blocked_patterns` in
-        // `src/plugins/bot_detection.rs`, unchanged from v0.9.15 to v0.9.17),
+        // `src/plugins/bot_detection.rs`, unchanged from v0.9.15 to v0.9.20),
         // so a config saved without the key opens showing what Edge enforces,
         // and an untouched save does not narrow it.
         default: [
@@ -789,7 +842,8 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         label: 'Content types to compress',
         help:
           'One media type per line, matched exactly (parameters like `; charset=utf-8` are ' +
-          'ignored). Leave empty for the gateway’s list of common text and application types.',
+          'ignored), or a whole-subtype range such as `text/*`. Leave empty for the gateway’s ' +
+          'list of common text and application types.',
         max_entries: 32,
         item_pattern: MEDIA_TYPE_PATTERN,
         item_max_length: 128,

@@ -31,6 +31,9 @@ const DOES_NOT_ACCEPT = /does not accept/;
 const GATEWAY_OWNS_AUTHORIZATION = /gateway owns 'AUTHORIZATION'/;
 const CONSUMER_HEADER_WILDCARD = /x-consumer-\*/;
 const X_FERRUM_HOPS = /X-Ferrum-Hops/;
+const X_GEO_COUNTRY = /X-Geo-Country/;
+const GATEWAY_OWNS_REAL_IP = /gateway owns 'X-Real-IP'/;
+const LISTED_MORE_THAN_ONCE = /listed more than once/;
 // The server's own wording for the same refusals (`server/src/plugins/schema.ts`),
 // so the form and an API error say the same thing.
 const RESTRICT_NOBODY =
@@ -151,6 +154,19 @@ describe('validateDraft', () => {
     expect(errors.content_types).toMatch(NOT_FORM_GATEWAY_ACCEPTS);
   });
 
+  it('reports compression content types Edge v0.9.19 refuses, and accepts a subtype range', () => {
+    const spec = descriptor('compression');
+    const draft = { algorithms: ['gzip'], min_content_length: '256' };
+    for (const content_types of ['*/*', '*/json', 'application/*+json']) {
+      const errors = validateDraft(spec, { ...draft, content_types });
+      expect(errors.content_types).toMatch(NOT_FORM_GATEWAY_ACCEPTS);
+    }
+    const repeated = validateDraft(spec, { ...draft, content_types: 'text/html\nTEXT/HTML' });
+    expect(repeated.content_types).toMatch(LISTED_MORE_THAN_ONCE);
+    const range = validateDraft(spec, { ...draft, content_types: 'text/*\napplication/json' });
+    expect(range).toEqual({});
+  });
+
   it('reports a string that fails the descriptor pattern', () => {
     const errors = validateDraft(descriptor('correlation_id'), {
       header_name: 'x request id',
@@ -201,6 +217,14 @@ describe('validateDraft', () => {
     expect(
       validateDraft(dedup, { ...draftFor(dedup, null), header_name: 'X-Ferrum-Hops' }).header_name,
     ).toBeUndefined();
+  });
+
+  it('reports the correlation headers Edge v0.9.19 reserves', () => {
+    const spec = descriptor('correlation_id');
+    const realIp = validateDraft(spec, { header_name: 'X-Real-IP', echo_downstream: true });
+    expect(realIp.header_name).toMatch(GATEWAY_OWNS_REAL_IP);
+    const geo = validateDraft(spec, { header_name: 'x_geo-country', echo_downstream: true });
+    expect(geo.header_name).toMatch(X_GEO_COUNTRY);
   });
 
   it('reports ip_restriction with both lists empty as a whole-plugin problem', () => {
