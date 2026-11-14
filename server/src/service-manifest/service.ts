@@ -12,7 +12,7 @@ const RESERVED_PATH_CHARACTER = /[{}*~ ?#;%\\]/;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 const TRAILING_SLASHES = /\/+$/;
 
-const CONTRACT_COMMIT = 'f7ba1a9b9885900d1e110f76d38e37a02eda13c8';
+const CONTRACT_COMMIT = '39da322083044c2e92617209e62983c92387f0ad';
 
 interface Manifest {
   service: { name: string };

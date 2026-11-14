@@ -2,8 +2,8 @@ import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual } from 'node:util';
 
 /**
- * Owner contract: Edge v0.9.17 (669c574c1d1e88e84dccb26a8159939e6694644d), schema v2
- * (`backend-egress-policy` v2 in contracts-edge-0.9.17). Schema 2 keeps v1's shape but
+ * Owner contract: Edge v0.9.20 (e4a606a00352674daaef08636e3e359e6c48ba18), schema v2
+ * (`backend-egress-policy` v2 in contracts-edge-0.9.20). Schema 2 keeps v1's shape but
  * narrows `public_only_guaranteed`: it is true only for `local-data-plane`. Edge v0.9.14
  * adds the optional control-plane `data_plane_attestation` object within schema 2
  * (`openapi.yaml` `DataPlaneEgressAttestation`, `src/admin/backend_egress_policy.rs`);
