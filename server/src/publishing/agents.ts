@@ -9,7 +9,6 @@ import {
   MAX_OPENAPI_REF_HOPS,
   MAX_SPEC_BYTES,
   MAX_SPEC_EXPANDED_BYTES,
-  MAX_SPEC_OPERATIONS,
   OPENAPI_OPERATION_METHODS,
   mcpAllGroupForApi,
   mcpToolGroupForApi,
@@ -923,17 +922,15 @@ export function stampedAgentDocumentBytes(
 
 /**
  * Every operation of `document` an agent selection may name, after Path Item
- * references resolve. `maxOperations` refuses a document that resolves to
- * more: {@link MAX_SPEC_OPERATIONS} for a selection being admitted, `null`
- * for one already on the gateway. An unresolvable document is refused either
- * way.
+ * references resolve. An unresolvable document is refused.
+ *
+ * Not capped here: every document a selection is checked against passed
+ * `parseOpenApiSpec`, whose `MAX_SPEC_OPERATIONS` limit already counts the
+ * operations Path Item references resolve to, as this does.
  */
-export function resolvedAgentOperations(
-  document: Record<string, unknown>,
-  maxOperations: number | null,
-): AgentOperation[] {
+function resolvedAgentOperations(document: Record<string, unknown>): AgentOperation[] {
   try {
-    return agentOperations(document, maxOperations === null ? {} : { maxOperations });
+    return agentOperations(document);
   } catch (error) {
     throw specInvalid(error instanceof Error ? error.message : 'Cannot resolve agent operations', {
       field: 'agents',
@@ -951,10 +948,8 @@ export function resolvedAgentOperations(
  * all, a PATCH: it calls {@link stampedAgentDocumentBytes} itself, only once
  * it knows the gateway document will be rebuilt.
  *
- * `maxOperations` bounds the operations the document resolves to (see
- * {@link resolvedAgentOperations}). It is `null` for a PATCH, which re-checks
- * a selection already admitted: it applies the cap itself, only once it knows
- * the selection or the enforcement level changes.
+ * `document` must be one `parseOpenApiSpec` accepted, which bounds the
+ * operations its Path Item references resolve to (`MAX_SPEC_OPERATIONS`).
  */
 export function validateAgents(
   agents: ApiAgents | null | undefined,
@@ -963,7 +958,6 @@ export function validateAgents(
   requestable: boolean,
   methods: HttpMethod[] | null,
   listenPaths: readonly string[] | null,
-  maxOperations: number | null = MAX_SPEC_OPERATIONS,
 ): void {
   if (!agents) return;
   const invalid = (message: string): never => {
@@ -977,7 +971,7 @@ export function validateAgents(
   if (agents.operations.length === 0 || agents.operations.length > MAX_AGENT_TOOLS) {
     invalid(`Select between 1 and ${MAX_AGENT_TOOLS} agent operations`);
   }
-  const operations = resolvedAgentOperations(document, maxOperations);
+  const operations = resolvedAgentOperations(document);
   const byKey = new Map(operations.map((item) => [`${item.method} ${item.path}`, item]));
   const names = new Set<string>();
   const selected = new Set<string>();
