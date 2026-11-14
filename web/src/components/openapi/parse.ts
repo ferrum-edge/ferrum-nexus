@@ -18,12 +18,15 @@ import {
   MAX_OPENAPI_REF_LENGTH,
   MAX_SPEC_BYTES,
   MAX_SPEC_EXPANDED_BYTES,
+  agentPathItemMember,
   createOpenApiParameterKeyer,
   createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
   openApiRefSiblingsApply,
+  resolveAgentPathItem,
   resolveOpenApiPointer,
+  type AgentPathItem,
   type KeyedOpenApiParameter,
   type OpenApiRefFailure,
   type OpenApiRefOverrides,
@@ -144,6 +147,13 @@ export interface ParsedSpec {
   servers: SpecServer[];
   groups: SpecTagGroup[];
   operationCount: number;
+  /**
+   * Paths whose Path Item `$ref` chain cannot be followed (external, dangling,
+   * cyclic, past 32 hops, or outside `#/paths/`, `#/components/pathItems/` and
+   * `#/webhooks/`), in document order. The server refuses such a document;
+   * the viewer reads each one as written.
+   */
+  unresolvedPaths: string[];
   /** Names of the schemas under `components.schemas`, in declaration order. */
   schemaNames: string[];
 }
@@ -209,65 +219,150 @@ function readParameters(
   }));
 }
 
+/** Everything an operation contributes that does not depend on the path reaching it. */
+interface OperationParts {
+  summary: string | null;
+  description: string | null;
+  operationId: string | null;
+  deprecated: boolean;
+  tags: string[];
+  ownParameters: EntryParameter[];
+  requestBody: SpecEntry | null;
+  responses: Array<[string, SpecEntry]>;
+}
+
+/** The key a Path Item with no `parameters` list merges its operations under. */
+const NO_SHARED_PARAMETERS: object = {};
+
+/** Each path's Path Item, and the paths whose reference chain cannot be followed. */
+interface PathItems {
+  items: Array<[string, AgentPathItem]>;
+  unresolved: string[];
+}
+
+/**
+ * Every object-valued entry of `paths`, in document order, read the way the
+ * server's upload limits read it (`resolvePathItems` in
+ * `server/src/publishing/oas.ts`): each path template (a key starting with
+ * `/`) through its chain of Path Item references, as Edge follows it, and any
+ * other key, a specification extension, as written. One memo serves the
+ * document, so a Path Item many paths reference is followed once. A chain that
+ * cannot be followed is read as written and its path reported.
+ */
+function readPathItems(doc: SpecNode, paths: SpecNode): PathItems {
+  const memo = new WeakMap<object, AgentPathItem>();
+  const items: Array<[string, AgentPathItem]> = [];
+  const unresolved: string[] = [];
+  for (const [path, value] of Object.entries(paths)) {
+    const pathItem = asRecord(value);
+    if (!pathItem) continue;
+    let item: AgentPathItem = { chain: [], target: pathItem };
+    if (path.startsWith('/')) {
+      try {
+        item = resolveAgentPathItem(doc, path, pathItem, { memo });
+      } catch {
+        unresolved.push(path);
+      }
+    }
+    items.push([path, item]);
+  }
+  return { items, unresolved };
+}
+
 /**
  * Every operation of the document. One resolver serves the whole document, so
  * each distinct `$ref` is followed once however many places use it, one keyer
  * reads each parameter's identity once, and a path item's parameters are
  * resolved once for all the operations beneath it.
+ *
+ * A path that is a Path Item `$ref` lists the operations of the Path Item it
+ * resolves to. Everything an operation renders that does not depend on its
+ * path is read once per operation object, and its merged parameters once per
+ * pair of Path Item `parameters` list and operation, so a Path Item that many
+ * paths reference costs its size once and each path only its own entries.
  */
-function readOperations(doc: SpecNode, specVersion: string | null): SpecOperation[] {
-  const paths = asRecord(doc.paths);
-  if (!paths) return [];
+function readOperations(
+  doc: SpecNode,
+  specVersion: string | null,
+  items: ReadonlyArray<[string, AgentPathItem]>,
+): SpecOperation[] {
   const operations: SpecOperation[] = [];
   const resolver = createOpenApiRefResolver(doc, {
     siblingsApply: openApiRefSiblingsApply(specVersion),
   });
   const resolve = (node: SpecNode): SpecEntry => toEntry(resolver.resolve(node));
   const keyer = createOpenApiParameterKeyer();
+  const sharedLists = new WeakMap<object, EntryParameter[]>();
+  const parts = new WeakMap<SpecNode, OperationParts>();
+  const merged = new WeakMap<object, WeakMap<SpecNode, SpecEntry[]>>();
 
-  for (const [path, pathValue] of Object.entries(paths)) {
-    const pathItem = asRecord(pathValue);
-    if (!pathItem) continue;
-    const sharedParameters = readParameters(resolver, keyer, pathItem.parameters, true);
+  const operationParts = (operation: SpecNode): OperationParts => {
+    const known = parts.get(operation);
+    if (known) return known;
+    const responses: Array<[string, SpecEntry]> = [];
+    const responsesNode = asRecord(operation.responses);
+    if (responsesNode) {
+      for (const [status, value] of Object.entries(responsesNode)) {
+        const record = asRecord(value);
+        if (record) responses.push([status, resolve(record)]);
+      }
+    }
+    const requestBody = asRecord(operation.requestBody);
+    const tags = new Set<string>();
+    for (const tag of asArray(operation.tags) ?? []) {
+      if (typeof tag === 'string') tags.add(tag);
+    }
+    const read: OperationParts = {
+      summary: asString(operation.summary),
+      description: asString(operation.description),
+      operationId: asString(operation.operationId),
+      deprecated: operation.deprecated === true,
+      tags: [...tags],
+      ownParameters: readParameters(resolver, keyer, operation.parameters, false),
+      requestBody: requestBody ? resolve(requestBody) : null,
+      responses,
+    };
+    parts.set(operation, read);
+    return read;
+  };
+
+  for (const [path, item] of items) {
+    const sharedValue = agentPathItemMember(item, 'parameters');
+    const sharedKey = asArray(sharedValue) ?? NO_SHARED_PARAMETERS;
+    let sharedParameters = sharedLists.get(sharedKey);
+    if (!sharedParameters) {
+      sharedParameters = readParameters(resolver, keyer, sharedValue, true);
+      sharedLists.set(sharedKey, sharedParameters);
+    }
+    let mergedByOperation = merged.get(sharedKey);
+    if (!mergedByOperation) {
+      mergedByOperation = new WeakMap();
+      merged.set(sharedKey, mergedByOperation);
+    }
 
     for (const method of HTTP_METHODS) {
-      const operation = asRecord(pathItem[method]);
+      const operation = asRecord(agentPathItemMember(item, method));
       if (!operation) continue;
-
-      const ownParameters = readParameters(resolver, keyer, operation.parameters, false);
-      const merged = mergeOpenApiParameters(sharedParameters, ownParameters);
-      const parameters = merged.map((parameter) => parameter.entry);
-
-      const responses: Array<[string, SpecEntry]> = [];
-      const responsesNode = asRecord(operation.responses);
-      if (responsesNode) {
-        for (const [status, value] of Object.entries(responsesNode)) {
-          const record = asRecord(value);
-          if (record) responses.push([status, resolve(record)]);
-        }
+      const read = operationParts(operation);
+      let parameters = mergedByOperation.get(operation);
+      if (!parameters) {
+        const entries = mergeOpenApiParameters(sharedParameters, read.ownParameters);
+        parameters = entries.map((parameter) => parameter.entry);
+        mergedByOperation.set(operation, parameters);
       }
-      const requestBody = asRecord(operation.requestBody);
-
-      const tags = [
-        ...new Set(
-          (asArray(operation.tags) ?? [])
-            .map(asString)
-            .filter((tag): tag is string => tag !== null),
-        ),
-      ];
 
       operations.push({
         id: `${method}-${path}`,
         method,
         path,
-        summary: asString(operation.summary),
-        description: asString(operation.description),
-        operationId: asString(operation.operationId),
-        deprecated: operation.deprecated === true,
-        tags,
+        summary: read.summary,
+        description: read.description,
+        operationId: read.operationId,
+        deprecated: read.deprecated,
+        tags: read.tags,
         parameters,
-        requestBody: requestBody ? resolve(requestBody) : null,
-        responses,
+        requestBody: read.requestBody,
+        responses: read.responses,
       });
     }
   }
@@ -442,7 +537,8 @@ function parseSpecTextUncached(text: string, limits: SpecParseLimits): SpecParse
     };
   }
 
-  const operations = readOperations(doc, specVersion);
+  const pathItems = paths ? readPathItems(doc, paths) : { items: [], unresolved: [] };
+  const operations = readOperations(doc, specVersion, pathItems.items);
   const components = asRecord(doc.components);
   const schemas = components ? asRecord(components.schemas) : null;
 
@@ -457,6 +553,7 @@ function parseSpecTextUncached(text: string, limits: SpecParseLimits): SpecParse
       servers: readServers(doc),
       groups: groupByTag(operations, readTagDescriptions(doc)),
       operationCount: operations.length,
+      unresolvedPaths: pathItems.unresolved,
       schemaNames: schemas ? Object.keys(schemas) : [],
     },
   };

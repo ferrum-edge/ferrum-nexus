@@ -2119,9 +2119,10 @@ header-name tokens of 1–128 chars) and optional `enforce_websocket_origins`
 root `servers` set to `/` and every nested `servers` removed (path items,
 operations, and path items reached through `$ref` in `components.pathItems`,
 `webhooks` and `components.callbacks`); `servers` inside an operation's
-`callbacks` is kept. A `routes` document whose `paths` reference a Path Item
-outside `#/paths/`, `#/components/pathItems/` or `#/webhooks/` is refused with
-`400 SPEC_INVALID` (`details.reason: "unresolvable_path_item_ref"`). The stored
+`callbacks` is kept. A document whose `paths` reference a Path Item outside
+`#/paths/`, `#/components/pathItems/` or `#/webhooks/` is refused with
+`400 SPEC_INVALID` (`details.reason: "unresolvable_path_item_ref"`) at every
+enforcement level (see the document limits under `POST /api/apis`). The stored
 revision is never modified. See
 [spec-owned proxies](architecture.md#spec-owned-proxies).
 
@@ -2163,11 +2164,19 @@ the Edge proxy and plugins, then stores the API.
 
 **Document limits** (also applied to spec revisions), each `400 SPEC_INVALID`:
 
-- 2 MiB; at most 2 000 paths and 3 000 operations. The upload counts each path's own
-  method keys, so a path that is a `$ref` to a Path Item counts none. An `agents`
-  selection is admitted only if the document has at most 3 000 operations after Path
-  Item references resolve, each path counting the operations its Path Item resolves to
+- 2 MiB; at most 2 000 paths and 3 000 operations. Operations are counted after Path
+  Item references resolve: each path counts the operations of the Path Item it resolves
+  to, so a Path Item that 1 000 paths reference counts 1 000 times. The same count
+  bounds an `agents` selection
   ([security.md](security.md#the-provider--operator-split-on-gateway-plugins)).
+- Every path (a `paths` key starting with `/`) that is a Path Item `$ref` must resolve
+  the way Edge resolves it: a local chain of at most 32 references into `#/paths/`,
+  `#/components/pathItems/` or `#/webhooks/`, with no cycle. Anything else (an external
+  document, a dangling or cyclic pointer, a longer chain, a non-string `$ref`) is
+  refused whatever the enforcement level
+  (`details.reason: "unresolvable_path_item_ref"`, with `details.path`).
+  Specification extensions (`x-…` keys) among the paths are not Path Items and are
+  not followed.
 - At most 200 levels of object/array nesting
   (`details.reason: "nesting_too_deep"`).
 - YAML mapping keys must be scalar (`details.reason: "non_scalar_key"`); an alias
@@ -2175,9 +2184,12 @@ the Edge proxy and plugins, then stores the API.
 - YAML values must be plain objects, arrays or scalars
   (`details.reason: "unsupported_node"`).
 - At most 100 000 render units (`details.reason: "too_much_to_render"`, with the
-  counts reached), counted over what the viewer renders for each declared
-  operation: parameter rows (a path-item parameter under every operation beneath
-  it), response entries, media types, and the schemas they hold. A schema costs
+  counts reached), counted over what the viewer renders for each operation, read
+  through the path's Path Item references: parameter rows (a path-item parameter
+  under every operation beneath it), response entries, media types, the schemas
+  they hold, and one unit per entry of the operation's `tags` (the viewer lists it
+  under each). A Path Item that several paths reference costs what an inline copy
+  at each would. A schema costs
   one unit per node, primitive or not, one per rendered property, `items` and
   `oneOf`/`anyOf`/`allOf` entry, and one per enum chip, up to 12. A local
   `$ref` to an object costs two units wherever it appears, and the rest of its

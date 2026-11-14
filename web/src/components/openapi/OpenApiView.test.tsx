@@ -254,6 +254,40 @@ describe('OpenApiView', () => {
     });
   });
 
+  it('lists a referenced Path Item under every path that references it', () => {
+    const text = JSON.stringify({
+      openapi: '3.1.0',
+      info: { title: 'Shared API', version: '1.0.0' },
+      paths: {
+        '/orders': { $ref: '#/components/pathItems/Orders' },
+        '/legacy/orders': { $ref: '#/paths/~1orders' },
+      },
+      components: {
+        pathItems: {
+          Orders: {
+            parameters: [{ name: 'tenant', in: 'header', schema: { type: ['string', 'null'] } }],
+            get: { summary: 'List orders', responses: { '200': { description: 'ok' } } },
+          },
+        },
+      },
+    });
+
+    render(<OpenApiView text={text} />);
+
+    expect(screen.getByText('2 operations')).toBeInTheDocument();
+    expect(screen.getByText('/orders')).toBeInTheDocument();
+    expect(screen.getByText('/legacy/orders')).toBeInTheDocument();
+    expect(screen.getAllByText('List orders')).toHaveLength(2);
+
+    for (const button of screen.getAllByRole('button', { expanded: false })) {
+      fireEvent.click(button);
+    }
+    // The Path Item's own parameter, under both paths, with its OpenAPI 3.1
+    // type array read as one type that may be null.
+    expect(screen.getAllByText('tenant')).toHaveLength(2);
+    expect(screen.getAllByText('string | null')).toHaveLength(2);
+  });
+
   it('leaves a short summary whole and untitled', () => {
     render(<OpenApiView text={YAML_SPEC} />);
 

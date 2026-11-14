@@ -188,25 +188,17 @@ once and remembered, so the check reads the document about once however much the
 would copy, plus each path's reference chain and operation slots. It stops at the first
 charge past the budget with `400 SPEC_INVALID` (`reason: "agent_document_too_large"`).
 
-An agent selection is admitted only if the document has at most 3,000
-(`MAX_SPEC_OPERATIONS`) operations after Path Item references resolve. Each path counts
-every operation its resolved Path Item holds, so a Path Item that 2,000 paths reference
-counts 2,000 times. The upload limit uses the same number but counts differently: only
-the method keys each path declares itself, so a path that is a `$ref` counts none. A
-document can therefore pass the upload and still be refused for agents with
-`400 SPEC_INVALID`. The resolved count is checked:
+Every uploaded document has at most 3,000 (`MAX_SPEC_OPERATIONS`) operations after Path
+Item references resolve: the upload limit counts every operation each path's resolved
+Path Item holds, so a Path Item that 1,000 paths reference counts 1,000 times (see the
+document limits in [api.md](api.md#post-apiapis)). An agent selection is checked only
+against a document that passed it, so there is no separate operation cap for agents;
+the provider's operation picker applies the same count and will not enable agents past
+it.
 
-- on publish, spec revision, rollback and restore of an agent API;
-- on a PATCH that edits the agents or converts the enforcement level;
-- by the provider's operation picker, which will not enable agents past it.
-
-Checking a live deployment's routes is not capped (restore, enforcement conversion and
-their recovery all do this). That check reads every operation, however many the document
-resolves to, so a routes API without agents is never refused for it.
-
-Compensation rebuilds the document the gateway already holds, so neither bound refuses
-it. A PATCH that leaves the agents and the enforcement level alone (visibility, status,
-name, description and the other catalog or proxy settings) is not bounded either. So an
-agent API published before the bounds, whose document is larger or resolves to more
-operations, can still be edited and retired. Turning its agents off submits the document
-without copies, and is the way to revise it again.
+Compensation rebuilds the document the gateway already holds, so the size bound does not
+refuse it. A PATCH that leaves the agents and the enforcement level alone (visibility,
+status, name, description and the other catalog or proxy settings) is not bounded
+either. So an agent API published before the bound, whose document is larger, can still
+be edited and retired. Turning its agents off submits the document without copies, and
+is the way to revise it again.

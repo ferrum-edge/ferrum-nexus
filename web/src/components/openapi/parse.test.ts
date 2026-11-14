@@ -46,6 +46,72 @@ function wideJsonSpec(properties: number): string {
 }
 
 describe('parseSpecText', () => {
+  it('follows Path Item references, reading a shared operation once', () => {
+    const ok = { '200': { description: 'ok' } };
+    const result = parseSpecText(
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Shared', version: '1.0.0' },
+        paths: {
+          '/p0': { $ref: '#/components/pathItems/Shared' },
+          '/p1': { $ref: '#/components/pathItems/Shared' },
+          // Through another path, with a sibling operation of its own.
+          '/alias': { $ref: '#/paths/~1p0', delete: { responses: ok } },
+        },
+        components: {
+          pathItems: {
+            Shared: {
+              parameters: [{ name: 'id', in: 'query' }],
+              get: { tags: ['A', 'A'], parameters: [{ name: 'q', in: 'query' }], responses: ok },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.operationCount).toBe(4);
+    expect(result.spec.unresolvedPaths).toEqual([]);
+    const operations = result.spec.groups.flatMap((group) => group.operations);
+    expect(operations.map((operation) => `${operation.method} ${operation.path}`)).toEqual([
+      'get /p0',
+      'get /p1',
+      'get /alias',
+      'delete /alias',
+    ]);
+    const [first, second, third] = operations;
+    expect(first?.tags).toEqual(['A']);
+    const names = first?.parameters.map((entry) => (entry.resolved ? entry.node.name : null));
+    expect(names).toEqual(['id', 'q']);
+    // Read once, and shared by every path that reaches the operation.
+    expect(second?.responses).toBe(first?.responses);
+    expect(second?.parameters).toBe(first?.parameters);
+    expect(third?.parameters).toBe(first?.parameters);
+  });
+
+  it('reports a Path Item reference it cannot follow and reads that path as written', () => {
+    const result = parseSpecText(
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Broken', version: '1.0.0' },
+        paths: {
+          '/loop': { $ref: '#/components/pathItems/Loop', get: { responses: {} } },
+          '/missing': { $ref: '#/components/pathItems/Missing' },
+          // A specification extension among the paths: its `$ref` is data.
+          'x-notes': { $ref: 'notes.yaml#/anything' },
+        },
+        components: { pathItems: { Loop: { $ref: '#/components/pathItems/Loop' } } },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.unresolvedPaths).toEqual(['/loop', '/missing']);
+    // The unfollowable reference's own sibling operation, as written.
+    expect(result.spec.operationCount).toBe(1);
+  });
+
   it('parses a JSON document with JSON.parse, never through the YAML parser', () => {
     vi.mocked(parseYaml).mockClear();
 

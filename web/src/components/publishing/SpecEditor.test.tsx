@@ -6,6 +6,8 @@ import { RAW_SPEC } from '../../../test/fixtures';
 import { SpecEditor, specProblem } from './SpecEditor';
 
 const OPENAPI_SPECIFICATION = /OpenAPI specification/;
+const LOOP_CANNOT_BE_FOLLOWED = /The path '\/loop' references a Path Item that cannot be/;
+const MORE_THAN_OPERATIONS = /declares more than .* operations/;
 
 function Editor({ initialValue = '' }: { initialValue?: string }): ReactElement {
   const [value, setValue] = useState(initialValue);
@@ -22,6 +24,24 @@ function operationSpec(count: number): string {
     };
   }
   return JSON.stringify({ openapi: '3.0.3', info: { title: 'Large API', version: '1' }, paths });
+}
+
+/**
+ * A document of `count` operations once Path Item references resolve: one
+ * path declares two, and every other path references a shared Path Item of two.
+ */
+function sharedPathItemSpec(count: number): string {
+  const ok = { responses: { '200': { description: 'OK' } } };
+  const paths: Record<string, unknown> = { '/own': { get: ok, post: ok } };
+  for (let index = 0; index < count / 2 - 1; index += 1) {
+    paths[`/shared-${index}`] = { $ref: '#/components/pathItems/Shared' };
+  }
+  return JSON.stringify({
+    openapi: '3.1.0',
+    info: { title: 'Shared API', version: '1' },
+    paths,
+    components: { pathItems: { Shared: { get: ok, post: ok } } },
+  });
 }
 
 /** A selected file whose browser `text()` read the test resolves by hand. */
@@ -258,5 +278,28 @@ describe('OpenAPI specification editor', () => {
     rerender(<SpecEditor value={accepted} onChange={() => undefined} />);
     expect(screen.getByText('Valid')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('counts the operations Path Item references resolve to, as the server does', () => {
+    const accepted = sharedPathItemSpec(MAX_SPEC_OPERATIONS);
+    const rejected = sharedPathItemSpec(MAX_SPEC_OPERATIONS + 2);
+    expect(specProblem(accepted)).toBeNull();
+    expect(specProblem(rejected)).toMatch(MORE_THAN_OPERATIONS);
+    render(<SpecEditor value={rejected} onChange={() => undefined} />);
+    expect(screen.getByText('Too many operations')).toBeInTheDocument();
+  });
+
+  it('refuses a path whose Path Item reference cannot be followed', () => {
+    const spec = JSON.stringify({
+      openapi: '3.1.0',
+      info: { title: 'Loop API', version: '1' },
+      paths: { '/loop': { $ref: '#/components/pathItems/Loop' } },
+      components: { pathItems: { Loop: { $ref: '#/components/pathItems/Loop' } } },
+    });
+    expect(specProblem(spec)).toMatch(LOOP_CANNOT_BE_FOLLOWED);
+    render(<SpecEditor value={spec} onChange={() => undefined} />);
+    expect(screen.getByText('Unresolvable path reference')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(LOOP_CANNOT_BE_FOLLOWED);
+    expect(screen.queryByText('Valid')).not.toBeInTheDocument();
   });
 });

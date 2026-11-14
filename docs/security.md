@@ -1049,8 +1049,10 @@ Documents are bounded on every build that admits or rebuilds agents (publish, sp
 revision, rollback, restore, and a PATCH that edits the agents or converts the
 enforcement level), before anything is built or written to the gateway. A conservative
 upper estimate of the document Nexus submits, with each path's Path Item copied in, must
-stay within 8 MiB (`MAX_AGENT_DOCUMENT_BYTES`), and the document may resolve to at most
-3,000 operations (`MAX_SPEC_OPERATIONS`); either refusal is `400 SPEC_INVALID`.
+stay within 8 MiB (`MAX_AGENT_DOCUMENT_BYTES`), or the request is refused with
+`400 SPEC_INVALID`. The document itself resolves to at most 3,000 operations
+(`MAX_SPEC_OPERATIONS`), which the upload limit counts after Path Item references
+resolve.
 Compensation and a PATCH that leaves the agents and the enforcement level alone are
 exempt, so an older agent API can still be edited and retired. See
 [Agent document bounds](agent-marketplace.md#agent-document-bounds).
@@ -1621,10 +1623,15 @@ A provider's OpenAPI document is rendered in the browser of every account that
 opens the catalog entry. Its rendering cost is bounded in three places:
 
 - **At publish.** Nexus counts what the viewer renders for each operation
-  (parameter rows, responses, media types, and every schema value they hold,
+  (parameter rows, responses, media types, every schema value they hold,
   including primitive and boolean schemas, property, item and composition
-  entries and enum chips) and refuses more than `MAX_SPEC_RENDER_UNITS`
-  (100,000) with `400 SPEC_INVALID`, `details.reason = "too_much_to_render"`.
+  entries and enum chips, and one group entry per tag) and refuses more than
+  `MAX_SPEC_RENDER_UNITS` (100,000) with `400 SPEC_INVALID`,
+  `details.reason = "too_much_to_render"`. Each path's operations are read
+  through its Path Item references, as the viewer and Edge read them, so a Path
+  Item shared by many paths costs its operations at every one of them, and the
+  operation limit (`MAX_SPEC_OPERATIONS`, 3,000) counts them the same way. A
+  path whose Path Item reference cannot be followed is refused.
   The count is what rendering each part of the document once costs: a schema
   `$ref` costs its row and its target's wherever it appears, and each
   referenced schema, parameter, request body or response is charged in full
