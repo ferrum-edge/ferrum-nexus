@@ -82,9 +82,9 @@ const CONSUMER_HEADER_PREFIX = /^x[-_]consumer[-_]/i;
 const AUTHENTICATED_IDENTITY_HEADER = /^x[-_]authenticated[-_]identity$/i;
 const FERRUM_HOPS_HEADER = /^x[-_]ferrum[-_]hops$/i;
 const GEO_COUNTRY_HEADER = /^x[-_]geo[-_]country$/i;
-/** Edge v0.9.19 `CompressionConfig.content_types` item grammar (`type/subtype` or `type/*`). */
 /** An `ip_restriction` prefix length in canonical decimal: no sign, no leading zero. */
 const CANONICAL_PREFIX_LENGTH = /^(?:0|[1-9][0-9]{0,2})$/;
+/** Edge v0.9.19 `CompressionConfig.content_types` item grammar (`type/subtype` or `type/*`). */
 const COMPRESSION_CONTENT_TYPE = /^[!#$%&'+.^_`|~0-9A-Za-z-]+\/(?:[!#$%&'+.^_`|~0-9A-Za-z-]+|\*)$/;
 /** Edge v0.9.19 `bypass.header_present` value: 16-4096 visible ASCII characters. */
 const VALIDATOR_BYPASS_SECRET = /^[!-~]{16,4096}$/;
