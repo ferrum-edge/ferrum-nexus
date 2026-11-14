@@ -206,6 +206,26 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   paths use it. The publish form's operation count uses the same resolved count as the
   server.
 
+- **A shared Path Item's `parameters` list is read once at upload** (#692 follow-up).
+  The render count read it again at every path that referenced the Path Item, and
+  charged nothing for it when the Path Item declared no operation, so a small document
+  of 2,000 paths sharing one long list could hold the server's event loop for seconds
+  on every parse. Each list is now read once per document; its parameter names and
+  locations are still checked.
+
+- **The publish form refuses a document whose tag groups pass the render ceiling**
+  (#692 follow-up). An operation shared by many paths brings its tags to each of them,
+  and the editor built every group entry before the server could refuse the document,
+  which could freeze the tab. Past 100,000 tag entries, which the server refuses too,
+  the editor now reports the problem without building any group.
+
+- **An agent API whose stored revision now breaks an upload limit can still be edited**
+  (#692 follow-up). A PATCH that keeps its agent selection (a rename, a visibility or
+  status change) read such a revision as empty and refused with "Unsupported or missing
+  agent operation". It now checks the selection against the operations the stored
+  revision declares. A PATCH that submits a selection still needs a revision that
+  passes the upload limits.
+
 - Re-enabling an account no longer restores an approval group for a grant whose
   API row is missing or is recorded under another namespace than the portal's
   (an API left behind by a `FERRUM_NAMESPACE` change). Consumer repair already
