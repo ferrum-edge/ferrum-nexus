@@ -1521,11 +1521,13 @@ interface ContentCost {
  * the viewer follows it — one memoised resolver for the document — and each
  * distinct object so named has its schemas and media types charged once, at its
  * first reference; every later reference to it costs only its own parameter or
- * response entry. Path-item parameters cost a row under every operation and
- * their schemas once per path. A schema `$ref` costs two units at every
- * occurrence and its target's own cost once per document. Those repetitions are
- * what the viewer's own page budget absorbs; charging them in full here would
- * refuse documents that merely reuse their components.
+ * response entry. Path-item parameters cost a row under every operation; an
+ * inline one's schemas cost once per path that reaches it, not once per
+ * operation, and a referenced one's once per document, as above. A schema
+ * `$ref` costs two units at every occurrence and its target's own cost once
+ * per document. Those repetitions are what the viewer's own page budget
+ * absorbs; charging them in full here would refuse documents that merely
+ * reuse their components.
  *
  * Each `content` map's cost is computed once and cached, as each schema's is,
  * so neither is enumerated twice however often it is referenced or aliased, and
@@ -1634,14 +1636,14 @@ export function assertRenderCost(
   // declares no operation is charged nothing for it, so reading it again at
   // every path would be work no unit pays for.
   const namedParameters = new WeakSet<object>();
+  const readParameterLists = new WeakSet<object>();
   const assertParameterIdentities = (list: unknown): void => {
     if (!Array.isArray(list) || readParameterLists.has(list)) return;
     readParameterLists.add(list);
-  const readParameterLists = new WeakSet<object>();
     for (const entry of list) {
+      if (stats) stats.parameterEntryReads += 1;
       if (!isRecord(entry)) continue;
       if (typeof entry.$ref === 'string' && entry.$ref.length > MAX_OPENAPI_REF_LENGTH) {
-      if (stats) stats.parameterEntryReads += 1;
         throw refTooLong(entry.$ref);
       }
       const resolution = resolver.resolve(entry);

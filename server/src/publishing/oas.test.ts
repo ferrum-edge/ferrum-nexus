@@ -1118,6 +1118,44 @@ describe('OpenAPI parsing', () => {
     });
   });
 
+  it('charges an inline path-item parameter schema at every path that reaches it', () => {
+    // Two paths reference one Path Item of one operation and one inline
+    // parameter whose schema has N empty properties: a row and the schema
+    // (1 + 2N) at each path, as an inline copy at each would cost: 4 + 4N.
+    const sharing = (propertyCount: number) => {
+      const properties: Record<string, unknown> = {};
+      for (let index = 0; index < propertyCount; index += 1) properties[`p${index}`] = {};
+      const schema = { type: 'object', properties };
+      const paths = {
+        '/a': { $ref: '#/components/pathItems/Shared' },
+        '/b': { $ref: '#/components/pathItems/Shared' },
+      };
+      const shared = {
+        parameters: [{ name: 'filter', in: 'query', schema }],
+        get: { responses: {} },
+      };
+      return { document: { paths, components: { pathItems: { Shared: shared } } }, paths };
+    };
+
+    const atLimit = sharing(24_999);
+    assertRenderCost(atLimit.document, atLimit.paths);
+    // The first path's row and schema, then the second path's row: the second
+    // schema is the charge that crosses the ceiling.
+    const overLimit = sharing(25_000);
+    const failure = expectSpecInvalid(() => assertRenderCost(overLimit.document, overLimit.paths));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 1,
+      parameters: 2,
+      media_types: 0,
+      responses: 0,
+      tags: 0,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+  });
+
   it('charges a referenced parameter for the object it names, once', () => {
     // Twenty references to one wide component parameter, with nothing inline
     // and no `components.schemas`: the target's schema is charged at the first

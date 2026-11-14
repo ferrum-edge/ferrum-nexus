@@ -461,8 +461,10 @@ export const MAX_SPEC_OPERATIONS = 3_000;
  * - Parameter rows and response entries cost one at every occurrence, and a
  *   path-item parameter one under every operation beneath it. Media types cost
  *   one each. The schemas and media types of a referenced parameter, request
- *   body or response, and the schemas of path-item parameters, are charged
- *   once.
+ *   body or response are charged once per document. The schemas of an inline
+ *   path-item parameter are charged once per path, not once per operation
+ *   beneath it, so a Path Item that several paths reference charges them at
+ *   each, as an inline copy would.
  * - Each entry of an operation's `tags` costs one: the viewer lists the
  *   operation once under each tag.
  * - Operations are read through each path's Path Item references, so a Path
