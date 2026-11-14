@@ -321,7 +321,10 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         plugin.plugin_name === 'openapi_validator',
     );
     assert.ok(validator);
-    const operator = await gatewayAdmin('PUT', `/plugins/config/${validator.id}`, {
+    // Edge v0.9.19 requires every plugin-config replace to name the proxies it
+    // expects to reference the config.
+    const expected = `expected_proxy_ids=${encodeURIComponent(stored.api.ferrum_proxy_id)}`;
+    const operator = await gatewayAdmin('PUT', `/plugins/config/${validator.id}?${expected}`, {
       plugin_name: 'openapi_validator',
       scope: 'proxy',
       proxy_id: stored.api.ferrum_proxy_id,
@@ -438,12 +441,11 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     // does see its clients' live JWTs — so the suite states it rather than
     // asserting a uniform rule that is not true.
     //
-    // It is not Nexus's to change either. Of these three plugins only
-    // `key_auth` and `basic_auth` take `hide_credentials`; `jwt_auth`'s config
-    // is a closed key set that refuses it, so setting it would 400 the publish
-    // rather than hide the token. `docs/api.md`, `docs/security.md` §5 and the
-    // client and provider guides document the difference — if a future Edge
-    // adds the option and Nexus sets it, move them with this flag.
+    // Edge v0.9.19 added `jwt_auth` `hide_credentials`, but it defaults to
+    // `false` and Nexus sends `{}`, so the token is still forwarded.
+    // `docs/api.md`, `docs/security.md` §5 and the client and provider guides
+    // document the difference; if Nexus starts setting the option, move them
+    // with this flag.
     { plugin: 'key_auth', credential: 'keyauth', forwardsCredential: false },
     { plugin: 'basic_auth', credential: 'basicauth', forwardsCredential: false },
     { plugin: 'jwt_auth', credential: 'jwt', forwardsCredential: true },
@@ -508,7 +510,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         names.has('authorization'),
         flavour.forwardsCredential,
         flavour.forwardsCredential
-          ? 'a bearer token is forwarded to the backend: jwt_auth cannot hide it'
+          ? 'a bearer token is forwarded to the backend: Nexus leaves jwt_auth hide_credentials off'
           : 'the Authorization header is stripped at the gateway',
       );
 

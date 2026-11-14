@@ -1017,6 +1017,81 @@ the order of steps 3 and 4 does not matter for compatibility. **Rolling back**
 Edge to v0.9.15 keeps Nexus working, but reopens the QUIC vulnerabilities
 v0.9.17 fixes; do it only to restore service.
 
+### Upgrading to Edge v0.9.20
+
+The next Nexus release pairs with Edge v0.9.20, the only Edge version its
+acceptance suite tests. v0.9.20 follows published v0.9.19, which follows
+v0.9.17: v0.9.18 was tagged but never published, so its changes ship in
+v0.9.19. Read both sections of the Edge upgrade guide,
+[Upgrading to 0.9.19](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20/docs/upgrade_guide.md#upgrading-to-0919)
+and
+[Upgrading to 0.9.20](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20/docs/upgrade_guide.md#upgrading-to-0920),
+for the gateway-wide changes: both refuse configuration and traffic that the
+previous release accepted, and stored configuration they refuse fails
+validation when it is loaded. Every contract Nexus depends on is unchanged:
+egress policy schema 2 and its data-plane attestation, deployment snapshot v2
+and its `deployment_snapshot.v2` tokens, and the acknowledgement shape. The
+ConfigSync protocol revision stays `3`. No Nexus migration or journal change
+is needed. What changes for Nexus:
+
+- **Plugin configs are closed at every depth** (v0.9.20). Edge refuses an
+  unknown key in any nested plugin-config object, not only at the root. Every
+  key Nexus writes, for the auth plugins, `access_control`, `rate_limiting`,
+  `cors`, the palette, the agent policy plugins and `prometheus_metrics`, is in
+  the v0.9.20 schemas, so no write changes.
+- **Stricter palette admission** (v0.9.19). Nexus now refuses, with
+  `400 VALIDATION_FAILED`, what the gateway refuses: a `compression` algorithm
+  or content type listed twice (content types compare case-insensitively), a
+  content type with `*` anywhere but a whole subtype (`*/*`, `*/json`,
+  `application/*+json`; `text/*` is accepted and now matches), `X-Real-IP` or
+  `X-Geo-Country` (any case, `_` or `-`) as a `correlation_id` `header_name`,
+  and an `ip_restriction` prefix length that is not canonical decimal (`/08`).
+  A palette row saved earlier with one of these values fails on the gateway;
+  edit or remove it before upgrading.
+- **Request parameters on `routes` APIs** (v0.9.19). The generated
+  `openapi_validator` now validates the document's path, query, header and
+  cookie parameters, and checks `format` under every JSON Schema draft. A
+  request that passed before can now get `400`. Publishing a document whose
+  required parameter uses a serialization the validator cannot enforce is
+  refused by the gateway; an unsupported optional parameter is skipped.
+- **JWT credentials** (v0.9.19). A Consumer's `jwt` secret must be unique in
+  the namespace and carry 32 non-whitespace characters; Nexus issues 43
+  random characters, so its credentials qualify. `jwt_auth` pins `HS256` by
+  default, the algorithm the portal documents, and refuses a token that carries
+  an `aud` claim, because Nexus configures no `audiences`; clients must leave
+  `aud` out. `jwt_auth` gains `hide_credentials`, which defaults to `false`;
+  Nexus does not set it, so the bearer token still reaches the backend.
+- **One credential per request** (v0.9.19). A request with two
+  `Authorization` field lines, or two credentials in one, is refused with
+  `400`.
+- **Agent APIs** (v0.9.19). An MCP tool call no longer carries the caller's
+  `Authorization`, `Cookie`, route credential headers or query string to the
+  API's backend. The gateway also gates MCP prompts and resources by policy;
+  Nexus advertises tools only, so its agent endpoints are unaffected.
+- **Idempotency keys** (v0.9.19). `request_deduplication` moves its record
+  keys to a new format: a key first used before the upgrade is not found
+  after it, so a retry that crosses the upgrade runs again instead of
+  replaying. A new key past the live in-flight cap gets `503`.
+- **Request size refusal body** (v0.9.19). The `request_size_limiting` `413`
+  body is `{"error":"Request body exceeds maximum size"}`, without the
+  `limit` field.
+
+Procedure:
+
+1. **Check the gateway** with both Edge guide sections. In the portal, fix or
+   remove every palette `compression`, `correlation_id` and `ip_restriction`
+   setting listed above, and tell JWT clients to drop any `aud` claim.
+2. **Settle journals** as in step 2 of the v0.9.13 procedure, so that no
+   conversion or restore spans the gateway upgrade.
+3. **Upgrade Edge to v0.9.20**, the control plane and every data plane together.
+4. **Upgrade Nexus** to the release that pins Edge v0.9.20 in
+   [`release/compatibility.env`](../release/compatibility.env), and check
+   `GET /api/health/edge` as an admin.
+
+Nexus `v0.5.2` is qualified against Edge v0.9.15 only and has not been tested
+against v0.9.20, so upgrade Nexus promptly after Edge. **Rolling back** Edge to
+v0.9.17 is not qualified for the release that pins v0.9.20.
+
 ### Email
 
 All optional. SMTP can also be configured in **Admin → Settings**, and stored
@@ -2112,7 +2187,7 @@ contracts (`contracts/ferrum-contracts/PIN`):
 | `v0.4.0`              | `v0.9.13`   | `contracts-edge-0.9.13` |
 | `v0.5.0`, `v0.5.1`    | `v0.9.14`   | `contracts-edge-0.9.14` |
 | `v0.5.2`              | `v0.9.15`   | `contracts-edge-0.9.15` |
-| `main` (next release) | `v0.9.17`   | `contracts-edge-0.9.17` |
+| `main` (next release) | `v0.9.20`   | `contracts-edge-0.9.20` |
 
 ### Restoring
 

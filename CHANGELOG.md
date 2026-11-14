@@ -25,6 +25,60 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **Pinned Ferrum Edge v0.9.20** (#706):
+  `ferrumedge/ferrum-edge:v0.9.20@sha256:32a0b0574bb2ed105d315888fab12e33242e1cec3ae9f1ae34c1fb4d0c9a2689`
+  (tag source `e4a606a00352674daaef08636e3e359e6c48ba18`), with the nine
+  changed vendored contract files re-copied byte for byte from
+  `contracts-edge-0.9.20` (`39da322083044c2e92617209e62983c92387f0ad`). No
+  schema Nexus vendors changes its wire rules, and the plugin catalog keeps
+  every name and config-schema pointer. Edge v0.9.19 and v0.9.20 refuse
+  configuration and traffic earlier releases accepted: plugin configs are
+  closed at every depth (every config Nexus writes was checked against the
+  v0.9.20 schemas and passes), `routes` validators check request parameters
+  and `format`, `jwt_auth` refuses a token whose `aud` is not configured
+  (leave `aud` out), a request carrying two credentials is refused, MCP tool
+  calls no longer forward the caller's credentials to the backend, and
+  idempotency records written before the upgrade are not replayed after it.
+  `jwt_auth` gains `hide_credentials`, which defaults to `false`; Nexus does
+  not set it, so a bearer token still reaches the backend, and the docs that
+  said Edge cannot hide it are corrected. See
+  [Upgrading to Edge v0.9.20](docs/operations.md#upgrading-to-edge-v0920).
+
+- **Palette plugins refuse the values Edge v0.9.19 refuses** (#706), with
+  `400 VALIDATION_FAILED` from the server and a field message in the form,
+  instead of a gateway `400` mid-write: a `compression` algorithm or content
+  type listed twice (content types compare case-insensitively), a content
+  type with `*` anywhere but a whole subtype (`*/*`, `*/json`,
+  `application/*+json`; `text/*` is now accepted), `X-Real-IP` or
+  `X-Geo-Country` (any case, `_` or `-`) as a `correlation_id` `header_name`,
+  and an `ip_restriction` prefix length that is not canonical decimal
+  (`/08`). Edit or remove a palette plugin saved with one of these values
+  before upgrading Edge: the gateway refuses it when it loads.
+
+- **Upload limits count operations reached through Path Item references** (#692).
+  `MAX_SPEC_OPERATIONS` (3,000) and the 100,000 render units now read each path through
+  its Path Item `$ref` chain, as Edge and the documentation viewer read it. So a Path Item
+  that many paths reference counts at every one of them, as an inline copy would. Before,
+  a path that was a `$ref` counted nothing, so 2,000 paths sharing one large Path Item
+  passed upload at almost no counted cost. This applies to publish, spec revision,
+  rollback and diff preview.
+  - The render count also charges one unit per entry of an operation's `tags`, the group
+    entries the viewer lists it under. `too_much_to_render` reports them as
+    `details.tags`.
+  - Documents accepted before that resolve past either limit are now refused with
+    `400 SPEC_INVALID`; split such a document into several APIs. Stored revisions like
+    that are no longer served by the catalog: publish a revision that passes the limits.
+  - The separate agent operation cap, which already counted this way, is folded into the
+    upload limit.
+
+- **A path `$ref` that cannot be followed is refused at every enforcement level** (#692).
+  A path whose Path Item reference is external, dangling or cyclic, is longer than 32
+  hops, or points outside `#/paths/`, `#/components/pathItems/` or `#/webhooks/` is
+  refused with `400 SPEC_INVALID` (`details.reason: "unresolvable_path_item_ref"`,
+  `details.path`) at `docs_only` too. Before, only `routes` refused it. The publish form
+  says so before the request. Inline the Path Item, or move it under
+  `components.pathItems`.
+
 - Spec-summary reads no longer fetch the OpenAPI document. The catalog detail
   page (`GET /api/catalog/:slug`), the provider API page (`GET /api/apis/:id`)
   and revision history (`GET /api/apis/:id/revisions`) read `api_specs`
@@ -140,6 +194,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   whole-type `consumers.replaceCredentials` (#676, #685).
 
 ### Fixed
+
+- **The documentation viewer shows operations reached through Path Item references**
+  (#692). A path written as a `$ref` to a Path Item (`components.pathItems`, `webhooks`
+  or another path) used to render no operations. It now lists the referenced Path Item's
+  operations, parameters and responses, and a shared Path Item is read once however many
+  paths use it. The publish form's operation count uses the same resolved count as the
+  server.
 
 - Re-enabling an account no longer restores an approval group for a grant whose
   API row is missing or is recorded under another namespace than the portal's

@@ -327,7 +327,11 @@ export interface EdgeBasicAuthConfig {
   hide_credentials?: boolean;
 }
 
-/** `jwt_auth` config subset Nexus sets. */
+/**
+ * `jwt_auth` config subset. Nexus sends `{}`; Edge v0.9.19 adds `algorithm`
+ * (default `HS256`) and `hide_credentials` (default `false`), which it leaves at
+ * their defaults.
+ */
 export interface EdgeJwtAuthConfig {
   token_lookup?: string;
   /** Claim whose value maps to the consumer. Default `sub`. */
@@ -369,7 +373,7 @@ export interface EdgeRateLimitRule {
 
 /** `rate_limiting` config — `limits` is required and needs exactly one `default` rule. */
 export interface EdgeRateLimitingConfig {
-  /** Only `ip`, `consumer` or `spiffe`. */
+  /** `ip`, `consumer` or `spiffe` (Edge v0.9.19 adds `service`, which Nexus never sets). */
   limit_by?: 'ip' | 'consumer' | 'spiffe';
   /**
    * Edge v0.9.15: the IPv6 prefix (`1`-`128`, default `64`) that groups IP keys,
@@ -471,8 +475,11 @@ export interface EdgeOpenapiValidatorConfig {
     methods?: string[];
     /** Authenticated identities or consumer usernames. */
     consumers?: string[];
-    /** Header name → required value, or `null` for "any value". */
-    header_present?: Record<string, string | null>;
+    /**
+     * Header name → required secret value, 16-4096 visible ASCII characters.
+     * Edge v0.9.19 refuses the `null` ("any value") form it used to accept.
+     */
+    header_present?: Record<string, string>;
   };
 }
 

@@ -81,6 +81,11 @@ const TILDE_ZERO = /~0/g;
 const CONSUMER_HEADER_PREFIX = /^x[-_]consumer[-_]/i;
 const AUTHENTICATED_IDENTITY_HEADER = /^x[-_]authenticated[-_]identity$/i;
 const FERRUM_HOPS_HEADER = /^x[-_]ferrum[-_]hops$/i;
+const GEO_COUNTRY_HEADER = /^x[-_]geo[-_]country$/i;
+/** Edge v0.9.19 `CompressionConfig.content_types` item grammar (`type/subtype` or `type/*`). */
+const COMPRESSION_CONTENT_TYPE = /^[!#$%&'+.^_`|~0-9A-Za-z-]+\/(?:[!#$%&'+.^_`|~0-9A-Za-z-]+|\*)$/;
+/** Edge v0.9.19 `bypass.header_present` value: 16-4096 visible ASCII characters. */
+const VALIDATOR_BYPASS_SECRET = /^[!-~]{16,4096}$/;
 const BACKSLASH = /\\/g;
 const DOUBLE_QUOTE = /"/g;
 const NEWLINE = /\n/g;
@@ -710,8 +715,11 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'cache_invalidation_min_age_ms',
     'mesh_series_budget_per_family',
     'render_cache_ttl_seconds',
+    // Edge v0.9.19 adds configurable histogram buckets.
+    'request_duration_buckets_ms',
     'schema',
     'schema_ref',
+    'session_duration_buckets_ms',
     'stale_entry_ttl_seconds',
   ],
   key_auth: ['key_location', 'hide_credentials'],
@@ -727,6 +735,10 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'expected_issuers',
     'audiences',
     'leeway_secs',
+    // Edge v0.9.19 pins the HMAC algorithm and can strip the token before
+    // forwarding (default `false`); Nexus sets neither.
+    'algorithm',
+    'hide_credentials',
   ],
   access_control: [
     'allowed_consumers',
@@ -734,6 +746,9 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'allowed_groups',
     'disallowed_groups',
     'allow_authenticated_identity',
+    // Edge v0.9.19 external-identity access rules; Nexus sets neither.
+    'allowed_external_identities',
+    'disallowed_external_identities',
   ],
   rate_limiting: [
     'mcp_tool_calls',
@@ -742,12 +757,18 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'ipv6_prefix',
     'expose_headers',
     'limits',
+    // Edge v0.9.19: the cap on tracked rate-limit keys.
+    'max_state_entries',
     'sync_mode',
     'redis_url',
     'redis_tls',
     'redis_key_prefix',
     'redis_pool_size',
     'redis_failure_policy',
+    'redis_connect_timeout_seconds',
+    'redis_health_check_interval_seconds',
+    'redis_username',
+    'redis_password',
   ],
   mcp_gateway: [
     'enabled',
@@ -790,6 +811,8 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'max_age',
     'preflight_continue',
     'unmatched_preflights',
+    // Edge v0.9.19: answer Private Network Access preflights.
+    'allow_private_network',
   ],
   // ── The provider plugin palette (`shared/src/plugins.ts`) ──────────────
   // Key sets taken from Ferrum Edge's `openapi.yaml`; every one of these
@@ -815,7 +838,7 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'allow_missing_user_agent',
     'custom_response_code',
   ],
-  correlation_id: ['header_name', 'echo_downstream'],
+  correlation_id: ['header_name', 'echo_downstream', 'inbound_policy'],
   compression: [
     'algorithms',
     'min_content_length',
@@ -825,6 +848,9 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'gzip_level',
     'brotli_quality',
     'decompress_request',
+    // Edge v0.9.19: opt-in zstd and strong-ETag weakening.
+    'zstd_level',
+    'weaken_strong_etag',
   ],
   response_caching: [
     'ttl_seconds',
@@ -841,6 +867,7 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'anonymous_caller_scope',
     'add_cache_status_header',
     'invalidate_on_unsafe_methods',
+    'ignore_request_headers',
   ],
   request_deduplication: [
     'header_name',
@@ -863,8 +890,12 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'redis_username',
     'redis_password',
     'on_redis_unavailable',
+    // Edge v0.9.19: caller partitioning and the in-flight marker cap.
+    'caller_partition',
+    'max_inflight_entries',
   ],
-  request_termination: ['status_code', 'content_type', 'body', 'message', 'trigger'],
+  // Edge v0.9.19 adds canned-response `headers`.
+  request_termination: ['status_code', 'content_type', 'body', 'message', 'trigger', 'headers'],
   openapi_validator: [
     'enforcement_mode',
     'validate_request',
@@ -895,6 +926,8 @@ const OPENAPI_OPERATION_KEYS = new Set([
   'request_required',
   'request_body',
   'responses',
+  // Edge v0.9.19 validates declared path and header parameters.
+  'parameters',
 ]);
 
 /** `openapi_validator.bypass` is a closed key set as well. */
@@ -1305,6 +1338,14 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
   }
 
   if (pluginName === 'access_control') {
+    // Edge v0.9.19: an allow-list that is present must be non-empty (`minItems:
+    // 1`); omitting the key is how to say "no allow restriction".
+    for (const field of ['allowed_consumers', 'allowed_groups', 'allowed_external_identities']) {
+      const list = config[field];
+      if (Array.isArray(list) && list.length === 0) {
+        return `access_control: '${field}' must not be empty; omit it instead`;
+      }
+    }
     const nonEmpty = keys.some((field) => {
       const value = config[field];
       return Array.isArray(value) ? value.length > 0 : value === true;
@@ -1325,7 +1366,7 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
   if (pluginName === 'rate_limiting') {
     if (
       config.limit_by !== undefined &&
-      !['ip', 'consumer', 'spiffe', 'spiffe_identity'].includes(String(config.limit_by))
+      !['ip', 'consumer', 'spiffe', 'spiffe_identity', 'service'].includes(String(config.limit_by))
     ) {
       return `rate_limiting: unsupported limit_by '${String(config.limit_by)}'`;
     }
@@ -1472,11 +1513,34 @@ function palettePluginError(pluginName: string, config: Record<string, unknown>)
 
     case 'compression': {
       const algorithms = config.algorithms;
-      if (algorithms === undefined) return null;
-      if (!Array.isArray(algorithms)) return "compression: 'algorithms' must be an array";
-      for (const algorithm of algorithms) {
-        if (!['gzip', 'br', 'brotli'].includes(String(algorithm))) {
-          return `compression: unsupported algorithm '${String(algorithm)}'`;
+      if (algorithms !== undefined) {
+        if (!Array.isArray(algorithms)) return "compression: 'algorithms' must be an array";
+        const seen = new Set<string>();
+        for (const algorithm of algorithms) {
+          if (!['gzip', 'br', 'brotli', 'zstd'].includes(String(algorithm))) {
+            return `compression: unsupported algorithm '${String(algorithm)}'`;
+          }
+          // Edge v0.9.19 refuses a repeat; `br` and `brotli` count as one.
+          const canonical = algorithm === 'brotli' ? 'br' : String(algorithm);
+          if (seen.has(canonical)) return `compression: algorithm '${canonical}' is listed twice`;
+          seen.add(canonical);
+        }
+      }
+      const types = config.content_types;
+      if (types !== undefined) {
+        if (!Array.isArray(types) || types.length > 64) {
+          return "compression: 'content_types' must be an array of at most 64 rules";
+        }
+        const seen = new Set<string>();
+        for (const type of types) {
+          // Edge v0.9.19: no `*` outside a whole-subtype `type/*`, no repeat.
+          if (typeof type !== 'string' || !COMPRESSION_CONTENT_TYPE.test(type)) {
+            return `compression: content type '${String(type)}' can never match`;
+          }
+          if (seen.has(type.toLowerCase())) {
+            return `compression: content type '${type}' is listed twice`;
+          }
+          seen.add(type.toLowerCase());
         }
       }
       return null;
@@ -1523,6 +1587,12 @@ function palettePluginError(pluginName: string, config: Record<string, unknown>)
       }
       if (isProxyHopsHeaderName(config.header_name)) {
         return 'correlation_id: `header_name` is the gateway-owned `x-ferrum-hops` loop-guard count and cannot be used for correlation IDs';
+      }
+      // Edge v0.9.19: the literal `x-real-ip`, and `x-geo-country` in any
+      // spelling, never reach the backend.
+      const header = typeof config.header_name === 'string' ? config.header_name.trim() : '';
+      if (header.toLowerCase() === 'x-real-ip' || GEO_COUNTRY_HEADER.test(header)) {
+        return `correlation_id: \`header_name\` '${header}' is gateway-owned and cannot be used for correlation IDs`;
       }
       return null;
     }
@@ -1720,6 +1790,14 @@ function openapiValidatorBypassError(bypass: unknown): string | null {
   }
   if (bypass.header_present !== undefined && !isRecord(bypass.header_present)) {
     return "openapi_validator: 'bypass.header_present' must be an object";
+  }
+  // Edge v0.9.19: each value is a secret of 16-4096 visible ASCII characters;
+  // a `null` (presence-only) entry is refused.
+  const secrets = isRecord(bypass.header_present) ? Object.values(bypass.header_present) : [];
+  for (const value of secrets) {
+    if (typeof value !== 'string' || !VALIDATOR_BYPASS_SECRET.test(value)) {
+      return "openapi_validator: 'bypass.header_present' values must be 16-4096 visible ASCII characters";
+    }
   }
   return null;
 }
@@ -2071,7 +2149,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return {
       gateway: {
         mode: 'database',
-        ferrum_version: '0.9.17',
+        ferrum_version: '0.9.20',
         uptime_seconds: MOCK_GATEWAY_UPTIME_SECONDS,
         total_requests: totalRequests,
         proxy_count: proxies.size,

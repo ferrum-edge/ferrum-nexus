@@ -491,9 +491,10 @@ Plugin configs are closed key sets; a typo is a `400`. What Nexus sends:
 - **Auth plugins** — `{}`. `key_auth` defaults to `header:X-API-Key` with
   `hide_credentials: true`; `basic_auth` defaults `hide_credentials` to `true`;
   `jwt_auth` defaults to `token_lookup: header:Authorization` and
-  `consumer_claim_field: sub`. Edge has no `hide_credentials` for `jwt_auth`,
-  so a bearer token is forwarded upstream while a key or Basic password is
-  stripped. This is Edge's asymmetry; it is documented in [`api.md`](api.md)
+  `consumer_claim_field: sub`. `jwt_auth`'s `hide_credentials` (Edge v0.9.19
+  and later) defaults to `false` and Nexus leaves it there, so a bearer token is
+  forwarded upstream while a key or Basic password is stripped. The asymmetry
+  is documented in [`api.md`](api.md)
   and [`security.md` §5](security.md#5-show-once-credentials) and pinned by
   `e2e/src/dataplane.test.ts`.
 - **`access_control`** — `{ allowed_groups: ['nexus:api:<api_id>:approved'] }`
@@ -1380,5 +1381,5 @@ are never interpreted as omission. Local presentation/reference budgets further 
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
 and has no store, gateway, network or source-file reader dependency. The shared v1 format
-is implemented in published `contracts-edge-0.9.17`. Preview cannot invoke publishing or
+is implemented in published `contracts-edge-0.9.20`. Preview cannot invoke publishing or
 install agent policy.

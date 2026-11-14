@@ -630,14 +630,13 @@ const CORS_PLUGIN = 'cors';
  *   `consumer_claim_field: sub`, and Nexus hands the consumer username out as
  *   the `sub` value the client must send.
  *
- * **`jwt_auth` forwards the bearer token to the upstream, and Nexus cannot turn
- * that off.** Of these three plugins only `key_auth` and `basic_auth` take
- * `hide_credentials`; `jwt_auth`'s config is a closed eight-key set
- * (`token_lookup`, `consumer_claim_field`, `require_exp`, `require_nbf`,
- * `expected_issuer`, `expected_issuers`, `audiences`, `leeway_secs`) whose
- * admission check refuses anything else, so sending `hide_credentials` here
- * would 400 every `jwt_auth` publish rather than hide a token. The asymmetry is
- * Edge's: a key and a Basic password are reusable indefinitely, whereas
+ * **`jwt_auth` forwards the bearer token to the upstream.** Edge v0.9.19 added
+ * a `jwt_auth` `hide_credentials` option, but it defaults to `false` and Nexus
+ * does not set it, so the portal's JWT behaviour is unchanged from earlier
+ * gateways (before v0.9.19 the key was refused, so it could not be sent at all).
+ * Edge v0.9.19 also pins `algorithm` to `HS256` by default, the algorithm the
+ * portal tells clients to sign with. The asymmetry is the default's: a key and
+ * a Basic password are reusable indefinitely, whereas
  * `require_exp` defaults to `true` so every accepted token carries an expiry —
  * one the client chooses, since neither Edge nor Nexus caps it — and a backend
  * offered JWT usually wants the claims. The client's signing secret is never

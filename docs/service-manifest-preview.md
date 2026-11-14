@@ -3,9 +3,9 @@
 Nexus `v0.4.0` ships a read-only preview of Ferrum service manifests, the Nexus
 consumer portion of [Alloy #27](https://github.com/ferrum-edge/ferrum-alloy/issues/27),
 implemented in [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519). Its shared
-v1 contract is published in `contracts-edge-0.9.17`, commit
-`f7ba1a9b9885900d1e110f76d38e37a02eda13c8` in
-[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/f7ba1a9b9885900d1e110f76d38e37a02eda13c8).
+v1 contract is published in `contracts-edge-0.9.20`, commit
+`39da322083044c2e92617209e62983c92387f0ad` in
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/39da322083044c2e92617209e62983c92387f0ad).
 The manifest schema and fixtures are byte-identical to `contracts-edge-0.9.12`; the
 shared `fixtures/invalid-expectations.json` changes only in other contracts' entries.
 [`SERVICE-MANIFEST-PIN`](../contracts/ferrum-contracts/SERVICE-MANIFEST-PIN) records

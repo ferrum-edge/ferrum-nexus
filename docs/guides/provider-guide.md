@@ -153,8 +153,9 @@ short-lived tokens themselves.
 
 > **With JWT, your backend receives callers' live tokens.** The gateway removes
 > an API key or Basic password before forwarding, but forwards
-> `Authorization: Bearer` unchanged; Ferrum Edge cannot hide it. Each token works
-> for that caller until its `exp`, so do not log it, echo it or pass it on.
+> `Authorization: Bearer` unchanged; the portal does not ask Ferrum Edge to hide
+> it. Each token works for that caller until its `exp`, so do not log it, echo it
+> or pass it on.
 
 > **HTTP Basic needs gateway configuration.** Publishing fails unless the
 > operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32 bytes) on Ferrum

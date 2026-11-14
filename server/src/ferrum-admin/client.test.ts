@@ -1306,6 +1306,57 @@ describe('ferrum admin client', () => {
       }
     });
 
+    it('refuses the plugin configs Edge v0.9.19 stopped admitting', async () => {
+      await client.proxies.create({
+        id: 'edge-0919-proxy',
+        listen_path: '/nexus/edge-0919',
+        backend_host: 'edge-0919.internal',
+        backend_port: 443,
+      });
+      const refused: [string, Record<string, unknown>][] = [
+        // A present allow-list must be non-empty; omit it instead.
+        ['access_control', { allowed_groups: [] }],
+        ['access_control', { allowed_consumers: [], disallowed_groups: ['blocked'] }],
+        // Each algorithm and content type once, and no `*` that can never match.
+        ['compression', { algorithms: ['br', 'brotli'] }],
+        ['compression', { content_types: ['*/*'] }],
+        ['compression', { content_types: ['text/html', 'TEXT/HTML'] }],
+        // X-Real-IP and X-Geo-Country never reach the backend.
+        ['correlation_id', { header_name: 'X-Real-IP' }],
+        ['correlation_id', { header_name: 'x_geo_country' }],
+      ];
+      for (const [pluginName, config] of refused) {
+        await assert.rejects(
+          () =>
+            client.pluginConfigs.create({
+              plugin_name: pluginName,
+              scope: 'proxy',
+              proxy_id: 'edge-0919-proxy',
+              enabled: true,
+              config,
+            }),
+          (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+          `${pluginName} ${JSON.stringify(config)}`,
+        );
+      }
+
+      // What Nexus writes still passes.
+      for (const [pluginName, config] of [
+        ['access_control', { allowed_groups: [aclGroupForApi(randomUUID())] }],
+        ['compression', { algorithms: ['gzip', 'br'], content_types: ['text/*'] }],
+        ['correlation_id', { header_name: 'x-request-id' }],
+      ] as const) {
+        const created = await client.pluginConfigs.create({
+          plugin_name: pluginName,
+          scope: 'proxy',
+          proxy_id: 'edge-0919-proxy',
+          enabled: true,
+          config,
+        });
+        assert.equal(created.plugin_name, pluginName);
+      }
+    });
+
     it('refuses X-Authenticated-Identity as a correlation or idempotency header', async () => {
       await client.proxies.create({
         id: 'identity-header-proxy',

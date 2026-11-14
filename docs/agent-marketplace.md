@@ -12,7 +12,7 @@ governance) was first published in
 [Edge v0.9.10](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.10), whose
 tag resolves to `ee040d5e3281fde424aa65f5b18004852c5b53b0`; the source links below
 point at that release. Nexus `v0.5.2` pins Edge v0.9.15 (Nexus `v0.5.0` and `v0.5.1`
-pinned Edge v0.9.14, and `v0.4.0` Edge v0.9.13); `main` pins v0.9.17 in
+pinned Edge v0.9.14, and `v0.4.0` Edge v0.9.13); `main` pins v0.9.20 in
 [`release/compatibility.env`](../release/compatibility.env). The packaged acceptance suite
 runs the agent journeys against the pinned image.
 

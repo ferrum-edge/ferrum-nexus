@@ -151,7 +151,7 @@ is part of what is being tested, and the assertion is worth less than it looks.
 The existing stack deliberately sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and keeps
 its private-service acceptance suite. It cannot prove DNS-rebinding enforcement.
 The separate [public-only fixture](public-only/README.md) uses controlled isolated
-DNS and canaries, with no unrelated public-service traffic, against the Edge `v0.9.17`
+DNS and canaries, with no unrelated public-service traffic, against the Edge `v0.9.20`
 image the compatibility record pins. It runs on demand with a packaged Nexus image and is
 not part of the required CI checks. Any unavailable dependency must fail visibly, never
 be skipped, mocked or satisfied by fake pins. See

@@ -1,10 +1,10 @@
 # Public-only DNS rebinding fixture
 
-This fixture runs against published Edge `v0.9.17`, source
-`669c574c1d1e88e84dccb26a8159939e6694644d`, through the multi-architecture image
-`ferrumedge/ferrum-edge:v0.9.17@sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1`
+This fixture runs against published Edge `v0.9.20`, source
+`e4a606a00352674daaef08636e3e359e6c48ba18`, through the multi-architecture image
+`ferrumedge/ferrum-edge:v0.9.20@sha256:32a0b0574bb2ed105d315888fab12e33242e1cec3ae9f1ae34c1fb4d0c9a2689`
 that the compatibility record pins for the next Nexus release. Canonical
-`contracts-edge-0.9.17` at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8` is adopted
+`contracts-edge-0.9.20` at `39da322083044c2e92617209e62983c92387f0ad` is adopted
 byte-for-byte. See [adoption facts](../../docs/edge-0.9.11-adoption.md). It needs a
 packaged Nexus image and runs on demand; it is not part of the required CI checks. The
 fixture exercises the local data-plane profile, one of the two pairings Nexus grants

@@ -356,7 +356,8 @@ curl -sS https://gateway.example.com/nexus/billing/invoices \
 ### JWT (`jwt`)
 
 Sign short-lived HS256 tokens with the signing secret. The **`sub` claim must
-be the consumer username**, and the token must carry an `exp`.
+be the consumer username**, and the token must carry an `exp`. Leave out `aud`:
+the gateway refuses a token whose audience it is not configured to accept.
 
 ```js
 // npm i jose
