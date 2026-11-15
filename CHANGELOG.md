@@ -177,6 +177,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   database. The image pin check no longer allows the retired `ferrum-nexus:ci`
   tag.
 
+- `package.json` and `e2e/package.json` name npm `10.9.7` in `packageManager`,
+  so Dependabot writes the lockfiles with npm 10, the npm of the pinned Node
+  `22.22.2`. Its newest npm (12.2) dropped the `peer: true` markers npm 10
+  records, so `produce-locks` failed on every grouped npm update. The job now
+  also fails when `packageManager` and the pinned Node's npm drift apart.
+
 - TypeScript now rejects unused locals and imports (`noUnusedLocals`) in
   shared, server and web.
 

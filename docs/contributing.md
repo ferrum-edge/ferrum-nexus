@@ -11,6 +11,13 @@ esbuild update changes a version, update its matching `esbuild@<version>` key as
 change. Grouped Dependabot updates may require this manual refresh because the allowlist is separate
 from the dependency manifest.
 
+Both lockfiles are written by npm `10.9.7`, the npm that ships with the pinned Node `22.22.2`. The
+`packageManager` field in `package.json` and `e2e/package.json` names it so that Dependabot updates
+the locks with npm 10 rather than its own newest npm, whose locks drop the `peer: true` markers npm
+10 records. The `produce-locks` job (`.github/workflows/dependency-locks.yml`) regenerates both
+locks with that npm, fails when a committed lock is not what it would write, and fails when
+`packageManager` no longer matches the npm of the pinned Node; move them together.
+
 ## Where things are documented
 
 | Question                                           | Document                                   |
