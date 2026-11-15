@@ -57,14 +57,20 @@ test('a dependency nested under server/node_modules resolves when the image copi
 test('an image without server/node_modules fails for the nested dependency (#718)', (t) => {
   const app = image(t, { nested: true, copyServerModules: false });
   const missing = missingRuntimeDependencies([join(app, 'server')]);
-  assert.deepEqual(missing.map(({ name }) => name), ['better-sqlite3']);
+  assert.deepEqual(
+    missing.map(({ name }) => name),
+    ['better-sqlite3'],
+  );
 });
 
 test('a missing transitive dependency fails', (t) => {
   const app = image(t);
   rmSync(join(app, 'node_modules', 'light-my-request'), { recursive: true });
   const missing = missingRuntimeDependencies([join(app, 'server')]);
-  assert.deepEqual(missing.map(({ name }) => name), ['light-my-request']);
+  assert.deepEqual(
+    missing.map(({ name }) => name),
+    ['light-my-request'],
+  );
   assert.match(missing[0].from, /node_modules[\\/]fastify$/);
 });
 
@@ -72,7 +78,10 @@ test('a dependency of the symlinked shared workspace is resolved from /app/share
   const app = image(t);
   pkg(join(app, 'shared'), { name: '@ferrum-nexus/shared', dependencies: { zod: '^4.0.0' } });
   const missing = missingRuntimeDependencies([join(app, 'server')]);
-  assert.deepEqual(missing.map(({ name }) => name), ['zod']);
+  assert.deepEqual(
+    missing.map(({ name }) => name),
+    ['zod'],
+  );
   assert.match(missing[0].from, /[\\/]shared$/);
   pkg(join(app, 'shared', 'node_modules', 'zod'), { name: 'zod' });
   assert.deepEqual(missingRuntimeDependencies([join(app, 'server')]), []);
