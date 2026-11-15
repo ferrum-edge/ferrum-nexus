@@ -406,6 +406,75 @@ describe('agent publishing and Nexus authorization', () => {
     assert.match(missing.body, UNSUPPORTED_OR_MISSING_ITEMS);
   });
 
+  it('rebuilds the gateway document from a stored revision that now breaks a limit when agents are turned off', async () => {
+    // Turning agents off rewrites the gateway document without the agent
+    // stamping. For a revision stored before Path Item references were
+    // counted at upload, that document is the revision's structure, the one
+    // a failed revision's compensation also puts back, never `{}`: an empty
+    // document carries no `openapi` version and no routes.
+    const { api } = await publish();
+    const proxyId = api.ferrum_proxy_id;
+    assert.ok(proxyId);
+    const stored = overCapDocument();
+    await harness.store.apiSpecs.create({
+      api_id: api.id,
+      version: 'over-cap',
+      raw_spec: JSON.stringify(stored),
+      parsed_title: 'Agent API',
+      parsed_version: 'over-cap',
+      is_current: true,
+      created_by: provider.user.id,
+      rolled_back_from_id: null,
+    });
+
+    const off = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: null },
+    });
+    assert.equal(off.statusCode, 200, off.body);
+    assert.equal((await harness.store.apis.findById(api.id))?.agents, null);
+    const rebuilt = harness.edge.apiSpecForProxy(proxyId)?.document;
+    assert.ok(rebuilt);
+    assert.equal(rebuilt.openapi, stored.openapi);
+    assert.deepEqual(rebuilt.info, stored.info);
+    assert.deepEqual(rebuilt.paths, stored.paths);
+    assert.deepEqual(rebuilt.components, stored.components);
+    assert.equal(rebuilt['x-ferrum-mcp'], undefined);
+    assert.ok(rebuilt['x-ferrum-validate']);
+
+    // The restore path rebuilds the same revision the same way: a revision
+    // whose gateway write is refused is compensated by putting the stored
+    // one back. The proxy body and the plugin list are read live at each
+    // write, so the comparison is of what the document itself contributes.
+    const fromDocument = (document: Record<string, unknown>): Record<string, unknown> =>
+      Object.fromEntries(
+        Object.entries(document).filter(
+          ([key]) => key !== 'x-ferrum-proxy' && key !== 'x-ferrum-plugins',
+        ),
+      );
+    const seen = harness.edge.requests.length;
+    harness.edge.queueFailure(503, { error: 'unavailable' }, '/api-specs/', 'PUT');
+    const failed = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/spec`,
+      payload: { spec: JSON.stringify(DOCUMENT), version: 'refused' },
+    });
+    assert.equal(failed.statusCode, 502, failed.body);
+    const writes = harness.edge.requests
+      .slice(seen)
+      .filter((call) => call.method === 'PUT' && call.path.startsWith('/api-specs/'));
+    assert.equal(writes.length, 2, 'the refused revision, then the restore');
+    const refused = writes[0]?.body as Record<string, unknown>;
+    assert.ok(Object.hasOwn(refused.paths as Record<string, unknown>, '/items/{id}'));
+    const restored = writes[1]?.body as Record<string, unknown>;
+    assert.deepEqual(fromDocument(restored), fromDocument(rebuilt));
+    const current = harness.edge.apiSpecForProxy(proxyId)?.document;
+    assert.ok(current);
+    assert.deepEqual(fromDocument(current), fromDocument(rebuilt));
+    assert.equal((await harness.store.apiSpecs.findCurrentByApi(api.id))?.version, 'over-cap');
+  });
+
   it('keeps namespace metacharacters literal in the MCP validator bypass', () => {
     const document: Record<string, unknown> = structuredClone(DOCUMENT);
     const listenPath = '/nexus.agents-1/agent-2';

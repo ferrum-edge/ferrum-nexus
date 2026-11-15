@@ -395,6 +395,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Publish and spec-revision rollback tests, and the refused-compensation
   contract, now fail if the injected failure never fires or no gateway write
   preceded it.
+- A test now pins what turning agents off puts on the gateway for an agent API
+  whose stored revision now breaks an upload limit (#692 follow-up): the
+  revision's own paths and components, as a failed revision's compensation
+  restores them, rather than an empty document.
 
 ### Security
 
