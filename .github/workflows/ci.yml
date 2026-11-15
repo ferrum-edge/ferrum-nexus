@@ -396,13 +396,21 @@ jobs:
       # one after them is allowed, since this workflow runs from main for every
       # pull request and so cannot list a migration before it merges. The
       # per-dialect id list is pinned exactly by initial-schema.test.ts.
+      # The server's dependencies may be installed in server/node_modules as
+      # well as the root one (#718). Check every one the server can reach
+      # resolves in the image, and run the schema check from /app/server so
+      # better-sqlite3 resolves the way the server resolves it.
+      - name: Test the image dependency check
+        run: node --test ci/check-image-runtime-deps.test.mjs
+      - name: Verify every server runtime dependency resolves in the production image
+        run: docker run --rm -v "$PWD/ci/check-image-runtime-deps.mjs:/tmp/check-image-runtime-deps.mjs:ro" ferrum-nexus:e2e node /tmp/check-image-runtime-deps.mjs /app/server
       - name: Verify SQLite and bundled schemas in the production image
         run: >-
-          docker run --rm ferrum-nexus:e2e node --input-type=module -e
+          docker run --rm --workdir /app/server ferrum-nexus:e2e node --input-type=module -e
           "import assert from 'node:assert/strict';
           import { createHash } from 'node:crypto';
           import Database from 'better-sqlite3';
-          import { loadMigrations } from './server/dist/db/migrate.js';
+          import { loadMigrations } from './dist/db/migrate.js';
           assert.ok(Number(process.versions.napi) >= 10);
           const priorityHashes = {
             sqlite: '0ffa16cce8d5a154877a1dadffc52b8ac3ad4cc8346d637b008ded2ec5fde31e',

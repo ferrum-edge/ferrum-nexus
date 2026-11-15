@@ -205,6 +205,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **The production image keeps dependencies npm installs inside a workspace.** The
+  runtime stage copied only the root `node_modules`, so a lock that placed a server
+  dependency in `server/node_modules` (as Dependabot's npm 10 update of better-sqlite3
+  and nodemailer did in #718) built an image that could not load it. The image now
+  also copies `server/node_modules` and `shared/node_modules`. The `acceptance` job
+  checks that every runtime dependency the server can reach resolves in the image, and
+  runs its schema check from `/app/server`. `produce-locks` warns about a workspace copy
+  npm would have hoisted.
+
 - **The documentation viewer shows operations reached through Path Item references**
   (#692). A path written as a `$ref` to a Path Item (`components.pathItems`, `webhooks`
   or another path) used to render no operations. It now lists the referenced Path Item's

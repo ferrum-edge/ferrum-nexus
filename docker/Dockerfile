@@ -20,7 +20,13 @@ RUN npm run build --workspace shared \
 
 # better-sqlite3 13 ships Linux x64/arm64 Node-API binaries in its tarball.
 # No SQLite install script or native rebuild is needed on these image targets.
-RUN npm ci --omit=dev --ignore-scripts
+# npm may place a production dependency in a workspace's own node_modules
+# rather than the root (as a lock that nested better-sqlite3 under server/ did,
+# #718), so the runtime stage copies the server and shared ones too. Start them
+# empty and make sure both exist, so those COPYs never fail.
+RUN rm -rf server/node_modules shared/node_modules web/node_modules \
+  && npm ci --omit=dev --ignore-scripts \
+  && mkdir -p server/node_modules shared/node_modules
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
@@ -31,8 +37,10 @@ COPY --from=build /app/contracts contracts
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules node_modules
 COPY --from=build /app/shared/package.json shared/package.json
+COPY --from=build /app/shared/node_modules shared/node_modules
 COPY --from=build /app/shared/dist shared/dist
 COPY --from=build /app/server/package.json server/package.json
+COPY --from=build /app/server/node_modules server/node_modules
 COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/web/dist web/dist
 

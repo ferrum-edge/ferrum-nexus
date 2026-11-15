@@ -210,6 +210,20 @@ jobs:
             }
           }
           assert.deepEqual([...found].sort(), ['jsdom', 'undici']);
+          // `npm install <pkg> --workspace=<ws>` (how Dependabot updates a
+          // workspace dependency) can leave the package in that workspace's
+          // node_modules although no root copy stands in its way (#718). The
+          // image copes, but the lock is not npm's hoisted layout: point the
+          // reviewer at it rather than fail.
+          for (const path of Object.keys(root.packages)) {
+            const nested = path.match(/^(?:shared|server|web)\/node_modules\/((?:@[^/]+\/)?[^/]+)$/);
+            if (nested && !root.packages[`node_modules/${nested[1]}`]) {
+              console.log(
+                `::warning file=package-lock.json::${path} has no root copy; npm would hoist it. ` +
+                  'Flatten it as in docs/contributing.md before merging.',
+              );
+            }
+          }
           JS
           git diff --check
           git diff --no-ext-diff -- package-lock.json e2e/package-lock.json > lock-artifacts/locks.diff

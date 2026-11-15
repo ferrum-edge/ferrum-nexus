@@ -29,6 +29,15 @@ only the manifest change and apply the lock from that commit's `produce-locks` a
 [`dependency-majors-449.md`](dependency-majors-449.md) for how to verify and apply one); the job
 publishes no artifact when it fails, so it cannot repair a lock already rewritten by npm 11 or 12.
 
+Dependabot updates a workspace dependency with `npm install <pkg>@<version> --workspace=<ws>`,
+and npm 10 can leave the new version in `server/node_modules` or `web/node_modules` instead of the
+root (#718). The production image copies `server/node_modules` and `shared/node_modules`, and the
+`acceptance` job checks that every server runtime dependency resolves in the image
+(`ci/check-image-runtime-deps.mjs`), so such a lock still ships a working image. `produce-locks`
+warns about each nested copy that has no root copy. To flatten one, push a lock that starts from
+`main`'s and carries the bumped packages at the root, at Dependabot's versions, so `produce-locks`
+resolves the new manifests, then apply that commit's artifact.
+
 ## Where things are documented
 
 | Question                                           | Document                                   |
