@@ -29,7 +29,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22.22.2'
+          # The repository's Node pin, as in every ci.yml job that uses one.
+          node-version-file: .nvmrc
           package-manager-cache: false
       - name: Record immutable inputs and generate locks without lifecycle scripts
         env:
@@ -42,12 +43,13 @@ jobs:
             .nvmrc .github/workflows/ci.yml .github/workflows/dependency-locks.yml \
             > lock-artifacts/provenance/input.sha256
           node --version > lock-artifacts/provenance/node-version.txt
-          test "$(cat lock-artifacts/provenance/node-version.txt)" = 'v22.22.2'
+          # .nvmrc must name one exact release, and it is the one that ran.
+          test "$(cat lock-artifacts/provenance/node-version.txt)" = "v$(cat .nvmrc)"
           npm --version > lock-artifacts/provenance/npm-version.txt
           # Dependabot runs the npm that `packageManager` names (it otherwise
           # uses its image's newest npm, whose locks drop the `peer: true`
           # markers this npm writes). Keep the pin on the npm that ships with
-          # the pinned Node, so a Node bump has to move it too.
+          # the .nvmrc Node, so a Node bump has to move it too.
           for manifest in package.json e2e/package.json; do
             test "$(jq -er '.packageManager' "$manifest")" = "npm@$(cat lock-artifacts/provenance/npm-version.txt)"
           done
