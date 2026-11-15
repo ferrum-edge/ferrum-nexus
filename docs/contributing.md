@@ -11,6 +11,24 @@ esbuild update changes a version, update its matching `esbuild@<version>` key as
 change. Grouped Dependabot updates may require this manual refresh because the allowlist is separate
 from the dependency manifest.
 
+Both lockfiles are written by npm `10.9.7`, the npm that ships with the Node that `.nvmrc` pins
+(`22.22.2`). The `packageManager` field in `package.json` and `e2e/package.json` names it so that
+Dependabot updates the locks with npm 10 rather than its own newest npm, whose locks drop the
+`peer: true` markers npm 10 records. The `produce-locks` job
+(`.github/workflows/dependency-locks.yml`) runs the `.nvmrc` Node, regenerates both locks with its
+npm, fails when a committed lock is not what it would write, and fails when `packageManager` no
+longer names that npm; move `.nvmrc` and `packageManager` together.
+
+npm itself ignores `packageManager`, and Node 24 and 26 bundle npm 11 or 12. On those Nodes, make
+every change that rewrites a lock with npm 10.9.7: for example
+`npx --yes npm@10.9.7 install --package-lock-only` at the root, and
+`npx --yes npm@10.9.7 --prefix e2e install --package-lock-only` for the acceptance suite. Then
+install with `npm ci`, which never rewrites the lock. Where Corepack is available,
+`corepack enable npm` makes the `npm` command run the pinned version instead. Alternatively, push
+only the manifest change and apply the lock from that commit's `produce-locks` artifact (see
+[`dependency-majors-449.md`](dependency-majors-449.md) for how to verify and apply one); the job
+publishes no artifact when it fails, so it cannot repair a lock already rewritten by npm 11 or 12.
+
 ## Where things are documented
 
 | Question                                           | Document                                   |
