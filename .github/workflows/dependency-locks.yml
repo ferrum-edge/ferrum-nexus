@@ -49,9 +49,17 @@ jobs:
           # Dependabot runs the npm that `packageManager` names (it otherwise
           # uses its image's newest npm, whose locks drop the `peer: true`
           # markers this npm writes). Keep the pin on the npm that ships with
-          # the .nvmrc Node, so a Node bump has to move it too.
+          # the .nvmrc Node, so a Node bump has to move it too. Corepack's
+          # hardened form, `npm@<version>+sha512.<hash>`, names the same npm.
+          npm_version="$(cat lock-artifacts/provenance/npm-version.txt)"
           for manifest in package.json e2e/package.json; do
-            test "$(jq -er '.packageManager' "$manifest")" = "npm@$(cat lock-artifacts/provenance/npm-version.txt)"
+            declared="$(jq -r '.packageManager // ""' "$manifest")"
+            pinned="${declared#npm@}"
+            pinned="${pinned%%+*}"
+            if [ "$pinned" = "$declared" ] || [ "$pinned" != "$npm_version" ]; then
+              echo "::error file=$manifest::packageManager is '$declared'; expected npm@$npm_version (optionally +<hash>), the npm of Node $(cat .nvmrc) from .nvmrc"
+              exit 1
+            fi
           done
           printf '%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > lock-artifacts/provenance/run.txt
           # Keep the committed graphs as npm's resolution inputs. The fresh
