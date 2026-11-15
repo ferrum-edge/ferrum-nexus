@@ -30,8 +30,8 @@
   },
   "devDependencies": {
     "@vitest/coverage-v8": "5.1.0",
-    "concurrently": "^10.0.6",
-    "prettier": "^3.9.10"
+    "concurrently": "^10.0.7",
+    "prettier": "^3.10.1"
   },
   "overrides": {
     "shell-quote": "1.12.0",
