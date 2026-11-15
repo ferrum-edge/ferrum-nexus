@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, describe, it } from 'node:test';
+import { after, afterEach, before, describe, it } from 'node:test';
 import {
   aclGroupForApi,
   mcpAllGroupForApi,
@@ -139,6 +139,12 @@ describe('agent publishing and Nexus authorization', () => {
     client = await harness.registerUser({ role: 'client' });
   });
   after(async () => harness.close());
+
+  // A one-shot injection a test armed but never met would stay armed and fire
+  // inside a later test instead.
+  afterEach(() => {
+    harness.edge.clearInjections();
+  });
 
   async function publish(overrides: Record<string, unknown> = {}): Promise<PublishApiResponse> {
     sequence += 1;
