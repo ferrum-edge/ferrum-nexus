@@ -198,6 +198,7 @@ import {
   DEFAULT_BACKEND_READ_TIMEOUT_MS,
   DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
   DEFAULT_SPEC_ENFORCEMENT,
+  MAX_ACL_GROUPS_PER_CONSUMER,
   MAX_PAGE_SIZE,
   MAX_SPEC_PATHS,
   RATE_LIMIT_PLUGIN,
@@ -209,6 +210,7 @@ import {
   listenPathFor,
   roleAtLeast,
   testConsumerUsername,
+  withoutRetiredConfigKeys,
   type AccessDisruptionDetails,
   type Api,
   type ApiAgents,
@@ -254,6 +256,7 @@ import {
   LIVE_CREDENTIAL_STATUSES,
   type CredentialsService,
 } from '../credentials/service.js';
+import { isAclGroupLimitExceeded } from '../credentials/consumers.js';
 import {
   assertNamespaceServed,
   deploymentNotDispatched,
@@ -261,6 +264,7 @@ import {
   type FerrumAdminClient,
 } from '../ferrum-admin/index.js';
 import {
+  activeDeduplication,
   edgeTriggerFor,
   paletteGatewaySettings,
   palettePriority,
@@ -1979,8 +1983,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         plugin.plugin_name !== row.plugin_name ||
         plugin.enabled !== row.enabled ||
         !running.has(plugin.id) ||
+        // A config written before the palette dropped a key Edge removed
+        // still matches until the startup pass rewrites it (issue #727).
         !isDeepStrictEqual(
-          plugin.config,
+          plugin.config && withoutRetiredConfigKeys(row.plugin_name, plugin.config),
           paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit),
         ) ||
         !isDeepStrictEqual(plugin.trigger ?? null, edgeTriggerFor(row.trigger) ?? null)
@@ -3219,6 +3225,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // Before the first gateway write, so a refused publish costs nothing on
         // Edge and leaves nothing to roll back.
         await assertOwnerHasApiRoom(owner.id);
+        // A new proxy has no plugins of its own, so it runs every enabled
+        // global, and Edge would refuse an agent spec beside a global
+        // deduplicator (issue #730).
+        if (specEnforcement === 'routes' && agents) {
+          await assertAgentsCompose({ id: apiId, plugins: [] });
+        }
 
         const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
           pluginIds: [],
@@ -3613,6 +3625,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           throw conflict(
             'The gateway proxy changed while this update was waiting; reload and retry',
           );
+        }
+        // Before the undo stack and every gateway or consumer write: grantee
+        // enrollment, a conversion's proxy removal and the agent build itself
+        // all come after this (issue #730).
+        if (nextAgents && (agentsMoved || enforcementMoved) && proxyId) {
+          await assertAgentsCompose(proxyId);
+        }
+        // A conversion replays the live configs exactly (its recovery depends
+        // on them), so one still carrying a key Edge removed is cleaned first.
+        if (enforcementMoved && proxyId) {
+          await assertNoRetiredPaletteKeys(api, plugins);
         }
 
         // ── Which first-class configs are the portal's to change ──────────
@@ -5357,7 +5380,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   api_id: api.id,
                   plugin_name: entry.plugin_name,
                   enabled: entry.enabled,
-                  config: entry.config,
+                  // As written to the gateway above: without a key Edge removed.
+                  config: withoutRetiredConfigKeys(entry.plugin_name, entry.config),
                   trigger: entry.trigger,
                   ferrum_plugin_config_id: configId,
                 });
@@ -6320,6 +6344,62 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
+   * Refuse an agent deployment onto a proxy running `request_deduplication`,
+   * which Edge refuses beside the deployment's `mcp_gateway` (issue #730).
+   * `VALIDATION_FAILED` naming the config, instead of a gateway `400` after
+   * grantees were enrolled or a conversion took the live proxy down. Judged on
+   * the proxy's effective plugins, as Edge judges it: its own and associated
+   * proxy-group configs, or an enabled global none of them shadows.
+   */
+  async function assertAgentsCompose(
+    target: string | Pick<EdgeProxy, 'id' | 'plugins'>,
+  ): Promise<void> {
+    const proxy = typeof target === 'string' ? await edge.proxies.get(target) : target;
+    if (!proxy) return;
+    const deduplication = activeDeduplication(proxy, await edge.pluginConfigs.listAll());
+    if (!deduplication) return;
+    throw validationFailed(
+      'AI agents cannot be enabled while request deduplication runs on this API: the gateway ' +
+        'replays a stored response without the MCP gateway rewriting it, so it refuses the ' +
+        'pair. Turn off request deduplication first (or ask the gateway operator to, if they ' +
+        'added it)',
+      {
+        field: 'agents',
+        conflicting_plugin: 'request_deduplication',
+        plugin_config_id: deduplication.id,
+      },
+    );
+  }
+
+  /**
+   * Refuse a conversion while a palette config the API owns still carries a
+   * key Edge has removed (issue #727). A conversion rebuilds the proxy from
+   * the live configs verbatim, because its recovery journal compares them,
+   * so it would write the key back; saving the plugin again, or the startup
+   * pass, drops it first.
+   */
+  async function assertNoRetiredPaletteKeys(
+    api: ApiRecord,
+    onProxy: EdgePluginConfig[],
+  ): Promise<void> {
+    const owned = new Set(
+      (await store.apiPlugins.listByApi(api.id)).map((row) => row.ferrum_plugin_config_id),
+    );
+    const legacy = onProxy.find(
+      (plugin) =>
+        owned.has(plugin.id) &&
+        plugin.config !== null &&
+        withoutRetiredConfigKeys(plugin.plugin_name, plugin.config) !== plugin.config,
+    );
+    if (!legacy) return;
+    throw conflict(
+      `This API's ${legacy.plugin_name} plugin still carries a setting the gateway no longer ` +
+        'accepts; save that plugin again (or restart Nexus, which rewrites it), then convert',
+      { plugin_name: legacy.plugin_name, plugin_config_id: legacy.id },
+    );
+  }
+
+  /**
    * Whether a change from `previous` to `next` exposes tools to all-tools
    * grantees that may not hold the MCP-all group yet: agents turned on, or a
    * retained phase-1 selection (tools without exposure ids) given its ids.
@@ -6350,8 +6430,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const spec = await edge.apiSpecs.findByProxy(String(proxy.id));
       return preserveRouteValidator(routesSpecDocument(document, { proxy }), live, spec?.id);
     }
-    if (enroll) await enrollAllToolGrantees(api.id, subject);
     const proxyId = String(proxy.id);
+    if (enroll) {
+      // Checked before enrolling: a build Edge will refuse must not first put
+      // the MCP-all group on grantees' consumers (issue #730).
+      await assertAgentsCompose(proxyId);
+      await enrollAllToolGrantees(api.id, subject);
+    }
     const live = await edge.pluginConfigs.listByProxy(proxyId);
     const spec = await edge.apiSpecs.findByProxy(proxyId);
     return routesSpecDocument(document, {
@@ -6404,6 +6489,32 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const groups = (await edge.consumers.get(consumerId))?.acl_groups ?? [];
       if (!groups.includes(grant.acl_group) || groups.includes(group)) continue;
       actor ??= await store.users.findById(subject);
+      // A grantee whose consumer is at Edge's group cap cannot take the group.
+      // That is its own limit, never the provider's failure (issue #729): the
+      // skip is audited and the enablement goes on. Checked again under the
+      // consumer key below, where the count can no longer move.
+      const skip = async (count: number): Promise<void> => {
+        await store.transaction(async (tx) => {
+          await audit.forStore(tx).record(
+            { id: subject, role: actor?.role ?? null },
+            AuditAction.ACCESS_MCP_ENROLL_SKIP,
+            { type: 'grant', id: grant.id },
+            {
+              api_id: apiId,
+              user_id: grant.user_id,
+              application_id: grant.application_id,
+              consumer_id: consumerId,
+              acl_group: group,
+              acl_groups: count,
+              limit: MAX_ACL_GROUPS_PER_CONSUMER,
+            },
+          );
+        });
+      };
+      if (groups.length >= MAX_ACL_GROUPS_PER_CONSUMER) {
+        await skip(groups.length + 1);
+        continue;
+      }
       await store.transaction(async (tx) => {
         await audit.forStore(tx).record(
           { id: subject, role: actor?.role ?? null },
@@ -6418,22 +6529,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           },
         );
       });
-      await credentials.provisioner.mutateAclGroups(
-        consumerId,
-        (current) => {
-          // Re-checked under the consumer key: the REST group still proves
-          // membership, and the grantee is still active, so this cannot hand
-          // a group back to an account a disable has just stripped.
-          return current.includes(grant.acl_group) ? [...new Set([...current, group])] : current;
-        },
-        subject,
-        {
-          requireActiveUser: grant.user_id,
-          skipInactiveUser: true,
-          absentIsDone: true,
-          skipUnchanged: true,
-        },
-      );
+      try {
+        await credentials.provisioner.mutateAclGroups(
+          consumerId,
+          (current) => {
+            // Re-checked under the consumer key: the REST group still proves
+            // membership, and the grantee is still active, so this cannot hand
+            // a group back to an account a disable has just stripped.
+            return current.includes(grant.acl_group) ? [...new Set([...current, group])] : current;
+          },
+          subject,
+          {
+            requireActiveUser: grant.user_id,
+            skipInactiveUser: true,
+            absentIsDone: true,
+            skipUnchanged: true,
+          },
+        );
+      } catch (error) {
+        if (!isAclGroupLimitExceeded(error)) throw error;
+        const { acl_groups: count } = error.details as { acl_groups: number };
+        await skip(count);
+      }
     }
   }
 

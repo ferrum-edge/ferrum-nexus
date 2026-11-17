@@ -174,6 +174,7 @@ import {
   type SqlTransactionRunner,
 } from './sql-common.js';
 import { runWithTransactionRetry } from './transaction-retry.js';
+import { carriesConfigKey, configKeyProbe } from './config-keys.js';
 
 /* ── Row mappers ────────────────────────────────────────────────────────── */
 
@@ -1868,6 +1869,17 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         [apiId, pluginName],
       );
       return row ? mapApiPlugin(row) : null;
+    },
+
+    listCarryingConfigKeys: async (keys) => {
+      const probe = configKeyProbe(keys);
+      if (!probe) return [];
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM api_plugins WHERE ${probe.sql} ORDER BY api_id ASC, plugin_name ASC`,
+        probe.params,
+      );
+      return rows.map(mapApiPlugin).filter((row) => carriesConfigKey(row, keys));
     },
 
     upsert: async (input) => {

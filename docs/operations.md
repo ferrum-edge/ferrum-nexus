@@ -1099,6 +1099,41 @@ Nexus `v0.5.2` is qualified against Edge v0.9.15 only and has not been tested
 against v0.9.20, so upgrade Nexus promptly after Edge. **Rolling back** Edge to
 v0.9.17 is not qualified for the release that pins v0.9.20.
 
+### Palette keys the next Edge release removes
+
+Edge after v0.9.20 refuses `ip_restriction` `mode` and the retired
+`response_caching` `cache_key_include_query` and `cache_key_include_consumer` as
+unknown keys (Edge issue #7114). None of them changed what the gateway did, but
+earlier Nexus releases wrote `mode` on **every** `ip_restriction` saved from the
+portal. `ip_restriction` is fail-closed, so on that Edge release one such
+enabled config makes an Admin API write `400`, a reload fail, and a
+database-mode gateway refuse to start.
+
+This release stops writing them (a save that carries one is
+`400 VALIDATION_FAILED`, and every rebuild or restore drops them from the
+gateway config and the stored row), and at every start it finds, with one store
+query, each palette row in `FERRUM_NAMESPACE` that still carries one, and
+rewrites it: the gateway config the row owns (by recorded id, keeping operator
+fields such as `priority_override`) and the row itself. Each rewrite is an
+`api.plugin_set` audit row with `retired_keys` and no actor. A row it cannot
+rewrite yet is logged at `warn` and found again at the next start: the gateway
+was unreachable or the API changed under it, or the API has an unfinished
+enforcement conversion or gateway restore, whose recovery needs the live
+configs unchanged (finish or restore it first). An API whose proxy is already
+gone is not held back: only its row is rewritten. An enforcement conversion
+replays the live configs exactly, so it is refused with `409 CONFLICT` while a
+palette config of the API still carries a removed key; save that plugin again
+(or restart Nexus) first. The first run that finishes for
+the namespace with nothing failed or left over records one
+`api.plugin_keys_stripped` row targeting it.
+
+**Before upgrading Edge past v0.9.20**, run this release (or a later one)
+against the v0.9.20 gateway until `api.plugin_keys_stripped` for your
+`FERRUM_NAMESPACE` is in the audit log, and restart it once more afterwards if
+it logged a row left for later since. An `ip_restriction` or `response_caching`
+config an operator wrote by hand is not the portal's to change: remove those
+keys from it yourself, as the Edge upgrade guide says.
+
 ### Email
 
 All optional. SMTP can also be configured in **Admin → Settings**, and stored

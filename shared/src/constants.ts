@@ -45,6 +45,17 @@ export function apiIdFromAclGroup(group: string): string | null {
   return id.length > 0 ? id : null;
 }
 
+/**
+ * The most ACL groups Ferrum Edge accepts on one consumer
+ * (`MAX_ACL_GROUPS_PER_CONSUMER`; `acl_groups.maxItems` in its OpenAPI).
+ *
+ * Every grant puts its REST group, and on an agent API either the MCP-all group
+ * or one group per approved tool, on the grantee identity's single consumer,
+ * so a heavy identity can reach it. Nexus refuses a change that would take a
+ * consumer past it before the write (issue #729).
+ */
+export const MAX_ACL_GROUPS_PER_CONSUMER = 500;
+
 /** Prefix of the Edge consumer username owned by a Nexus user account. */
 export const CONSUMER_USERNAME_PREFIX = 'nexus-user-';
 

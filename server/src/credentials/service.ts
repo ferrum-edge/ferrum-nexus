@@ -258,7 +258,7 @@ import { isLeaseLost } from '../lib/lease-fence.js';
 import { userLifecycleLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { recoveryBlocksIssuance } from './account-recovery.js';
-import type { ConsumerProvisioner } from './consumers.js';
+import { assertAclGroupCap, type ConsumerProvisioner } from './consumers.js';
 
 /** Every credential type a Nexus user may hold, in UI order. */
 export const CREDENTIAL_TYPES = [
@@ -2614,6 +2614,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             (group) => apiIdFromAclGroup(group) !== null && !groups.includes(group),
           );
           if (restored.length === 0 && !stray) return;
+          // Edge refuses a consumer past its group cap with a 400 Nexus does
+          // not echo; refuse the rebuild here, before the write (issue #729).
+          assertAclGroupCap(live.id, groups, current);
           await edge.consumers.replace(live.id, consumerWithAclGroups(live, groups), subject, etag);
         });
       }

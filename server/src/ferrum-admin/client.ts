@@ -391,6 +391,15 @@ export interface FerrumAdminClient {
      */
     listByProxy(proxyId: string): Promise<EdgePluginConfig[]>;
     /**
+     * Every plugin config in the namespace, every scope, walking all pages.
+     *
+     * For a decision about what a proxy actually runs: Edge merges enabled
+     * globals and associated proxy-group configs into it as well as its own
+     * proxy-scoped ones (issue #730). Fails rather than answer from a scan the
+     * page cap cut short, like {@link listByProxy}.
+     */
+    listAll(): Promise<EdgePluginConfig[]>;
+    /**
      * `null` for a `404`. With `confirmedAbsence`, only for Edge's own
      * `Plugin config not found` answer: any other `404` is a protocol error,
      * for a caller that acts on the config being gone (issue #548).
@@ -2573,6 +2582,24 @@ export function createFerrumAdminClient(
           });
         }
         return attached;
+      },
+      async listAll(): Promise<EdgePluginConfig[]> {
+        const configs: EdgePluginConfig[] = [];
+        const complete = await scanPages<EdgePluginConfig>(
+          '/plugins/config',
+          EDGE_MAX_PAGE_SIZE,
+          MAX_PLUGIN_CONFIG_SCAN_PAGES,
+          (items) => {
+            configs.push(...items);
+            return true;
+          },
+        );
+        if (!complete) {
+          throw edgeError('Could not scan all gateway plugin configs', {
+            scanned: EDGE_MAX_PAGE_SIZE * MAX_PLUGIN_CONFIG_SCAN_PAGES,
+          });
+        }
+        return configs;
       },
       async get(id, options): Promise<EdgePluginConfig | null> {
         return call<EdgePluginConfig>('GET', `/plugins/config/${encodeURIComponent(id)}`, {

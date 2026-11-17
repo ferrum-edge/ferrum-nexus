@@ -193,6 +193,34 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   The e2e package's unused `test`, `test:sso` and `test:browser` scripts are
   gone too; run the suite with `./e2e/run.sh`.
 
+- **`ip_restriction` has no evaluation order any more** (#727). The palette
+  offered `mode` ("Evaluation order") and the form wrote it on every save, but it
+  never changed whether a request was admitted, Edge v0.9.20 deprecates it, and
+  the next Edge release refuses it (and the retired `response_caching`
+  `cache_key_include_query` / `cache_key_include_consumer`) as an unknown key,
+  which for a fail-closed plugin stops a database-mode gateway from starting. A
+  palette save that carries one of these keys is now `400 VALIDATION_FAILED`
+  (breaking for an API client that sent `mode`: drop it), every rebuild or
+  restore writes the gateway config and the stored row without them, and every
+  start finds (with one store query) and rewrites each palette config Nexus
+  wrote with one, on the gateway and in the store, leaving an API with an
+  unfinished conversion or restore for its recovery to finish first; the first
+  run that finishes for the namespace records `api.plugin_keys_stripped`. An
+  enforcement conversion, which replays live configs exactly, is refused with
+  `409 CONFLICT` while one of the API's palette configs still carries such a
+  key. Let that happen against
+  Edge v0.9.20 before upgrading Edge past it; see
+  [Palette keys the next Edge release removes](docs/operations.md#palette-keys-the-next-edge-release-removes).
+
+- **One contracts `PIN`, checked against the vendored tree** (#728).
+  `contracts/ferrum-contracts/SERVICE-MANIFEST-PIN` is merged into `PIN`, which
+  now uses the ferrum-contracts `docs/consumer-pins.md` format (`tag <tag>`,
+  `commit <sha>`, then `<sha256>  <path>` rows sorted by path). The `shared`
+  contract test parses it strictly and fails when a vendored file has no row, a
+  row names no file, or the tree holds a symbolic link, instead of comparing the
+  rows with a hard-coded list. The vendored directory is marked `-text` in
+  `.gitattributes` so no checkout rewrites its bytes.
+
 ### Removed
 
 - `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` and the `unattested-edge-opt-in` egress
@@ -204,6 +232,31 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   whole-type `consumers.replaceCredentials` (#676, #685).
 
 ### Fixed
+
+- **Nexus honours Edge's 500-ACL-group cap per consumer** (#729). Every grant
+  puts its REST group, and on an agent API the MCP-all group or one group per
+  approved tool, on the identity's one consumer, and Edge refuses a consumer with
+  more than 500 groups with a `400` Nexus does not echo for consumer writes. A
+  change that would take a consumer past the cap (an approval, a tool request
+  approval, an account re-enable, a consumer repair) is now refused before the
+  write with `409 CONFLICT` and `details.reason: "acl_group_limit"`, and an
+  approval refused this way leaves no group to take back. Turning AI agents on no longer fails
+  for the provider when one all-tools grantee's consumer is full: that grantee is
+  skipped and recorded as `access.mcp_enroll_skip`. The test gateway enforces the
+  cap.
+
+- **Request deduplication and AI agents are refused together up front** (#730).
+  Edge refuses `request_deduplication` beside an active `mcp_gateway`, which
+  every agent API runs. Switching deduplication on for an agent API, or turning
+  agents on (including a `docs_only` to `routes` conversion) while any enabled
+  deduplication config is on the proxy, failed at the gateway after Nexus had
+  enrolled grantees with the MCP-all group, or after a conversion had taken the
+  live proxy down and had to restore it. Both, and the first publish of an agent
+  API beside an operator's global deduplication config, are now
+  `400 VALIDATION_FAILED` before any gateway or consumer write, judged like Edge on the proxy's
+  effective plugins (its own, associated proxy-group ones, or an enabled global
+  none of them shadows), and the test gateway enforces Edge's composition rule
+  on plugin, proxy and `/api-specs` writes.
 
 - **The production image keeps dependencies npm installs inside a workspace.** The
   runtime stage copied only the root `node_modules`, so a lock that placed a server

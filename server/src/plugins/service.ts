@@ -74,27 +74,32 @@
  * and `spec_expose` with a route — and neither changes the machinery below.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   findProviderPlugin,
   isFirstClassPlugin,
   FIRST_CLASS_PLUGIN_FIELDS,
   MAX_PAGE_SIZE,
+  RETIRED_PLUGIN_CONFIG_KEYS,
+  withoutRetiredConfigKeys,
   type ApiPlugin,
   type ApiPluginTrigger,
   type ProviderPluginDescriptor,
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { AuditAction, type AuditService } from '../audit/service.js';
+import { AuditAction, SYSTEM_ACTOR, type AuditActor, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { ApiPluginRecord, NexusStore, UserRecord } from '../db/store.js';
 import {
+  activeMcpGateway,
   edgeTriggerFor,
   incompatiblePaletteSibling,
   paletteGatewaySettings,
   palettePriority,
 } from '../ferrum-admin/palette.js';
-import type { FerrumAdminClient } from '../ferrum-admin/index.js';
+import { DEFAULT_ADMIN_SUBJECT, type FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgePluginConfig } from '../ferrum-admin/types.js';
 import { conflict, notFound, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
@@ -131,7 +136,28 @@ export interface ApiPluginsService {
    * `key_auth` would read like the gateway does not have it.
    */
   descriptorFor(pluginName: string): ProviderPluginDescriptor;
+  /**
+   * Rewrite one palette row, and the gateway config it owns, without the keys
+   * Edge has removed (`RETIRED_PLUGIN_CONFIG_KEYS`, issue #727).
+   *
+   * The system's own change, made by the startup pass in
+   * `retired-keys.ts`: no actor and no ownership check. Only the config the
+   * row owns is written, under the same locks and undo stack as a provider's
+   * save; a config the row does not own (or a missing proxy) leaves only the
+   * row to rewrite.
+   *
+   * Resolves to `rewritten`, `clean` (nothing to remove), `gone` (the API or
+   * its row no longer exists, so nothing is left to clean) or `deferred`: the
+   * API has an unfinished conversion or restore, whose recovery journal holds
+   * the live plugin configs as they were and refuses to recover once one
+   * changes, so it is left for that recovery to finish first. Throws when the
+   * API or row changed under it; the next start tries again.
+   */
+  stripRetiredConfigKeys(apiId: Uuid, pluginName: string): Promise<RetiredKeysOutcome>;
 }
+
+/** What {@link ApiPluginsService.stripRetiredConfigKeys} did with one row. */
+export type RetiredKeysOutcome = 'rewritten' | 'clean' | 'gone' | 'deferred';
 
 /** Dependencies of {@link createApiPluginsService}. */
 export interface ApiPluginsServiceDeps {
@@ -236,6 +262,46 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
   }
 
   /**
+   * Refuse to switch `request_deduplication` on where Edge would refuse it
+   * beside the API's `mcp_gateway` (issue #730): an API with AI agents on, or
+   * a proxy whose effective plugins (its own, associated proxy-group ones, or
+   * enabled globals) include an MCP gateway. Called under the proxy lease,
+   * before any gateway write, so the provider gets a reason to act on instead
+   * of a gateway `400` and a rollback.
+   */
+  async function assertDeduplicationComposes(target: { apiId: Uuid; proxyId: string }) {
+    const api = await store.apis.findById(target.apiId);
+    if (api?.agents) {
+      throw validationFailed(
+        'Request deduplication cannot run on an API with AI agents: the gateway replays a ' +
+          'stored response without the MCP gateway rewriting it, so it refuses the pair. Turn ' +
+          'off AI agents for this API first',
+        {
+          plugin_name: 'request_deduplication',
+          conflicting_plugin: 'mcp_gateway',
+          field: 'agents',
+        },
+      );
+    }
+    // What the proxy runs, an operator's global or proxy-group gateway too.
+    const proxy = await edge.proxies.get(target.proxyId);
+    const gateway = proxy ? activeMcpGateway(proxy, await edge.pluginConfigs.listAll()) : undefined;
+    if (!gateway) return;
+    throw validationFailed(
+      'Request deduplication cannot run on this API: its proxy runs an MCP gateway the portal ' +
+        'did not configure (a gateway operator set it on the proxy, a proxy group or the whole ' +
+        'gateway), and the gateway refuses deduplication beside it because a replay skips its ' +
+        'response rewrite. Ask the gateway operator to remove or disable that MCP gateway first',
+      {
+        plugin_name: 'request_deduplication',
+        conflicting_plugin: 'mcp_gateway',
+        conflicting_plugin_config_id: gateway.id,
+        conflicting_scope: gateway.scope,
+      },
+    );
+  }
+
+  /**
    * Replay a failed palette write's undo stack, newest first, and record what
    * that achieved.
    *
@@ -247,7 +313,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
    * put back and nothing to record.
    */
   async function unwind(input: {
-    actor: UserRecord;
+    actor: AuditActor;
     target: { apiId: Uuid; proxyId: string };
     operation: 'set' | 'remove';
     pluginName: string;
@@ -373,6 +439,11 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
         // removes it. Without it a MongoDB deletion committing between the
         // parent read and the upsert left an orphan row (#563).
         return binder.withProxy(target.proxyId, async () => {
+          if (pluginName === 'request_deduplication' && input.enabled) {
+            // Under the canonical proxy lease an agents change also holds, so
+            // neither side can turn on between this check and the write.
+            await assertDeduplicationComposes(target);
+          }
           try {
             const written = await binder.reconcileOptionalPluginLocked(
               target.proxyId,
@@ -555,6 +626,124 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
           throw error;
         }
       });
+    },
+
+    async stripRetiredConfigKeys(apiId, pluginName) {
+      const retired = RETIRED_PLUGIN_CONFIG_KEYS[pluginName];
+      if (!retired) return 'clean';
+      const api = await store.apis.findById(apiId);
+      if (!api) return 'gone';
+      const proxyId = api.ferrum_proxy_id;
+      const namespace = config.edge.namespace;
+      const rewrite = async (): Promise<RetiredKeysOutcome> => {
+        // Re-read under the locks: a restore that rebuilt the API on a new
+        // proxy since the read above re-pointed both the API and the row, and
+        // this pass must not write the old proxy's config id back over them.
+        const current = await store.apis.findById(apiId);
+        if (!current) return 'gone';
+        if (current.ferrum_proxy_id !== proxyId) {
+          throw conflict('The API moved to another gateway proxy while its keys were stripped');
+        }
+        // An unfinished conversion or restore owns the deployment: its journal
+        // holds the plugin configs as they were and refuses to recover once one
+        // changes. Recovery comes first; a later start strips the keys. An API
+        // whose proxy is gone (`repair_required` with no proxy id) has no live
+        // config to protect, so only a journal defers it.
+        if (
+          (proxyId !== null && current.gateway_state !== 'deployed') ||
+          (await store.settings.get(`gateway_recovery:${namespace}:${apiId}`)) !== null ||
+          (await store.settings.get(`gateway_restore_cleanup:${namespace}:${apiId}`)) !== null
+        ) {
+          return 'deferred';
+        }
+        const row = await store.apiPlugins.find(apiId, pluginName);
+        if (!row) return 'gone';
+        const removed = retired.filter((key) => Object.hasOwn(row.config, key));
+        if (removed.length === 0) return 'clean';
+        const stripped = withoutRetiredConfigKeys(pluginName, row.config);
+        const existing = proxyId
+          ? ownedConfig(row, await binder.listByProxy(proxyId), pluginName)
+          : undefined;
+        const undo: (() => Promise<void>)[] = [];
+        try {
+          if (proxyId && existing) {
+            // The row's own settings, unchanged but for the removed keys; the
+            // binder carries the operator's fields (`priority_override`) over.
+            await binder.reconcileOptionalPluginLocked(
+              proxyId,
+              existing,
+              pluginName,
+              paletteGatewaySettings(pluginName, stripped, config.edge.rateLimit),
+              DEFAULT_ADMIN_SUBJECT,
+              undo,
+              {
+                enabled: row.enabled,
+                trigger: edgeTriggerFor(row.trigger),
+                priorityOverride: palettePriority(pluginName),
+              },
+            );
+          }
+          await store.transaction(async (tx) => {
+            // A provider save, a restore or a deletion since the reads above
+            // owns the row now; the next start looks again.
+            const parent = await tx.apis.findById(apiId);
+            const current = await tx.apiPlugins.find(apiId, pluginName);
+            if (
+              parent?.ferrum_proxy_id !== proxyId ||
+              !current ||
+              current.ferrum_plugin_config_id !== row.ferrum_plugin_config_id ||
+              !isDeepStrictEqual(current.config, row.config)
+            ) {
+              throw conflict('The palette plugin changed while its removed keys were stripped');
+            }
+            await tx.apiPlugins.upsert({
+              api_id: apiId,
+              plugin_name: pluginName,
+              enabled: row.enabled,
+              config: stripped,
+              trigger: row.trigger,
+              ferrum_plugin_config_id: row.ferrum_plugin_config_id,
+            });
+            await audit.forStore(tx).record(
+              SYSTEM_ACTOR,
+              AuditAction.API_PLUGIN_SET,
+              { type: 'api', id: apiId },
+              {
+                plugin_name: pluginName,
+                enabled: row.enabled,
+                config_keys: Object.keys(stripped).sort(),
+                trigger: row.trigger,
+                replaced: true,
+                plugin_config_id: existing?.id ?? null,
+                retired_keys: removed,
+              },
+            );
+          });
+          return 'rewritten';
+        } catch (error) {
+          if (proxyId) {
+            await unwind({
+              actor: SYSTEM_ACTOR,
+              target: { apiId, proxyId },
+              operation: 'set',
+              pluginName,
+              pluginConfigId: existing?.id ?? null,
+              undo,
+              error,
+              ip: null,
+            });
+          }
+          // An API deleted while this ran has no row left to clean.
+          if (!(await store.apis.findById(apiId))) return 'gone';
+          throw error;
+        }
+      };
+      if (!proxyId) return rewrite();
+      // The lock order a provider's save takes: palette composition, then the
+      // canonical proxy lease, so the two cannot interleave.
+      return edge.serializePerKey(`proxy-palette:${proxyId}`, () =>
+        binder.withProxy(proxyId, rewrite),
+      );
     },
   };
 }

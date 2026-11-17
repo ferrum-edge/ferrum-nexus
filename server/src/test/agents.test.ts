@@ -5,6 +5,7 @@ import {
   mcpAllGroupForApi,
   mcpToolGroupForApi,
   consumerUsernameForUser,
+  MAX_ACL_GROUPS_PER_CONSUMER,
   MAX_SPEC_OPERATIONS,
   type ApiAgents,
   type ApiErrorBody,
@@ -16,6 +17,7 @@ import {
 } from '@ferrum-nexus/shared';
 import type { NexusStore, TransactionOptions } from '../db/store.js';
 import type { EdgePluginConfigWrite } from '../ferrum-admin/types.js';
+import { assertAclGroupCap, isAclGroupLimitExceeded } from '../credentials/consumers.js';
 import { stampAgentDocument } from '../publishing/agents.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -1170,6 +1172,348 @@ describe('agent publishing and Nexus authorization', () => {
     assert.equal(enabled.statusCode, 200, enabled.body);
     assert.equal(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)), false);
     assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+  });
+
+  /** Gateway writes (anything but a read) recorded since `before`. */
+  function writesSince(before: number): string[] {
+    return harness.edge.requests
+      .slice(before)
+      .filter((request) => request.method !== 'GET')
+      .map((request) => `${request.method} ${request.path}`);
+  }
+
+  /** Pad a grantee's consumer with distinct operator groups up to `count` in all. */
+  function fillGroups(subject: TestSession, count: number): void {
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(subject.user.id));
+    assert.ok(consumer);
+    const held = consumer.acl_groups.length;
+    consumer.acl_groups = [
+      ...consumer.acl_groups,
+      ...Array.from({ length: count - held }, (_, index) => `operator:team-${held + index}`),
+    ];
+  }
+
+  // Issue #729: Edge refuses a consumer with more than 500 ACL groups.
+  it('enables agents past an all-tools grantee at the group cap and audits the skip', async () => {
+    const { api } = await publish({ agents: null });
+    const full = await harness.registerUser({ role: 'client' });
+    const fullGrant = await approveFor(full, api.id);
+    const roomy = await harness.registerUser({ role: 'client' });
+    const roomyGrant = await approveFor(roomy, api.id);
+    fillGroups(full, MAX_ACL_GROUPS_PER_CONSUMER);
+
+    const enabled = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.equal(groupsOf(full).length, MAX_ACL_GROUPS_PER_CONSUMER);
+    assert.equal(groupsOf(full).includes(mcpAllGroupForApi(api.id)), false);
+    assert.ok(groupsOf(roomy).includes(mcpAllGroupForApi(api.id)));
+    const skipped = (await harness.auditRows('access.mcp_enroll_skip')).filter(
+      (row) => row.target_id === fullGrant.id,
+    );
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0]?.details.limit, MAX_ACL_GROUPS_PER_CONSUMER);
+    assert.equal(skipped[0]?.details.acl_group, mcpAllGroupForApi(api.id));
+    assert.equal(await countAudit('access.mcp_enroll', fullGrant.id), 0);
+    assert.equal(await countAudit('access.mcp_enroll', roomyGrant.id), 1);
+  });
+
+  it('skips a grantee that reaches the group cap under its consumer key', async () => {
+    const { api } = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    // Room for one more group when enrollment reads the consumer; a
+    // concurrent change takes it before the write, so the cap check under the
+    // consumer key is the one that refuses.
+    fillGroups(grantee, MAX_ACL_GROUPS_PER_CONSUMER - 1);
+    const provisioner = harness.services.credentials.provisioner;
+    const mutate = provisioner.mutateAclGroups.bind(provisioner);
+    provisioner.mutateAclGroups = async (...args) => {
+      provisioner.mutateAclGroups = mutate;
+      fillGroups(grantee, MAX_ACL_GROUPS_PER_CONSUMER);
+      return mutate(...args);
+    };
+    try {
+      const enabled = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${api.id}`,
+        payload: { agents: AGENTS },
+      });
+      assert.equal(enabled.statusCode, 200, enabled.body);
+    } finally {
+      provisioner.mutateAclGroups = mutate;
+    }
+    assert.equal(groupsOf(grantee).length, MAX_ACL_GROUPS_PER_CONSUMER);
+    assert.equal(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)), false);
+    const skipped = (await harness.auditRows('access.mcp_enroll_skip')).filter(
+      (row) => row.target_id === grant.id,
+    );
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0]?.details.acl_groups, MAX_ACL_GROUPS_PER_CONSUMER + 1);
+  });
+
+  it('refuses an approval past the group cap before any consumer write', async () => {
+    const first = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    await approveFor(grantee, first.api.id);
+    // An all-tools agent grant adds two groups: the REST group and MCP-all.
+    fillGroups(grantee, MAX_ACL_GROUPS_PER_CONSUMER - 1);
+    const groupsBefore = groupsOf(grantee);
+    const { api } = await publish();
+    const request = await harness.authed(grantee, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: api.id, justification: 'Use agent tools' },
+    });
+    assert.equal(request.statusCode, 201, request.body);
+    const requestId = request.json<CreateAccessRequestResponse>().access_request.id;
+    const before = harness.edge.requests.length;
+    const refused = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.equal(refused.statusCode, 409, refused.body);
+    const body = JSON.parse(refused.body) as ApiErrorBody;
+    assert.equal(body.error.code, 'CONFLICT');
+    assert.deepEqual(body.error.details, {
+      reason: 'acl_group_limit',
+      limit: MAX_ACL_GROUPS_PER_CONSUMER,
+      acl_groups: MAX_ACL_GROUPS_PER_CONSUMER + 1,
+      consumer_id: harness.edge.consumerByUsername(consumerUsernameForUser(grantee.user.id))?.id,
+    });
+    assert.deepEqual(
+      writesSince(before).filter((write) => write.startsWith('PUT /consumers/')),
+      [],
+    );
+    assert.deepEqual(groupsOf(grantee), groupsBefore);
+    assert.equal(
+      await harness.store.grants.findActiveByApiAndUser(api.id, grantee.user.id, null),
+      null,
+    );
+  });
+
+  // Issue #730: Edge refuses request_deduplication beside an active mcp_gateway.
+  it('refuses request_deduplication on an API with AI agents before any gateway write', async () => {
+    const { api } = await publish();
+    const before = harness.edge.requests.length;
+    const refused = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/plugins/request_deduplication`,
+      payload: { config: {} },
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+    assert.deepEqual(writesSince(before), []);
+    assert.equal(await harness.store.apiPlugins.find(api.id, 'request_deduplication'), null);
+  });
+
+  it('refuses to enable agents while request_deduplication runs, before enrolling anyone', async () => {
+    const { api } = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    const deduplication = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/plugins/request_deduplication`,
+      payload: { config: {} },
+    });
+    assert.equal(deduplication.statusCode, 200, deduplication.body);
+    const groupsBefore = groupsOf(grantee);
+    const before = harness.edge.requests.length;
+
+    const refused = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+    assert.deepEqual(writesSince(before), []);
+    assert.deepEqual(groupsOf(grantee), groupsBefore);
+    assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+    assert.equal((await harness.store.apis.findById(api.id))?.agents, null);
+  });
+
+  it('refuses a docs_only conversion that enables agents beside deduplication, proxy untouched', async () => {
+    const { api } = await publish({ agents: null, spec_enforcement: 'docs_only' });
+    const proxyId = api.ferrum_proxy_id;
+    assert.ok(proxyId);
+    const deduplication = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/plugins/request_deduplication`,
+      payload: { config: {} },
+    });
+    assert.equal(deduplication.statusCode, 200, deduplication.body);
+    const before = harness.edge.requests.length;
+
+    const refused = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { spec_enforcement: 'routes', agents: AGENTS },
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+    assert.deepEqual(writesSince(before), []);
+    const current = await harness.store.apis.findById(api.id);
+    assert.equal(current?.spec_enforcement, 'docs_only');
+    assert.equal(current?.gateway_state, 'deployed');
+    assert.ok(harness.edge.proxies.get(`nexus/${proxyId}`));
+  });
+
+  // Review sol F1: Edge merges an enabled global into every proxy that has no
+  // enabled deduplication config of its own, so an operator's global counts.
+  it('refuses to enable agents beside an operator global request_deduplication', async () => {
+    const { api } = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    const groupsBefore = groupsOf(grantee);
+    const id = 'operator-global-deduplication';
+    harness.edge.pluginConfigs.set(`nexus/${id}`, {
+      id,
+      namespace: 'nexus',
+      plugin_name: 'request_deduplication',
+      scope: 'global',
+      enabled: true,
+      config: {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    try {
+      const before = harness.edge.requests.length;
+      const refused = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${api.id}`,
+        payload: { agents: AGENTS },
+      });
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+      assert.deepEqual(writesSince(before), []);
+    } finally {
+      harness.edge.pluginConfigs.delete(`nexus/${id}`);
+    }
+    assert.deepEqual(groupsOf(grantee), groupsBefore);
+    assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+  });
+
+  // Review round 2, sol F2: the test gateway refuses a spec write beside an
+  // associated proxy-group deduplicator, as Edge does, and keeps the association.
+  it('has the test gateway refuse an agent spec beside a proxy-group deduplicator', async () => {
+    const { api } = await publish();
+    const proxyId = api.ferrum_proxy_id;
+    assert.ok(proxyId);
+    const id = 'operator-group-deduplication';
+    harness.edge.pluginConfigs.set(`nexus/${id}`, {
+      id,
+      namespace: 'nexus',
+      plugin_name: 'request_deduplication',
+      scope: 'proxy_group',
+      enabled: true,
+      config: {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy && Array.isArray(proxy.plugins));
+    proxy.plugins = [...proxy.plugins, { plugin_config_id: id }];
+    try {
+      const revised = await revise(api.id, '2');
+      assert.equal(revised.statusCode, 400, revised.body);
+      assert.equal(errorCode(revised.body), 'EDGE_REJECTED_SPEC');
+      const kept = harness.edge.proxies.get(`nexus/${proxyId}`)?.plugins as {
+        plugin_config_id: string;
+      }[];
+      assert.ok(kept.some((entry) => entry.plugin_config_id === id));
+    } finally {
+      harness.edge.pluginConfigs.delete(`nexus/${id}`);
+      const current = harness.edge.proxies.get(`nexus/${proxyId}`);
+      if (current && Array.isArray(current.plugins)) {
+        current.plugins = current.plugins.filter(
+          (entry) => (entry as { plugin_config_id?: unknown }).plugin_config_id !== id,
+        );
+      }
+    }
+  });
+
+  // Review round 2, dsf F3: a new proxy runs every enabled global, so the
+  // first publish of an agent API is checked too.
+  it('refuses to publish an agent API beside an operator global request_deduplication', async () => {
+    const id = 'operator-global-deduplication-publish';
+    harness.edge.pluginConfigs.set(`nexus/${id}`, {
+      id,
+      namespace: 'nexus',
+      plugin_name: 'request_deduplication',
+      scope: 'global',
+      enabled: true,
+      config: {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    try {
+      sequence += 1;
+      const slug = `agent-${sequence}`;
+      const before = harness.edge.requests.length;
+      const refused = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: {
+          name: 'Agent API',
+          slug,
+          spec: JSON.stringify(DOCUMENT),
+          auth_plugin: 'key_auth',
+          requestable: true,
+          visibility: 'public',
+          spec_enforcement: 'routes',
+          agents: AGENTS,
+        },
+      });
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+      const deployed = writesSince(before).filter(
+        (write) => write.includes('/proxies') || write.includes('/api-specs'),
+      );
+      assert.deepEqual(deployed, []);
+      assert.equal(await harness.store.apis.findBySlug(slug), null);
+    } finally {
+      harness.edge.pluginConfigs.delete(`nexus/${id}`);
+    }
+  });
+
+  // Review dsf F2: the cap every group writer applies, consumer repair included.
+  it('applies the group cap only to a write that grows a consumer past it', () => {
+    const groups = (count: number) => Array.from({ length: count }, (_, index) => `g${index}`);
+    assert.doesNotThrow(() => assertAclGroupCap('consumer', groups(500)));
+    assert.throws(() => assertAclGroupCap('consumer', groups(501)), isAclGroupLimitExceeded);
+    assert.doesNotThrow(() => assertAclGroupCap('consumer', groups(501), groups(502)));
+  });
+
+  // Review dsf F2: the account re-enable writes groups without
+  // mutateAclGroups, and is held to the same cap.
+  it('refuses a re-enable that would take a consumer past the group cap', async () => {
+    const { api } = await publish();
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    await setStatus(grantee, 'disabled');
+    // An explicit subset this long cannot be approved; written directly, it is
+    // a consumer the rebuild would take to 601 groups.
+    const tools = Array.from({ length: 600 }, (_, index) => `tool-${index}`);
+    const widened = await harness.store.grants.updateIfStatus(grant.id, 'active', {
+      approved_tools: tools,
+    });
+    assert.ok(widened);
+    // The re-enable runs this for an account it has just set active.
+    await harness.store.users.update(grantee.user.id, { status: 'active' });
+    const before = harness.edge.requests.length;
+    await assert.rejects(
+      harness.services.credentials.restoreGatewayAccess(grantee.user.id, admin.user.id),
+      (error: unknown) => isAclGroupLimitExceeded(error),
+    );
+    assert.deepEqual(
+      writesSince(before).filter((write) => write.startsWith('PUT /consumers/')),
+      [],
+    );
   });
 
   it('carries explicit subsets across spec revisions and prunes only removed tools', async () => {

@@ -46,9 +46,10 @@ whose data-plane attestation proves every expected data plane public-only (see t
   `provisioned-by` change only in provenance; and
   `fixtures/invalid-expectations.json` only in other contracts' entries. The nine
   changed files are copied byte for byte; every other vendored fixture is
-  unchanged. `PIN` still records 123 adopted paths and hashes;
-  `SERVICE-MANIFEST-PIN` moves to the same tag, and the shared manifest v1 schema
-  and fixtures are byte-identical to `contracts-edge-0.9.12`.
+  unchanged. The shared manifest v1 schema and fixtures are byte-identical to
+  `contracts-edge-0.9.12`. Since #728 one `PIN`, in the ferrum-contracts
+  `consumer-pins.md` format, records all 136 vendored paths and hashes, the
+  service-manifest set included; the separate `SERVICE-MANIFEST-PIN` is gone.
 - The released owner OpenAPI SHA-256 is
   `8fa7232d96e1094578dee03cfa1966a4fdd9df77b8e027a9625f56ce6bfd355e`, the
   document the plugin catalog pins for every `config_schema` pointer.

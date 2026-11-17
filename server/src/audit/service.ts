@@ -196,6 +196,14 @@ export const AuditAction = {
    */
   API_PLUGIN_ROLLBACK: 'api.plugin_rollback',
   /**
+   * The startup pass finished for a namespace with every palette config that
+   * carried a key Edge has removed (`ip_restriction.mode`, issue #727)
+   * rewritten, each with its own `api.plugin_set` row naming `retired_keys`.
+   * Written by the system once per namespace, targeting it; the pass itself
+   * still runs at every start.
+   */
+  API_PLUGIN_KEYS_STRIPPED: 'api.plugin_keys_stripped',
+  /**
    * A `spec_enforcement` conversion could neither finish nor put the original
    * proxy back, so the API has no gateway object at all.
    *
@@ -341,6 +349,14 @@ export const AuditAction = {
    * that one. Committed before the consumer write.
    */
   ACCESS_MCP_ENROLL: 'access.mcp_enroll',
+  /**
+   * An agents enablement skipped an all-tools grantee whose consumer cannot
+   * take the API's MCP-all group: it already holds the 500 ACL groups Edge
+   * allows one consumer (issue #729). The provider's enablement goes on; the
+   * grantee keeps REST access and gets the group from a later rebuild once it
+   * has room.
+   */
+  ACCESS_MCP_ENROLL_SKIP: 'access.mcp_enroll_skip',
   /**
    * Exposure ids this grant's explicit subset held stopped being published: an
    * agents edit removed their tools (`reason: 'tool_removed'`) or renamed them
@@ -621,6 +637,10 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_PLUGIN_REMOVE_START]: INTENT,
   [AuditAction.API_PLUGIN_REMOVE]: TRANSACTIONAL,
   [AuditAction.API_PLUGIN_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.API_PLUGIN_KEYS_STRIPPED]: rowOnly(
+    'A once-per-namespace marker: each rewrite committed its own api.plugin_set row before ' +
+      'it, and a run that found nothing to rewrite still records that the namespace is clean.',
+  ),
   [AuditAction.API_GATEWAY_REPAIR_REQUIRED]: postCommit(
     `${COMPENSATION_TRAIL} The reconciliation flag, which is a change of its own, records ` +
       'it in its transaction.',
@@ -660,6 +680,9 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
       'repair that found nothing stranded still records that it ran, so later starts skip it.',
   ),
   [AuditAction.ACCESS_MCP_ENROLL]: INTENT,
+  [AuditAction.ACCESS_MCP_ENROLL_SKIP]: rowOnly(
+    'Records a write that was deliberately not made; there is no portal change to commit with it.',
+  ),
   [AuditAction.ACCESS_TOOLS_PRUNE]: TRANSACTIONAL,
   [AuditAction.ACCESS_TOOLS_REQUEST]: TRANSACTIONAL,
   [AuditAction.ACCESS_TOOLS_APPROVE]: TRANSACTIONAL,

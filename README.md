@@ -287,13 +287,14 @@ Cross-repo contracts — shared vocabularies, JSON schemas and fixtures — live
 Ferrum Edge vocabularies it speaks under
 [`contracts/ferrum-contracts/`](contracts/ferrum-contracts/), pinned by tag
 (`contracts-edge-0.9.20`) and per-file SHA-256 in
-[`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN). The `shared` contract test
-verifies every digest and checks Nexus's local names against the vendored vocabularies; the
-vendoring and bump procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md). The read-only
-[service-manifest preview](docs/service-manifest-preview.md) separately pins its shared v1
-schema and fixtures to `contracts-edge-0.9.20`, commit
-`39da322083044c2e92617209e62983c92387f0ad`, in
-[`contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`](contracts/ferrum-contracts/SERVICE-MANIFEST-PIN).
+[`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN), in the format ferrum-contracts
+[`docs/consumer-pins.md`](https://github.com/ferrum-edge/ferrum-contracts/blob/main/docs/consumer-pins.md)
+defines. The `shared` contract test parses `PIN` strictly, fails on any vendored file without a
+row (or a row without a file, or a symbolic link), verifies every digest and checks Nexus's local
+names against the vendored vocabularies; the vendoring and bump procedure is in
+[`CONTRIBUTING.md`](CONTRIBUTING.md). The read-only
+[service-manifest preview](docs/service-manifest-preview.md)'s shared v1 schema and fixtures are
+rows of the same `PIN`.
 A shared contract changes in ferrum-contracts first and is then re-vendored here — never edited
 locally.
 

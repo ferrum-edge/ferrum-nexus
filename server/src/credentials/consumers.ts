@@ -54,6 +54,7 @@
  */
 
 import {
+  MAX_ACL_GROUPS_PER_CONSUMER,
   MAX_PAGE_SIZE,
   consumerUsernameForApplication,
   consumerUsernameForUser,
@@ -64,7 +65,14 @@ import type { NexusConfig } from '../config/index.js';
 import type { ConsumerRecord, NexusStore, UserRecord } from '../db/store.js';
 import { consumerWithAclGroups, type FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgeConsumer } from '../ferrum-admin/types.js';
-import { conflict, edgeError, notFound, userDisabled } from '../lib/errors.js';
+import {
+  conflict,
+  edgeError,
+  isNexusError,
+  notFound,
+  userDisabled,
+  type NexusError,
+} from '../lib/errors.js';
 
 /** Provisioning and ACL-group maintenance for Edge consumers. */
 export interface ConsumerProvisioner {
@@ -176,6 +184,56 @@ export interface ConsumerProvisionerDeps {
   config: NexusConfig;
   store: NexusStore;
   edge: FerrumAdminClient;
+}
+
+/** `details.reason` of the `CONFLICT` {@link aclGroupLimitExceeded} raises. */
+export const ACL_GROUP_LIMIT_REASON = 'acl_group_limit';
+
+/**
+ * The refusal for a change that would give one consumer more ACL groups than
+ * Edge accepts (issue #729): `409 CONFLICT` naming the limit and the count the
+ * change would have reached, raised before the write instead of the gateway's
+ * `400`, which a consumer write never echoes because it may carry credentials.
+ */
+export function aclGroupLimitExceeded(consumerId: string, groups: number): NexusError {
+  return conflict(
+    `This identity would hold ${groups} gateway access groups, more than the ` +
+      `${MAX_ACL_GROUPS_PER_CONSUMER} the gateway allows one consumer; give up access ` +
+      'it no longer needs, approve all tools instead of a long tool list, or use a ' +
+      'separate application',
+    {
+      reason: ACL_GROUP_LIMIT_REASON,
+      limit: MAX_ACL_GROUPS_PER_CONSUMER,
+      acl_groups: groups,
+      consumer_id: consumerId,
+    },
+  );
+}
+
+/**
+ * Refuse a write that would take a consumer from `current` groups to more than
+ * Edge's cap. A write that shrinks or keeps the count is never refused, so a
+ * consumer an operator overfilled can still lose groups. Every Nexus writer of
+ * a consumer's groups calls this before the write: `mutateAclGroups`, the
+ * account re-enable and consumer repair.
+ */
+export function assertAclGroupCap(
+  consumerId: string,
+  next: readonly string[],
+  current: readonly string[] = [],
+): void {
+  if (next.length > MAX_ACL_GROUPS_PER_CONSUMER && next.length > current.length) {
+    throw aclGroupLimitExceeded(consumerId, next.length);
+  }
+}
+
+/** Whether `error` is the refusal {@link aclGroupLimitExceeded} raises. */
+export function isAclGroupLimitExceeded(error: unknown): error is NexusError {
+  return (
+    isNexusError(error) &&
+    error.code === 'CONFLICT' &&
+    (error.details as { reason?: unknown } | undefined)?.reason === ACL_GROUP_LIMIT_REASON
+  );
 }
 
 /** Stable provisioning key, disjoint from gateway-assigned consumer ids. */
@@ -308,6 +366,10 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         }
         const { consumer: current, etag } = snapshot;
         const groups = change([...(current.acl_groups ?? [])]);
+        // Edge refuses a consumer past its group cap with a `400` Nexus cannot
+        // echo; refuse a change that grows the set past it here instead. A
+        // change that shrinks or keeps the count is never refused.
+        assertAclGroupCap(ferrumConsumerId, groups, current.acl_groups ?? []);
         if (
           options?.skipUnchanged &&
           !options.afterWrite &&

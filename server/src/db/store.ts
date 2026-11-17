@@ -1215,6 +1215,19 @@ export interface ApiPluginRepo {
   /** One plugin by its `(api, plugin_name)` key. */
   find(apiId: Uuid, pluginName: string): Promise<ApiPluginRecord | null>;
   /**
+   * Every row, of any API in any namespace, whose plugin is a key of `keys`
+   * and whose config holds one of the config keys listed for it, ordered by
+   * `api_id` then `plugin_name`.
+   *
+   * The startup pass's probe for configs that still carry a key Edge removed
+   * (issue #727): one query over the named plugins' rows, so a store with
+   * nothing left to rewrite costs one query rather than one per API. Exact:
+   * a narrowing text match is re-checked against the parsed config.
+   */
+  listCarryingConfigKeys(
+    keys: Readonly<Record<string, readonly string[]>>,
+  ): Promise<ApiPluginRecord[]>;
+  /**
    * Create or replace the row for `(api_id, plugin_name)` in one statement.
    *
    * Upsert rather than create+update because the pair is unique and the route

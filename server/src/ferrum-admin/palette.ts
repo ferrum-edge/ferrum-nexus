@@ -1,7 +1,12 @@
-import type { ApiPluginTrigger } from '@ferrum-nexus/shared';
+import { withoutRetiredConfigKeys, type ApiPluginTrigger } from '@ferrum-nexus/shared';
 
 import type { EdgeRateLimitSyncConfig } from '../config/index.js';
-import type { EdgePluginConfig, EdgePluginSettings, EdgePluginTrigger } from './types.js';
+import type {
+  EdgePluginConfig,
+  EdgePluginSettings,
+  EdgePluginTrigger,
+  EdgeProxy,
+} from './types.js';
 
 /**
  * Compression mutates request headers before deduplication fingerprints them.
@@ -28,6 +33,65 @@ export function incompatiblePaletteSibling(
     return pluginName === 'compression' ? proposed >= other : other >= proposed;
   });
   return incompatible ? otherName : undefined;
+}
+
+/**
+ * The enabled `name` configs Edge merges into `proxy`, resolved the way its
+ * runtime merge (and `request_deduplication::validate_composition`) resolves
+ * them: the proxy's associated configs (proxy-scoped ones naming this proxy,
+ * and proxy-group ones), or, when none of those is enabled, every enabled
+ * global of that name. `configs` is the whole namespace (`listAll`), so an
+ * operator's global or proxy-group config counts as well as a proxy's own.
+ */
+export function effectiveInstances(
+  proxy: Pick<EdgeProxy, 'id' | 'plugins'>,
+  configs: EdgePluginConfig[],
+  name: string,
+): EdgePluginConfig[] {
+  const byId = new Map(configs.map((config) => [config.id, config]));
+  const local = (proxy.plugins ?? [])
+    .map((association) => byId.get(association.plugin_config_id))
+    .filter(
+      (config): config is EdgePluginConfig =>
+        config !== undefined &&
+        config.enabled &&
+        config.plugin_name === name &&
+        (config.scope === 'proxy' ? config.proxy_id === proxy.id : config.scope === 'proxy_group'),
+    );
+  if (local.length > 0) return local;
+  return configs.filter(
+    (config) => config.scope === 'global' && config.enabled && config.plugin_name === name,
+  );
+}
+
+/**
+ * An effective `request_deduplication` on the proxy, or `undefined`.
+ *
+ * Edge refuses `request_deduplication` beside an active `mcp_gateway` on one
+ * proxy (`DYNAMIC_RESPONSE_PRESENTATION_PLUGINS`): a replay skips the MCP
+ * gateway's response rewrite, which follows live upstream state. An AI-agents
+ * API carries that `mcp_gateway`, so the two are refused here, both ways,
+ * before any gateway write (issue #730). Any effective config counts, an
+ * operator's included: Edge judges the proxy, not who wrote the config.
+ */
+export function activeDeduplication(
+  proxy: Pick<EdgeProxy, 'id' | 'plugins'>,
+  configs: EdgePluginConfig[],
+): EdgePluginConfig | undefined {
+  return effectiveInstances(proxy, configs, 'request_deduplication')[0];
+}
+
+/**
+ * An effective `mcp_gateway` on the proxy whose hooks run, or `undefined`: its
+ * own `config.enabled` is not `false`, judged after shadowing, as Edge does.
+ */
+export function activeMcpGateway(
+  proxy: Pick<EdgeProxy, 'id' | 'plugins'>,
+  configs: EdgePluginConfig[],
+): EdgePluginConfig | undefined {
+  return effectiveInstances(proxy, configs, 'mcp_gateway').find(
+    (config) => config.config?.enabled !== false,
+  );
 }
 
 /**
@@ -60,13 +124,17 @@ export function edgeTriggerFor(trigger: ApiPluginTrigger | null): EdgePluginTrig
  * dedupe window has to be shared across replicas or two Nexus instances
  * deduplicate against two different memories, so an operator-configured Redis
  * endpoint is folded in here rather than being stored on the row. Every other
- * plugin is written exactly as the provider configured it.
+ * plugin is written as the provider configured it, less any key Edge has
+ * removed: a row saved before the palette dropped one (`ip_restriction.mode`)
+ * is replayed without it, so a rebuild never writes what the next Edge
+ * release refuses (issue #727).
  */
 export function paletteGatewaySettings(
   pluginName: string,
-  settings: Record<string, unknown>,
+  saved: Record<string, unknown>,
   sync: EdgeRateLimitSyncConfig,
 ): EdgePluginSettings {
+  const settings = withoutRetiredConfigKeys(pluginName, saved);
   if (pluginName !== 'request_deduplication') return settings;
   if (sync.syncMode !== 'redis' || sync.redisUrl === undefined) return settings;
   return {

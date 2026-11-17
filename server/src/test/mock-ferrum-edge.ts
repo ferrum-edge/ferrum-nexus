@@ -262,8 +262,42 @@ export function mockCacheStorageAllowed(authenticated: boolean, cacheControl = '
   return !authenticated || directives.some((value) => CACHEABLE_DIRECTIVE.test(value));
 }
 
+/**
+ * Edge's `MAX_ACL_GROUPS_PER_CONSUMER`, written out rather than imported from
+ * Nexus so the mock keeps modelling the gateway if Nexus's copy drifts.
+ */
+const EDGE_MAX_ACL_GROUPS = 500;
+
+/** Edge's `Consumer::validate` cap on `acl_groups`, as its `400` text. */
+export function aclGroupsProblem(groups: unknown): string | null {
+  if (!Array.isArray(groups) || groups.length <= EDGE_MAX_ACL_GROUPS) return null;
+  return `acl_groups must not have more than ${EDGE_MAX_ACL_GROUPS} entries (got ${groups.length})`;
+}
+
+/**
+ * Edge's `request_deduplication::validate_composition`: an enabled
+ * deduplicator beside an `mcp_gateway` whose hooks run (outer `enabled` on,
+ * inner `config.enabled` not `false`) is refused on one proxy.
+ */
+export function mockDeduplicationCompositionError(
+  plugins: Record<string, unknown>[],
+): string | null {
+  const active = plugins.filter((plugin) => plugin.enabled !== false);
+  const deduplicating = active.some((plugin) => plugin.plugin_name === 'request_deduplication');
+  const mcp = active.some(
+    (plugin) =>
+      plugin.plugin_name === 'mcp_gateway' &&
+      (plugin.config as Record<string, unknown> | null | undefined)?.enabled !== false,
+  );
+  return deduplicating && mcp
+    ? 'request_deduplication cannot be composed with `mcp_gateway` on this proxy'
+    : null;
+}
+
 /** Model the compression/deduplication composition rule, including equal priorities. */
 export function mockPaletteCompositionError(plugins: Record<string, unknown>[]): string | null {
+  const dynamic = mockDeduplicationCompositionError(plugins);
+  if (dynamic) return dynamic;
   const active = plugins.filter((plugin) => plugin.enabled !== false);
   const compressors = active.filter((plugin) => plugin.plugin_name === 'compression');
   const deduplicators = active.filter((plugin) => plugin.plugin_name === 'request_deduplication');
@@ -833,7 +867,10 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
   ],
   request_size_limiting: ['max_bytes'],
   response_size_limiting: ['max_bytes', 'require_buffered_check'],
-  ip_restriction: ['allow', 'deny', 'mode'],
+  // Edge main (after v0.9.20) refuses `ip_restriction.mode` and the two
+  // `response_caching` cache-key switches as unknown keys (issue #727); the
+  // mock refuses them too, so no test can pass on a body the next Edge refuses.
+  ip_restriction: ['allow', 'deny'],
   bot_detection: [
     'blocked_patterns',
     'allow_list',
@@ -864,8 +901,6 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'respect_cache_control',
     'respect_no_cache',
     'vary_by_headers',
-    'cache_key_include_query',
-    'cache_key_include_consumer',
     'anonymous_caller_scope',
     'add_cache_status_header',
     'invalidate_on_unsafe_methods',
@@ -1483,12 +1518,6 @@ function palettePluginError(pluginName: string, config: Record<string, unknown>)
       const deny = Array.isArray(config.deny) ? config.deny : [];
       if (allow.length === 0 && deny.length === 0) {
         return "ip_restriction: at least one of 'allow' or 'deny' must be non-empty";
-      }
-      if (
-        config.mode !== undefined &&
-        !['allow_first', 'deny_first'].includes(String(config.mode))
-      ) {
-        return `ip_restriction: unsupported mode '${String(config.mode)}'`;
       }
       // Edge v0.9.19: a prefix length is canonical decimal (`/8`, not `/08`).
       for (const entry of [...allow, ...deny]) {
@@ -2408,6 +2437,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        const groupsProblem = aclGroupsProblem(body.acl_groups);
+        if (groupsProblem) return fail(res, 400, groupsProblem);
         const submitted = normaliseCredentials(body.credentials);
         const credentials =
           submitted === null ? null : prepareCredentials(submitted, maxCredentials);
@@ -2464,6 +2495,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        const groupsProblem = aclGroupsProblem(body.acl_groups);
+        if (groupsProblem) return fail(res, 400, groupsProblem);
         const merged = mergeCredentialsOnReplace(stored.credentials, body.credentials);
         const credentials = merged === null ? null : prepareCredentials(merged, maxCredentials);
         if (credentials === null) return fail(res, 400, 'Invalid consumer credentials');
@@ -2668,13 +2701,37 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
-    const composition = mockPaletteCompositionError(
-      [...seen]
-        .map((id) => pluginConfigs.get(key(namespace, id)))
-        .filter((config): config is Record<string, unknown> => config !== undefined),
-    );
+    const associated = [...seen]
+      .map((id) => pluginConfigs.get(key(namespace, id)))
+      .filter((config): config is Record<string, unknown> => config !== undefined);
+    const composition =
+      mockPaletteCompositionError(associated) ??
+      mockDeduplicationCompositionError(withEffectiveGlobals(namespace, associated));
     if (composition) errors.push(composition);
     return errors.length === 0 ? null : `Invalid proxy plugin associations: ${errors.join('; ')}`;
+  }
+
+  /**
+   * `scoped` plus the enabled globals none of its enabled configs shadows by
+   * name: the set Edge's runtime merge, and its deduplication composition
+   * check, resolve for a proxy.
+   */
+  function withEffectiveGlobals(
+    namespace: string,
+    scoped: Record<string, unknown>[],
+    configs: Iterable<Record<string, unknown>> = pluginConfigs.values(),
+  ): Record<string, unknown>[] {
+    const shadowed = new Set(
+      scoped.filter((config) => config.enabled !== false).map((config) => config.plugin_name),
+    );
+    const globals = [...configs].filter(
+      (config) =>
+        config.namespace === namespace &&
+        config.scope === 'global' &&
+        config.enabled !== false &&
+        !shadowed.has(config.plugin_name),
+    );
+    return [...scoped, ...globals];
   }
 
   /**
@@ -3109,6 +3166,53 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   /**
+   * The plugin configs a spec write keeps on its proxy: every proxy-scoped one
+   * naming it, and every proxy-group one the proxy already associates, other
+   * than the configs the spec itself owns (which the write regenerates).
+   */
+  function survivingConfigIds(namespace: string, proxyId: string, specId: string | null): string[] {
+    const existing = proxies.get(key(namespace, proxyId));
+    const associated = new Set(
+      (Array.isArray(existing?.plugins) ? existing.plugins : [])
+        .filter(isRecord)
+        .map((association) => String(association.plugin_config_id)),
+    );
+    return [...pluginConfigs.values()]
+      .filter(
+        (config) =>
+          config.namespace === namespace &&
+          (specId === null || config.api_spec_id !== specId) &&
+          (config.proxy_id === proxyId ||
+            (config.scope === 'proxy_group' && associated.has(String(config.id)))),
+      )
+      .map((config) => String(config.id));
+  }
+
+  /**
+   * Edge's `/api-specs` composition refusal (`422`, `resource_type:
+   * plugin_composition`) for the plugins a spec write would leave on its
+   * proxy: the embedded ones plus every config the spec does not own.
+   */
+  function specCompositionProblem(
+    namespace: string,
+    proxyId: string,
+    specId: string | null,
+    embedded: Record<string, unknown>[],
+  ): Record<string, unknown> | null {
+    const survivors = survivingConfigIds(namespace, proxyId, specId)
+      .map((id) => pluginConfigs.get(key(namespace, id)))
+      .filter((config): config is Record<string, unknown> => config !== undefined);
+    const problem = mockDeduplicationCompositionError(
+      withEffectiveGlobals(namespace, [...embedded, ...survivors]),
+    );
+    if (!problem) return null;
+    return {
+      error: 'Spec validation failed',
+      failures: [{ resource_type: 'plugin_composition', errors: [problem] }],
+    };
+  }
+
+  /**
    * Insert (or re-insert) the proxy a spec owns and regenerate its plugins.
    *
    * Hand-owned plugin configs and their associations are untouched by a
@@ -3144,14 +3248,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       return Object.keys(labels).length === 0 ? {} : { labels };
     }
-    const survivors = [...pluginConfigs.values()]
-      .filter(
-        (config) =>
-          config.namespace === namespace &&
-          config.proxy_id === proxyId &&
-          config.api_spec_id !== specId,
-      )
-      .map((config) => String(config.id));
+    const survivors = survivingConfigIds(namespace, proxyId, specId);
     for (const [configKey, config] of pluginConfigs) {
       if (config.namespace === namespace && config.api_spec_id === specId) {
         pluginConfigs.delete(configKey);
@@ -3299,6 +3396,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         return fail(res, 409, `A spec already exists for proxy '${proxyId}'`);
       }
 
+      const composition = specCompositionProblem(namespace, proxyId, null, checked.plugins);
+      if (composition) return send(res, 422, composition);
+
       const spec: StoredApiSpec = {
         id: randomUUID(),
         namespace,
@@ -3367,6 +3467,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           ],
         });
       }
+      const composition = specCompositionProblem(
+        namespace,
+        existing.proxy_id,
+        existing.id,
+        checked.plugins,
+      );
+      if (composition) return send(res, 422, composition);
       const proxy = proxies.get(key(namespace, existing.proxy_id));
       existing.document = document;
       existing.spec_version = typeof document.openapi === 'string' ? document.openapi : '3.1.0';
@@ -3625,17 +3732,25 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         created_at: existing.created_at,
         updated_at: nowIso(),
       };
+      // Edge validates the graph as it would be after the write, every proxy
+      // the config reaches: its associations, or all of them for a global.
+      const candidate = (configId: string): Record<string, unknown> | undefined =>
+        configId === id ? updated : pluginConfigs.get(key(namespace, configId));
+      // `updated` carries the replacement's scope, which `body` names.
+      const updatesGlobal = body.scope === 'global';
+      const globals = [...pluginConfigs.values()]
+        .filter((config) => config.namespace === namespace && String(config.id) !== id)
+        .concat(updatesGlobal ? [updated] : []);
       for (const proxy of proxies.values()) {
         if (proxy.namespace !== namespace || !Array.isArray(proxy.plugins)) continue;
         const ids = proxy.plugins.filter(isRecord).map((entry) => String(entry.plugin_config_id));
-        if (!ids.includes(id)) continue;
-        const composition = mockPaletteCompositionError(
-          ids
-            .map((configId) =>
-              configId === id ? updated : pluginConfigs.get(key(namespace, configId)),
-            )
-            .filter((config): config is Record<string, unknown> => config !== undefined),
-        );
+        if (!ids.includes(id) && !updatesGlobal) continue;
+        const scoped = ids
+          .map(candidate)
+          .filter((config): config is Record<string, unknown> => config !== undefined);
+        const composition =
+          mockPaletteCompositionError(scoped) ??
+          mockDeduplicationCompositionError(withEffectiveGlobals(namespace, scoped, globals));
         if (composition) return fail(res, 400, composition);
       }
       // The kept target comes from the replacement alone: Edge rejects a

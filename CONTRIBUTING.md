@@ -92,11 +92,13 @@ The full list of architecture rules is in [CLAUDE.md](CLAUDE.md).
 - Ferrum's shared contracts — vocabularies, JSON schemas and fixtures — live in the org
   [contract store](https://github.com/ferrum-edge/ferrum-contracts). Ferrum Edge vocabularies
   adopted by Nexus are vendored under
-  [`contracts/ferrum-contracts/`](contracts/ferrum-contracts/) and pinned in its `PIN` file. To
-  bump the pin, download the adopted vocabulary files from the new immutable
-  `contracts-edge-*` tag, update the tag, peeled commit SHA and each file's SHA-256 in `PIN`, then
-  run CI. The shared contract test verifies the recorded digests and checks Nexus's local entries
-  against the vendored vocabularies. Keep the vendored files out of formatting so their bytes stay
+  [`contracts/ferrum-contracts/`](contracts/ferrum-contracts/) and pinned in its one `PIN` file,
+  in the format ferrum-contracts `docs/consumer-pins.md` defines (`tag <tag>`, `commit <sha>`,
+  then one `<sha256>  <path>` row per vendored file, sorted by path). To bump the pin, copy the
+  adopted files from the new immutable `contracts-edge-*` tag (`git show <tag>:<path>`), update
+  the tag, peeled commit SHA and every row in `PIN`, then run CI. The shared contract test parses
+  `PIN` strictly, fails when a vendored file has no row or a row names no file, verifies the
+  recorded digests and checks Nexus's local entries against the vendored vocabularies. Keep the vendored files out of formatting so their bytes stay
   identical to the tagged release.
 - A new audit event must be:
   - added to the catalog in [docs/security.md](docs/security.md#10-audit-event-catalog);

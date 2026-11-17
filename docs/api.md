@@ -2064,6 +2064,17 @@ restore, or a `PATCH` that changes `agents` or `spec_enforcement`. Any other `PA
 API published before this limit, and `agents: null` turns its agents off so it can be
 revised again.
 
+Edge refuses `request_deduplication` beside the `mcp_gateway` an agent API runs, so a
+`PATCH` that turns agents on (or a conversion to `routes` that carries them) while the
+API's proxy runs an enabled `request_deduplication` (its own config, the portal's or an
+operator's, an associated proxy-group one, or an enabled global none of those shadows,
+as Edge resolves it) is refused with `400 VALIDATION_FAILED` and
+`details: { field: "agents", conflicting_plugin: "request_deduplication", plugin_config_id }`
+before any gateway or consumer write: no grantee is enrolled and a conversion does not
+take the live proxy down (issue #730). Turn deduplication off first. Publishing an API
+with `agents` in `routes` mode is refused the same way when an enabled global
+`request_deduplication` would run on its new proxy.
+
 Catalog `ApiSummary` includes the selection for tool metadata. MCP is served by
 Edge at `<invoke_url>/mcp` with tools named `<slug>.<name>`. A normal Nexus account
 or application credential goes in its existing auth header. The identity must
@@ -2390,6 +2401,11 @@ and rebuilds it under the **same proxy id**, carrying the proxy document and
 every plugin config across with their ids. For those few round trips
 `listen_path` answers `404`; the audit row has `proxy_rebuilt: true`. Every
 other setting, and every spec revision, is an in-place write.
+Because the rebuild carries the configs across exactly, a conversion is
+refused with `409 CONFLICT` (naming the plugin) while one of the API's palette
+configs still carries a key Edge has removed, such as `ip_restriction` `mode`;
+save that plugin again, or restart Nexus so its startup pass rewrites it, then
+convert (issue #727).
 
 **An API without a gateway deployment takes catalog edits only.** While
 `ferrum_proxy_id` is `null` (after a reconciliation repair or a failed
@@ -2758,6 +2774,12 @@ The palette itself — which plugins exist and what each accepts — is the stat
   values of 3005 and 4060, so compression finishes before deduplication
   fingerprints the request. An operator's overrides survive saves; an
   incompatible pair is `400 VALIDATION_FAILED` naming both plugins.
+- Switching `request_deduplication` on is `400 VALIDATION_FAILED` (with
+  `conflicting_plugin: "mcp_gateway"`) on an API with AI agents on, or whose
+  proxy runs an enabled `mcp_gateway` (its own, an associated proxy-group one,
+  or an unshadowed global): Edge refuses the pair, because a replay
+  skips the MCP gateway's response rewrite (issue #730). It can still be saved
+  switched off.
 - `request_deduplication` with `enforce_required: true` is admission policy, and it
   runs on HTTP requests only. From Edge v0.9.15 the gateway therefore refuses a
   native WebSocket request to that API with `403` and a native gRPC request with a
@@ -2804,6 +2826,12 @@ default list), a content type with `*` anywhere but a whole subtype (`text/*`
 is accepted), and an `ip_restriction` prefix length that is not canonical
 decimal (`/08`).
 
+Keys Edge has removed are refused with `400 VALIDATION_FAILED` like any other
+unknown key: `ip_restriction` `mode` (it never changed whether a request was
+admitted) and the retired `response_caching` `cache_key_include_query` and
+`cache_key_include_consumer`. A row saved with one before they were removed
+is written to the gateway without it (issue #727).
+
 Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
 `request_size_limiting`, `response_size_limiting`, `compression`,
 `correlation_id` (and the retired `response_caching`) — refuse a trigger with
@@ -2820,7 +2848,7 @@ _provider_, owner or admin → `{ "plugin": ApiPlugin }`. Creates or replaces.
 ```json
 {
   "enabled": true,
-  "config": { "allow": ["203.0.113.0/24"], "mode": "allow_first" },
+  "config": { "allow": ["203.0.113.0/24"], "deny": ["203.0.113.7"] },
   "trigger": { "methods": ["POST"], "path_prefix": "/nexus/billing/invoices" }
 }
 ```
@@ -2963,7 +2991,10 @@ identity already holds an active grant, the API is retired or no longer
 requestable, the API is still recorded under another gateway namespace — it was
 published before a `FERRUM_NAMESPACE` change, and only publishing it again
 under the current namespace, as a new API, makes access approvable — or the
-request's application is disabled; the request stays `pending`); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
+request's application is disabled; the request stays `pending`; or the approval
+would give the identity's consumer more than the 500 ACL groups Edge allows one
+consumer, with `details: { reason: "acl_group_limit", limit: 500, acl_groups,
+consumer_id }`, refused before the consumer write, issue #729); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
 addition and returns the request to `pending` where possible; the
 `access.approve_rollback` audit row records the outcome (with
 `acl_group_possibly_applied: true` when the gateway write was not
@@ -3033,8 +3064,13 @@ account re-enable and consumer repair rebuild it. Only a change that turns agent
 or that gives a selection published before tool subsets its exposure IDs, enrolls
 existing all-tools grantees, committing an `access.mcp_enroll` intent row before each
 consumer write. Enrollment skips disabled grantees (their grant rows remain, and
-re-enable rebuilds their groups) and consumers missing from the gateway, so no
-grantee's state can fail a provider's build. Ordinary spec revisions, rollbacks, agents
+re-enable rebuilds their groups), consumers missing from the gateway, and consumers
+that already hold the 500 ACL groups Edge allows one consumer (recorded as
+`access.mcp_enroll_skip`; issue #729), so no grantee's state can fail a provider's
+build. Every grant puts its REST group, and either the MCP-all group or one group per
+approved tool, on the identity's one consumer, so any change that would take a consumer
+past 500 groups (an approval, a tool request approval, a re-enable or a repair) is
+refused with `409 CONFLICT` and `details.reason: "acl_group_limit"` before the write. Ordinary spec revisions, rollbacks, agents
 edits, restores and conversions read no grantee consumer from the gateway. See the
 [migration notes](mcp-subsets-migration-draft.md).
 

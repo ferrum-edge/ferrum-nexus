@@ -110,7 +110,7 @@ import {
 import { approvalGroupsForIdentity } from '../access/approval-groups.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
-import { canonicalConsumerLockKey } from '../credentials/consumers.js';
+import { assertAclGroupCap, canonicalConsumerLockKey } from '../credentials/consumers.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { edgeUnavailable, forbidden, validationFailed } from '../lib/errors.js';
@@ -684,6 +684,9 @@ export function createGatewayReconciliationService(
               const staleReadAt = nowIso();
               const stale = await liveCredentialIds(store, staleId);
 
+              // Refused before the consumer exists again, rather than by the
+              // gateway's unechoed 400 (issue #729).
+              assertAclGroupCap(staleId, groups);
               const { consumer, created } = await edge.consumers.ensure(
                 {
                   username: row.ferrum_username,
