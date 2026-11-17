@@ -3487,10 +3487,12 @@ its entry by material, never by position; every other write uses
   write.
 
 Either refusal is `409 CONFLICT` to the caller. Nothing was deleted or appended,
-a retirement the attempt itself started is withdrawn (a row that was already
-`retiring` from an earlier unconfirmed outcome stays `retiring`), and Nexus
-does not retry: the user reads the credentials again and repeats the
-operation. A consumer read without a strong `ETag` (Edge's cached fallback when
+and Nexus does not retry: the user reads the credentials again and repeats the
+operation. A refusal proves only that Nexus's delete did not run, not that the
+entry survived (another writer may have removed it), so the row goes back to
+`active` only when a credential-complete read still holds the entry's material.
+Otherwise, and always for `basicauth`, it stays `retiring` and the next call on
+the pair settles it. A consumer read without a strong `ETag` (Edge's cached fallback when
 its store is unreadable) is refused before anything is decided from it. On Edge
 v0.9.20, a re-read that fails counts as a definite non-write too: the
 unconditional write was never sent, so nothing is reclaimed or settled as
