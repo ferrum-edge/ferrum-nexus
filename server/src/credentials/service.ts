@@ -4061,5 +4061,4 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     }
     await edge.consumers.deleteCredentialAt(consumerId, type, located.index, subject, located.etag);
   }
-
 }
