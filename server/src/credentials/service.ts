@@ -441,6 +441,8 @@ interface AppendedEntryLocation {
   arrayLength: number;
   /** The read's consumer tag, which conditions the take-back delete. */
   etag: string;
+  /** Fingerprint of every entry's material, in order; empty when ambiguous. */
+  fingerprints: string[];
 }
 
 /** Generated plaintext plus the Edge entry that carries it. */
@@ -1380,6 +1382,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     appendIndex: number;
     /** Fingerprint of the material that was appended. */
     fingerprint: string;
+    /**
+     * A rotation's: fingerprint of the entry its paired delete was retiring.
+     * When that entry is gone, the delete landed after all and the
+     * replacement is the pair's only entry, so it is left for its owner.
+     */
+    retiredFingerprint?: string;
     actorId: Uuid;
   }): Promise<AppendWithdrawal> {
     const unproved: AppendWithdrawal = {
@@ -1402,6 +1410,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     if (index === 'absent') {
       // Not on the gateway: the append never landed, or the entry is gone.
       return { withdrawn: true, arrayAsAppended: false, arrayLength, located: false };
+    }
+    if (
+      input.retiredFingerprint !== undefined &&
+      !read.fingerprints.includes(input.retiredFingerprint)
+    ) {
+      return { withdrawn: false, arrayAsAppended: false, arrayLength, located: true };
     }
     const arrayAsAppended = index === input.appendIndex && arrayLength === input.appendIndex + 1;
     try {
@@ -1465,21 +1479,26 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     if (snapshot === null || snapshot === undefined) return snapshot;
     const entries = snapshot.consumer.credentials[input.type];
     const etag = snapshot.etag;
-    if (entries === undefined) return { index: 'absent', arrayLength: 0, etag };
-    if (!Array.isArray(entries)) return { index: 'ambiguous', arrayLength: 0, etag };
-    const matches: number[] = [];
-    for (const [position, entry] of entries.entries()) {
+    if (entries === undefined) return { index: 'absent', arrayLength: 0, etag, fingerprints: [] };
+    if (!Array.isArray(entries)) {
+      return { index: 'ambiguous', arrayLength: 0, etag, fingerprints: [] };
+    }
+    const fingerprints: string[] = [];
+    for (const entry of entries) {
       const material =
         typeof entry === 'object' && entry !== null
           ? credentialMaterial(entry as EdgeCredentialEntry, input.type)
           : null;
-      if (material === null) return { index: 'ambiguous', arrayLength: entries.length, etag };
-      if (crypto.fingerprint(material) === input.fingerprint) matches.push(position);
+      if (material === null) {
+        return { index: 'ambiguous', arrayLength: entries.length, etag, fingerprints: [] };
+      }
+      fingerprints.push(crypto.fingerprint(material));
     }
-    let index: AppendedEntryLocation['index'] = 'ambiguous';
-    if (matches.length === 0) index = 'absent';
-    else if (matches.length === 1) index = matches[0]!;
-    return { index, arrayLength: entries.length, etag };
+    const first = fingerprints.indexOf(input.fingerprint);
+    let index: AppendedEntryLocation['index'] = first;
+    if (first === -1) index = 'absent';
+    else if (fingerprints.lastIndexOf(input.fingerprint) !== first) index = 'ambiguous';
+    return { index, arrayLength: entries.length, etag, fingerprints };
   }
 
   /**
@@ -3178,6 +3197,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               type,
               appendIndex: length,
               fingerprint: created.credential.fingerprint,
+              retiredFingerprint: current.fingerprint,
               actorId: user.id,
             });
             if (withdrawn) {
