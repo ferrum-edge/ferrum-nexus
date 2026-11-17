@@ -1420,6 +1420,8 @@ describe('agent publishing and Nexus authorization', () => {
       approved_tools: tools,
     });
     assert.ok(widened);
+    // The re-enable runs this for an account it has just set active.
+    await harness.store.users.update(grantee.user.id, { status: 'active' });
     const before = harness.edge.requests.length;
     await assert.rejects(
       harness.services.credentials.restoreGatewayAccess(grantee.user.id, admin.user.id),
