@@ -62,6 +62,24 @@ Dex is pinned by digest in [`docker-compose.yml`](docker-compose.yml), with its 
 alongside. Its configuration is [`dex/config.yaml`](dex/config.yaml): in-memory storage, one static
 client, and two static password users, one in the `nexus-providers` group.
 
+## Checking against Edge main
+
+The pin keeps this suite on a released Edge, so it cannot see a breaking change that has landed
+only on Edge `main`. The **Edge Main Drift** workflow (`.github/workflows/edge-main-drift.yml`)
+runs this suite against Edge `main` as an early warning (ferrum-edge/ferrum-contracts#76). It runs
+weekly and on `workflow_dispatch`, and it is never a required check or a qualification.
+
+- It resolves the `latest` tag of `ghcr.io/ferrum-edge/ferrum-edge`, which Edge's Main Latest Image
+  workflow moves only to a `main` commit whose push CI passed, to its digest. It verifies that
+  workflow's keyless Cosign signature on the digest and reads the Edge commit from the image's
+  revision label, which must be on `main`'s history.
+- It runs `./e2e/run.sh` with `FERRUM_EDGE_IMAGE` exported as that digest, the override described
+  above.
+- A failure opens or updates one issue labelled `edge-main-drift`, and the next clean run closes
+  it. The issue names the Edge commit, how far `main` has moved past it, and the commit of
+  ferrum-contracts' `main_branch_delta`, with whether that record covers the checked commit. Only
+  the issue job holds `issues: write`, with the repository's own `GITHUB_TOKEN`.
+
 ## What each suite asserts
 
 **`src/dataplane.test.ts`** — what the gateway permits:

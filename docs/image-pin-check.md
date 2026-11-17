@@ -54,3 +54,10 @@ that do not expose an `image` or `container` key in a recognizable key position
 are outside the scan. If a workflow Docker command contains a backslash-escaped
 single or double quote, the checker fails closed for that command because the
 shell-word scanner does not resolve escaped-quote boundaries.
+
+The Edge Main Drift workflow (`.github/workflows/edge-main-drift.yml`) runs the acceptance suite
+against an Edge image chosen at run time: the digest of Edge's signed `main` image, which is never
+a literal in the file. It holds that reference in `EDGE_MAIN_IMAGE` and assigns it to
+`FERRUM_EDGE_IMAGE` only inside the `run:` script, after checking that it is a
+`ghcr.io/ferrum-edge/ferrum-edge@sha256:<64 hex>` reference whose Cosign signature was verified.
+The workflow-`env:` rule above is unchanged; that assignment is a shell value the scan does not read.
