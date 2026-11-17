@@ -271,16 +271,33 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
    */
   async function assertDeduplicationComposes(target: { apiId: Uuid; proxyId: string }) {
     const api = await store.apis.findById(target.apiId);
-    if (!api?.agents) {
-      // What the proxy runs, an operator's global or proxy-group gateway too.
-      const proxy = await edge.proxies.get(target.proxyId);
-      if (!proxy || !activeMcpGateway(proxy, await edge.pluginConfigs.listAll())) return;
+    if (api?.agents) {
+      throw validationFailed(
+        'Request deduplication cannot run on an API with AI agents: the gateway replays a ' +
+          'stored response without the MCP gateway rewriting it, so it refuses the pair. Turn ' +
+          'off AI agents for this API first',
+        {
+          plugin_name: 'request_deduplication',
+          conflicting_plugin: 'mcp_gateway',
+          field: 'agents',
+        },
+      );
     }
+    // What the proxy runs, an operator's global or proxy-group gateway too.
+    const proxy = await edge.proxies.get(target.proxyId);
+    const gateway = proxy ? activeMcpGateway(proxy, await edge.pluginConfigs.listAll()) : undefined;
+    if (!gateway) return;
     throw validationFailed(
-      'Request deduplication cannot run on an API with AI agents: the gateway replays a ' +
-        'stored response without the MCP gateway rewriting it, so it refuses the pair. Turn ' +
-        'off AI agents for this API first',
-      { plugin_name: 'request_deduplication', conflicting_plugin: 'mcp_gateway', field: 'agents' },
+      'Request deduplication cannot run on this API: its proxy runs an MCP gateway the portal ' +
+        'did not configure (a gateway operator set it on the proxy, a proxy group or the whole ' +
+        'gateway), and the gateway refuses deduplication beside it because a replay skips its ' +
+        'response rewrite. Ask the gateway operator to remove or disable that MCP gateway first',
+      {
+        plugin_name: 'request_deduplication',
+        conflicting_plugin: 'mcp_gateway',
+        conflicting_plugin_config_id: gateway.id,
+        conflicting_scope: gateway.scope,
+      },
     );
   }
 
@@ -629,9 +646,11 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
         }
         // An unfinished conversion or restore owns the deployment: its journal
         // holds the plugin configs as they were and refuses to recover once one
-        // changes. Recovery comes first; a later start strips the keys.
+        // changes. Recovery comes first; a later start strips the keys. An API
+        // whose proxy is gone (`repair_required` with no proxy id) has no live
+        // config to protect, so only a journal defers it.
         if (
-          current.gateway_state !== 'deployed' ||
+          (proxyId !== null && current.gateway_state !== 'deployed') ||
           (await store.settings.get(`gateway_recovery:${namespace}:${apiId}`)) !== null ||
           (await store.settings.get(`gateway_restore_cleanup:${namespace}:${apiId}`)) !== null
         ) {

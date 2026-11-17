@@ -1119,7 +1119,11 @@ fields such as `priority_override`) and the row itself. Each rewrite is an
 rewrite yet is logged at `warn` and found again at the next start: the gateway
 was unreachable or the API changed under it, or the API has an unfinished
 enforcement conversion or gateway restore, whose recovery needs the live
-configs unchanged (finish or restore it first). The first run that finishes for
+configs unchanged (finish or restore it first). An API whose proxy is already
+gone is not held back: only its row is rewritten. An enforcement conversion
+replays the live configs exactly, so it is refused with `409 CONFLICT` while a
+palette config of the API still carries a removed key; save that plugin again
+(or restart Nexus) first. The first run that finishes for
 the namespace with nothing failed or left over records one
 `api.plugin_keys_stripped` row targeting it.
 

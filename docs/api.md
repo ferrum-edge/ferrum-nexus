@@ -2401,6 +2401,11 @@ and rebuilds it under the **same proxy id**, carrying the proxy document and
 every plugin config across with their ids. For those few round trips
 `listen_path` answers `404`; the audit row has `proxy_rebuilt: true`. Every
 other setting, and every spec revision, is an in-place write.
+Because the rebuild carries the configs across exactly, a conversion is
+refused with `409 CONFLICT` (naming the plugin) while one of the API's palette
+configs still carries a key Edge has removed, such as `ip_restriction` `mode`;
+save that plugin again, or restart Nexus so its startup pass rewrites it, then
+convert (issue #727).
 
 **An API without a gateway deployment takes catalog edits only.** While
 `ferrum_proxy_id` is `null` (after a reconciliation repair or a failed

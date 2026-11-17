@@ -28,7 +28,7 @@
 import { RETIRED_PLUGIN_CONFIG_KEYS } from '@ferrum-nexus/shared';
 
 import { AuditAction, SYSTEM_ACTOR, type AuditService } from '../audit/service.js';
-import type { ApiPluginRecord, NexusStore } from '../db/store.js';
+import type { ApiPluginRecord, ApiRecord, NexusStore } from '../db/store.js';
 import type { KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { ApiPluginsService } from './service.js';
 
@@ -69,7 +69,16 @@ export interface RetiredKeysDeps {
   namespace: string;
   /** Logs a row left for later; only identifiers, never config values. */
   log?: (obj: Record<string, unknown>, message: string) => void;
+  /** API ids read per `findManyByIds` call; defaults to {@link API_BATCH}. */
+  batchSize?: number;
 }
+
+/**
+ * API ids per parent lookup. SQLite caps bound parameters per statement
+ * (32,766 in the bundled build) and `findManyByIds` binds one per id, so an
+ * upgrade with more legacy rows than that must not look them up in one call.
+ */
+export const API_BATCH = 500;
 
 async function namespaceRecorded(
   store: Pick<NexusStore, 'auditLogs'>,
@@ -99,7 +108,13 @@ export async function stripRetiredPaletteKeys(deps: RetiredKeysDeps): Promise<Re
     const rows = await store.apiPlugins.listCarryingConfigKeys(RETIRED_PLUGIN_CONFIG_KEYS);
     // Only this namespace's: another namespace's pass rewrites its own.
     const ids = [...new Set(rows.map((row) => row.api_id))];
-    const apis = new Map((await store.apis.findManyByIds(ids)).map((api) => [api.id, api]));
+    const batch = deps.batchSize ?? API_BATCH;
+    const apis = new Map<string, ApiRecord>();
+    for (let start = 0; start < ids.length; start += batch) {
+      for (const api of await store.apis.findManyByIds(ids.slice(start, start + batch))) {
+        apis.set(api.id, api);
+      }
+    }
     const report = (row: ApiPluginRecord, message: string, error?: unknown): void => {
       deps.log?.(
         {

@@ -2719,11 +2719,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   function withEffectiveGlobals(
     namespace: string,
     scoped: Record<string, unknown>[],
+    configs: Iterable<Record<string, unknown>> = pluginConfigs.values(),
   ): Record<string, unknown>[] {
     const shadowed = new Set(
       scoped.filter((config) => config.enabled !== false).map((config) => config.plugin_name),
     );
-    const globals = [...pluginConfigs.values()].filter(
+    const globals = [...configs].filter(
       (config) =>
         config.namespace === namespace &&
         config.scope === 'global' &&
@@ -3731,17 +3732,23 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         created_at: existing.created_at,
         updated_at: nowIso(),
       };
+      // Edge validates the graph as it would be after the write, every proxy
+      // the config reaches: its associations, or all of them for a global.
+      const candidate = (configId: string): Record<string, unknown> | undefined =>
+        configId === id ? updated : pluginConfigs.get(key(namespace, configId));
+      const globals = [...pluginConfigs.values()]
+        .filter((config) => config.namespace === namespace && String(config.id) !== id)
+        .concat(updated.scope === 'global' ? [updated] : []);
       for (const proxy of proxies.values()) {
         if (proxy.namespace !== namespace || !Array.isArray(proxy.plugins)) continue;
         const ids = proxy.plugins.filter(isRecord).map((entry) => String(entry.plugin_config_id));
-        if (!ids.includes(id)) continue;
-        const composition = mockPaletteCompositionError(
-          ids
-            .map((configId) =>
-              configId === id ? updated : pluginConfigs.get(key(namespace, configId)),
-            )
-            .filter((config): config is Record<string, unknown> => config !== undefined),
-        );
+        if (!ids.includes(id) && updated.scope !== 'global') continue;
+        const scoped = ids
+          .map(candidate)
+          .filter((config): config is Record<string, unknown> => config !== undefined);
+        const composition =
+          mockPaletteCompositionError(scoped) ??
+          mockDeduplicationCompositionError(withEffectiveGlobals(namespace, scoped, globals));
         if (composition) return fail(res, 400, composition);
       }
       // The kept target comes from the replacement alone: Edge rejects a

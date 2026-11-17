@@ -49,6 +49,9 @@ const VALIDATION_FAILED_CODE = /VALIDATION_FAILED/;
 const CORRELATION_ID_CONFIGURATION_NOT = /Correlation ID configuration is not valid/i;
 const ACL_GROUPS_CAP = /acl_groups must not have more than 500 entries \(got 501\)/;
 const CHANGED_WHILE_STRIPPED = /changed while its removed keys were stripped/;
+const AI_AGENTS = /AI agents/;
+const GATEWAY_OPERATOR = /gateway operator/;
+const STILL_CARRIES = /ip_restriction plugin still carries a setting/;
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -433,9 +436,56 @@ describe('provider plugin palette', () => {
         assert.equal(response.statusCode, 400, response.body);
         assert.match(errorCode(response.body), VALIDATION_FAILED_CODE);
         assert.equal(configsNamed('request_deduplication').length, 0);
+        // Review round 3, dsf F3: the API has no agents to turn off; the
+        // refusal names the operator's gateway instead.
+        assert.doesNotMatch(errorMessage(response.body), AI_AGENTS);
+        assert.match(errorMessage(response.body), GATEWAY_OPERATOR);
+        const details = (JSON.parse(response.body) as ApiErrorBody).error.details as {
+          conflicting_plugin_config_id?: string;
+          field?: string;
+        };
+        assert.equal(details.conflicting_plugin_config_id, id);
+        assert.equal(details.field, undefined);
       } finally {
         harness.edge.pluginConfigs.delete(`nexus/${id}`);
       }
+    });
+
+    // Review round 3, sol F3: Edge validates a native plugin write against the
+    // proxy's graph after it, globals included; so does the test gateway.
+    it('has the test gateway refuse enabling deduplication beside a global mcp_gateway', async () => {
+      const off = await setPlugin('request_deduplication', { enabled: false, config: {} });
+      assert.equal(off.statusCode, 200, off.body);
+      const stored = edgeConfig('request_deduplication');
+      const configId = String(stored.id);
+      const body = {
+        plugin_name: 'request_deduplication',
+        scope: 'proxy' as const,
+        proxy_id: proxyId,
+        enabled: true,
+        config: stored.config as Record<string, unknown>,
+      };
+      const id = 'operator-global-mcp-native';
+      harness.edge.pluginConfigs.set(`nexus/${id}`, {
+        id,
+        namespace: 'nexus',
+        plugin_name: 'mcp_gateway',
+        scope: 'global',
+        enabled: true,
+        config: {},
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      try {
+        await assert.rejects(
+          harness.edgeClient.pluginConfigs.replace(configId, body, undefined, [proxyId]),
+        );
+        assert.equal(storedConfig(configId).enabled, false);
+      } finally {
+        harness.edge.pluginConfigs.delete(`nexus/${id}`);
+      }
+      await harness.edgeClient.pluginConfigs.replace(configId, body, undefined, [proxyId]);
+      assert.equal(storedConfig(configId).enabled, true);
     });
 
     it('resolves effective plugins the way Edge merges them', () => {
@@ -1673,6 +1723,78 @@ describe('provider plugin palette', () => {
       assert.equal(finished.deferred, 0);
       assert.ok(finished.rewritten >= 1);
       assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
+    });
+
+    // Review round 3, sol F1: parent APIs are read in bounded batches, so an
+    // upgrade with more legacy rows than SQLite binds per statement still runs.
+    it('reads the parent APIs in bounded batches', async () => {
+      const first = await seedLegacyIpRestriction();
+      await publishApi();
+      const second = await seedLegacyIpRestriction();
+      const sizes: number[] = [];
+      const bound = <T extends object>(target: T, override: Partial<T>): T =>
+        new Proxy(target, {
+          get(object, property) {
+            if (Object.hasOwn(override, property)) return override[property as keyof T];
+            const value: unknown = Reflect.get(object, property, object);
+            return typeof value === 'function' ? value.bind(object) : value;
+          },
+        });
+      const apis = bound(harness.store.apis, {
+        findManyByIds: async (ids: string[]) => {
+          sizes.push(ids.length);
+          return harness.store.apis.findManyByIds(ids);
+        },
+      });
+      const result = await strip({ store: bound(harness.store, { apis }), batchSize: 1 });
+      assert.equal(result.failed, 0);
+      assert.ok(sizes.length >= 2, `expected several lookups, got ${sizes.length}`);
+      assert.ok(sizes.every((size) => size <= 1));
+      assert.deepEqual(storedConfig(String(first.id)).config, { allow: ['203.0.113.0/24'] });
+      assert.deepEqual(storedConfig(String(second.id)).config, { allow: ['203.0.113.0/24'] });
+    });
+
+    // Review round 3, sol F2: a conversion replays the live configs verbatim,
+    // so one still carrying a removed key is refused until it is cleaned.
+    it('refuses a conversion while a palette config carries a removed key', async () => {
+      await seedLegacyIpRestriction();
+      const before = harness.edge.requests.length;
+      const refused = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.match(errorMessage(refused.body), STILL_CARRIES);
+      assert.equal(
+        harness.edge.requests.slice(before).some((request) => request.method !== 'GET'),
+        false,
+      );
+
+      const resaved = await setPlugin('ip_restriction', { config: { allow: ['203.0.113.0/24'] } });
+      assert.equal(resaved.statusCode, 200, resaved.body);
+      const converted = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(converted.statusCode, 200, converted.body);
+    });
+
+    // Review round 3, dsf F2: an API whose proxy is gone has no live config to
+    // protect, so its row is cleaned rather than deferred for ever.
+    it('cleans the row of an API whose proxy is gone instead of deferring it', async () => {
+      await seedLegacyIpRestriction();
+      await harness.store.apis.update(apiId, {
+        ferrum_proxy_id: null,
+        gateway_state: 'repair_required',
+      });
+      const result = await strip();
+      assert.equal(result.deferred, 0);
+      assert.equal(result.failed, 0);
+      assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
+        allow: ['203.0.113.0/24'],
+      });
     });
 
     // Review dsf F1: a restore that re-points the row during the gateway write

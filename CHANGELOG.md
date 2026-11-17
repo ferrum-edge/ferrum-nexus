@@ -205,7 +205,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   start finds (with one store query) and rewrites each palette config Nexus
   wrote with one, on the gateway and in the store, leaving an API with an
   unfinished conversion or restore for its recovery to finish first; the first
-  run that finishes for the namespace records `api.plugin_keys_stripped`. Let that happen against
+  run that finishes for the namespace records `api.plugin_keys_stripped`. An
+  enforcement conversion, which replays live configs exactly, is refused with
+  `409 CONFLICT` while one of the API's palette configs still carries such a
+  key. Let that happen against
   Edge v0.9.20 before upgrading Edge past it; see
   [Palette keys the next Edge release removes](docs/operations.md#palette-keys-the-next-edge-release-removes).
 
