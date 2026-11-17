@@ -16,6 +16,7 @@ import {
 } from './client.js';
 
 export {
+  consumerPreconditionFailed,
   createFerrumAdminClient,
   createKeyedSerializer,
   deploymentNotDispatched,
