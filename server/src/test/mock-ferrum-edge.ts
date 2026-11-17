@@ -3736,13 +3736,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       // the config reaches: its associations, or all of them for a global.
       const candidate = (configId: string): Record<string, unknown> | undefined =>
         configId === id ? updated : pluginConfigs.get(key(namespace, configId));
+      // `updated` carries the replacement's scope, which `body` names.
+      const updatesGlobal = body.scope === 'global';
       const globals = [...pluginConfigs.values()]
         .filter((config) => config.namespace === namespace && String(config.id) !== id)
-        .concat(updated.scope === 'global' ? [updated] : []);
+        .concat(updatesGlobal ? [updated] : []);
       for (const proxy of proxies.values()) {
         if (proxy.namespace !== namespace || !Array.isArray(proxy.plugins)) continue;
         const ids = proxy.plugins.filter(isRecord).map((entry) => String(entry.plugin_config_id));
-        if (!ids.includes(id) && updated.scope !== 'global') continue;
+        if (!ids.includes(id) && !updatesGlobal) continue;
         const scoped = ids
           .map(candidate)
           .filter((config): config is Record<string, unknown> => config !== undefined);
