@@ -1181,14 +1181,14 @@ describe('agent publishing and Nexus authorization', () => {
       .map((request) => `${request.method} ${request.path}`);
   }
 
-  /** Pad a grantee's consumer with operator groups up to `count` in all. */
+  /** Pad a grantee's consumer with distinct operator groups up to `count` in all. */
   function fillGroups(subject: TestSession, count: number): void {
     const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(subject.user.id));
     assert.ok(consumer);
-    const padding = count - consumer.acl_groups.length;
+    const held = consumer.acl_groups.length;
     consumer.acl_groups = [
       ...consumer.acl_groups,
-      ...Array.from({ length: padding }, (_, index) => `operator:team-${index}`),
+      ...Array.from({ length: count - held }, (_, index) => `operator:team-${held + index}`),
     ];
   }
 
