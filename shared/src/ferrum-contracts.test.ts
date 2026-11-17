@@ -172,7 +172,7 @@ describe('pinned Ferrum contracts', () => {
     for (const [name, text] of [
       ['old colon headers', `tag: contracts-edge-0.9.20\ncommit: ${'b'.repeat(40)}\n`],
       ['missing final newline', valid.slice(0, -1)],
-      ['carriage return', valid.replace('\n', '\r\n')],
+      ['carriage return', `${head}${hash}  a.json\r\n`],
       ['blank line', `${head}\n${hash}  a.json\n`],
       ['no rows', head],
       ['headers out of order', `commit ${'b'.repeat(40)}\ntag contracts-edge-0.9.20\n`],
