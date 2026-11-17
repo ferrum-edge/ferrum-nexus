@@ -200,10 +200,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `cache_key_include_query` / `cache_key_include_consumer`) as an unknown key,
   which for a fail-closed plugin stops a database-mode gateway from starting. A
   palette save that carries one of these keys is now `400 VALIDATION_FAILED`
-  (breaking for an API client that sent `mode`: drop it), every rebuild writes
-  stored rows without them, and every start rewrites each palette config Nexus
-  wrote with one, on the gateway and in the store; the first run that finishes
-  for the namespace records `api.plugin_keys_stripped`. Let that happen against
+  (breaking for an API client that sent `mode`: drop it), every rebuild or
+  restore writes the gateway config and the stored row without them, and every
+  start finds (with one store query) and rewrites each palette config Nexus
+  wrote with one, on the gateway and in the store, leaving an API with an
+  unfinished conversion or restore for its recovery to finish first; the first
+  run that finishes for the namespace records `api.plugin_keys_stripped`. Let that happen against
   Edge v0.9.20 before upgrading Edge past it; see
   [Palette keys the next Edge release removes](docs/operations.md#palette-keys-the-next-edge-release-removes).
 
@@ -246,8 +248,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   agents on (including a `docs_only` to `routes` conversion) while any enabled
   deduplication config is on the proxy, failed at the gateway after Nexus had
   enrolled grantees with the MCP-all group, or after a conversion had taken the
-  live proxy down and had to restore it. Both are now `400 VALIDATION_FAILED`
-  before any gateway or consumer write, judged like Edge on the proxy's
+  live proxy down and had to restore it. Both, and the first publish of an agent
+  API beside an operator's global deduplication config, are now
+  `400 VALIDATION_FAILED` before any gateway or consumer write, judged like Edge on the proxy's
   effective plugins (its own, associated proxy-group ones, or an enabled global
   none of them shadows), and the test gateway enforces Edge's composition rule
   on plugin, proxy and `/api-specs` writes.

@@ -13,27 +13,33 @@
  * So at every start, while the gateway is still on v0.9.20, every palette row
  * in this namespace that carries one is rewritten without it, on the gateway
  * (only the config the row owns) and in the store, through
- * {@link ApiPluginsService.stripRetiredConfigKeys}. Every rewrite is
- * idempotent, and a start that finds nothing to rewrite only reads the store,
- * so the pass simply runs again each time: nothing it misses (a row whose
- * rewrite failed, or one a concurrent change made it give up on) is ever
- * excused by an earlier run.
+ * {@link ApiPluginsService.stripRetiredConfigKeys}. The rows are found with one
+ * store query over the affected plugins' rows
+ * (`apiPlugins.listCarryingConfigKeys`), so a store with nothing left costs one
+ * query, and a row a run misses (a failed rewrite, an API whose conversion or
+ * restore had not finished) is found again by the next start. No earlier run
+ * excuses one.
  *
- * The first run that finishes for a namespace with nothing failed records an
- * `api.plugin_keys_stripped` audit row targeting that namespace, which is what
- * an operator checks before upgrading Edge.
- *
- * API rows are read in offset pages, and an API deleted mid-run shifts the
- * rows behind it, so the pass reads them again from the start until a whole
- * read meets no API it has not already handled.
+ * The first run that finishes for a namespace with nothing failed or deferred
+ * records an `api.plugin_keys_stripped` audit row targeting that namespace,
+ * which is what an operator checks before upgrading Edge.
  */
 
-import { MAX_PAGE_SIZE, RETIRED_PLUGIN_CONFIG_KEYS, type Uuid } from '@ferrum-nexus/shared';
+import { RETIRED_PLUGIN_CONFIG_KEYS } from '@ferrum-nexus/shared';
 
 import { AuditAction, SYSTEM_ACTOR, type AuditService } from '../audit/service.js';
-import type { ApiRecord, NexusStore } from '../db/store.js';
+import type { ApiPluginRecord, NexusStore } from '../db/store.js';
 import type { KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { ApiPluginsService } from './service.js';
+
+const DEFERRED_MESSAGE =
+  'Left removed palette keys for an unfinished conversion or restore; a later start strips them';
+const FAILED_MESSAGE =
+  'Could not strip removed keys from a palette plugin; the next start tries again';
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /** Lease key a namespace's run holds, on every instance. */
 export function retiredKeysLockKey(namespace: string): string {
@@ -46,7 +52,9 @@ export interface RetiredKeysResult {
   alreadyRecorded: boolean;
   /** Palette rows rewritten without a removed key. */
   rewritten: number;
-  /** Rows whose rewrite failed; the namespace is recorded only when this is `0`. */
+  /** Rows left for an unfinished conversion or restore to settle first. */
+  deferred: number;
+  /** Rows whose rewrite failed. */
   failed: number;
 }
 
@@ -59,10 +67,8 @@ export interface RetiredKeysDeps {
   locks: KeyedSerializer;
   /** The Edge namespace whose APIs are rewritten. */
   namespace: string;
-  /** Logs a row whose rewrite failed; only identifiers, never config values. */
+  /** Logs a row left for later; only identifiers, never config values. */
   log?: (obj: Record<string, unknown>, message: string) => void;
-  /** APIs read per page; defaults to `MAX_PAGE_SIZE`. */
-  pageSize?: number;
 }
 
 async function namespaceRecorded(
@@ -80,69 +86,45 @@ async function namespaceRecorded(
   return recorded.items.length > 0;
 }
 
-/**
- * Every API in `namespace` that existed for the whole read, each once.
- *
- * A pass over offset pages, repeated until a pass yields nothing new: an API
- * deleted behind the cursor makes the next page skip one, and the repeat
- * finds it. Rows created during the run are clean already, because no save
- * accepts a removed key.
- */
-async function* everyApi(
-  store: NexusStore,
-  namespace: string,
-  pageSize: number,
-): AsyncGenerator<ApiRecord> {
-  const seen = new Set<Uuid>();
-  for (;;) {
-    let fresh = false;
-    let offset = 0;
-    for (;;) {
-      const page = await store.apis.list({ namespace }, { limit: pageSize, offset });
-      for (const api of page.items) {
-        if (seen.has(api.id)) continue;
-        seen.add(api.id);
-        fresh = true;
-        yield api;
-      }
-      offset += page.items.length;
-      if (page.items.length === 0 || offset >= page.total) break;
-    }
-    if (!fresh) return;
-  }
-}
-
 /** Rewrite every palette config in `namespace` that carries a key Edge removed. */
 export async function stripRetiredPaletteKeys(deps: RetiredKeysDeps): Promise<RetiredKeysResult> {
   const { store, audit, apiPlugins, locks, namespace } = deps;
-  const pageSize = deps.pageSize ?? MAX_PAGE_SIZE;
   return locks(retiredKeysLockKey(namespace), async () => {
     const result: RetiredKeysResult = {
       alreadyRecorded: await namespaceRecorded(store, namespace),
       rewritten: 0,
+      deferred: 0,
       failed: 0,
     };
-    for await (const api of everyApi(store, namespace, pageSize)) {
-      for (const row of await store.apiPlugins.listByApi(api.id)) {
-        const retired = RETIRED_PLUGIN_CONFIG_KEYS[row.plugin_name];
-        if (!retired?.some((key) => Object.hasOwn(row.config, key))) continue;
-        try {
-          const removed = await apiPlugins.stripRetiredConfigKeys(api.id, row.plugin_name);
-          if (removed.length > 0) result.rewritten += 1;
-        } catch (error) {
-          result.failed += 1;
-          deps.log?.(
-            {
-              api_id: api.id,
-              plugin_name: row.plugin_name,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            'Could not strip removed keys from a palette plugin; the next start tries again',
-          );
+    const rows = await store.apiPlugins.listCarryingConfigKeys(RETIRED_PLUGIN_CONFIG_KEYS);
+    // Only this namespace's: another namespace's pass rewrites its own.
+    const ids = [...new Set(rows.map((row) => row.api_id))];
+    const apis = new Map((await store.apis.findManyByIds(ids)).map((api) => [api.id, api]));
+    const report = (row: ApiPluginRecord, message: string, error?: unknown): void => {
+      deps.log?.(
+        {
+          api_id: row.api_id,
+          plugin_name: row.plugin_name,
+          ...(error === undefined ? {} : { error: errorMessage(error) }),
+        },
+        message,
+      );
+    };
+    for (const row of rows) {
+      if (apis.get(row.api_id)?.namespace !== namespace) continue;
+      try {
+        const outcome = await apiPlugins.stripRetiredConfigKeys(row.api_id, row.plugin_name);
+        if (outcome === 'rewritten') result.rewritten += 1;
+        if (outcome === 'deferred') {
+          result.deferred += 1;
+          report(row, DEFERRED_MESSAGE);
         }
+      } catch (error) {
+        result.failed += 1;
+        report(row, FAILED_MESSAGE, error);
       }
     }
-    if (result.failed > 0 || result.alreadyRecorded) return result;
+    if (result.failed > 0 || result.deferred > 0 || result.alreadyRecorded) return result;
     // Recorded last, under the lease and fenced by it, once per namespace.
     return store.transaction(async (tx) => {
       if (await namespaceRecorded(tx, namespace)) return { ...result, alreadyRecorded: true };

@@ -3225,6 +3225,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // Before the first gateway write, so a refused publish costs nothing on
         // Edge and leaves nothing to roll back.
         await assertOwnerHasApiRoom(owner.id);
+        // A new proxy has no plugins of its own, so it runs every enabled
+        // global, and Edge would refuse an agent spec beside a global
+        // deduplicator (issue #730).
+        if (specEnforcement === 'routes' && agents) {
+          await assertAgentsCompose({ id: apiId, plugins: [] });
+        }
 
         const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
           pluginIds: [],
@@ -5369,7 +5375,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   api_id: api.id,
                   plugin_name: entry.plugin_name,
                   enabled: entry.enabled,
-                  config: entry.config,
+                  // As written to the gateway above: without a key Edge removed.
+                  config: withoutRetiredConfigKeys(entry.plugin_name, entry.config),
                   trigger: entry.trigger,
                   ferrum_plugin_config_id: configId,
                 });
@@ -6339,8 +6346,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * the proxy's effective plugins, as Edge judges it: its own and associated
    * proxy-group configs, or an enabled global none of them shadows.
    */
-  async function assertAgentsCompose(proxyId: string): Promise<void> {
-    const proxy = await edge.proxies.get(proxyId);
+  async function assertAgentsCompose(
+    target: string | Pick<EdgeProxy, 'id' | 'plugins'>,
+  ): Promise<void> {
+    const proxy = typeof target === 'string' ? await edge.proxies.get(target) : target;
     if (!proxy) return;
     const deduplication = activeDeduplication(proxy, await edge.pluginConfigs.listAll());
     if (!deduplication) return;

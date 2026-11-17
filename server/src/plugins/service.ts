@@ -144,10 +144,20 @@ export interface ApiPluginsService {
    * `retired-keys.ts`: no actor and no ownership check. Only the config the
    * row owns is written, under the same locks and undo stack as a provider's
    * save; a config the row does not own (or a missing proxy) leaves only the
-   * row to rewrite. Resolves to the keys removed, `[]` when there were none.
+   * row to rewrite.
+   *
+   * Resolves to `rewritten`, `clean` (nothing to remove), `gone` (the API or
+   * its row no longer exists, so nothing is left to clean) or `deferred`: the
+   * API has an unfinished conversion or restore, whose recovery journal holds
+   * the live plugin configs as they were and refuses to recover once one
+   * changes, so it is left for that recovery to finish first. Throws when the
+   * API or row changed under it; the next start tries again.
    */
-  stripRetiredConfigKeys(apiId: Uuid, pluginName: string): Promise<string[]>;
+  stripRetiredConfigKeys(apiId: Uuid, pluginName: string): Promise<RetiredKeysOutcome>;
 }
+
+/** What {@link ApiPluginsService.stripRetiredConfigKeys} did with one row. */
+export type RetiredKeysOutcome = 'rewritten' | 'clean' | 'gone' | 'deferred';
 
 /** Dependencies of {@link createApiPluginsService}. */
 export interface ApiPluginsServiceDeps {
@@ -603,21 +613,34 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
 
     async stripRetiredConfigKeys(apiId, pluginName) {
       const retired = RETIRED_PLUGIN_CONFIG_KEYS[pluginName];
-      if (!retired) return [];
+      if (!retired) return 'clean';
       const api = await store.apis.findById(apiId);
-      if (!api) return [];
+      if (!api) return 'gone';
       const proxyId = api.ferrum_proxy_id;
-      const rewrite = async (): Promise<string[]> => {
+      const namespace = config.edge.namespace;
+      const rewrite = async (): Promise<RetiredKeysOutcome> => {
         // Re-read under the locks: a restore that rebuilt the API on a new
         // proxy since the read above re-pointed both the API and the row, and
         // this pass must not write the old proxy's config id back over them.
-        if ((await store.apis.findById(apiId))?.ferrum_proxy_id !== proxyId) {
+        const current = await store.apis.findById(apiId);
+        if (!current) return 'gone';
+        if (current.ferrum_proxy_id !== proxyId) {
           throw conflict('The API moved to another gateway proxy while its keys were stripped');
         }
+        // An unfinished conversion or restore owns the deployment: its journal
+        // holds the plugin configs as they were and refuses to recover once one
+        // changes. Recovery comes first; a later start strips the keys.
+        if (
+          current.gateway_state !== 'deployed' ||
+          (await store.settings.get(`gateway_recovery:${namespace}:${apiId}`)) !== null ||
+          (await store.settings.get(`gateway_restore_cleanup:${namespace}:${apiId}`)) !== null
+        ) {
+          return 'deferred';
+        }
         const row = await store.apiPlugins.find(apiId, pluginName);
-        if (!row) return [];
+        if (!row) return 'gone';
         const removed = retired.filter((key) => Object.hasOwn(row.config, key));
-        if (removed.length === 0) return [];
+        if (removed.length === 0) return 'clean';
         const stripped = withoutRetiredConfigKeys(pluginName, row.config);
         const existing = proxyId
           ? ownedConfig(row, await binder.listByProxy(proxyId), pluginName)
@@ -677,7 +700,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               },
             );
           });
-          return removed;
+          return 'rewritten';
         } catch (error) {
           if (proxyId) {
             await unwind({
@@ -691,6 +714,8 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               ip: null,
             });
           }
+          // An API deleted while this ran has no row left to clean.
+          if (!(await store.apis.findById(apiId))) return 'gone';
           throw error;
         }
       };

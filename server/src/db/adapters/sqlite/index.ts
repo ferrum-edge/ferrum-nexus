@@ -214,6 +214,7 @@ import {
   type Param,
   type Row,
 } from './sql.js';
+import { carriesConfigKey, configKeyProbe } from '../config-keys.js';
 
 /* ── Row mappers ────────────────────────────────────────────────────────── */
 
@@ -1938,6 +1939,18 @@ class SqliteStore implements NexusStore {
         [apiId, pluginName],
       );
       return row ? mapApiPlugin(row) : null;
+    },
+
+    listCarryingConfigKeys: async (keys) => {
+      const probe = configKeyProbe(keys);
+      if (!probe) return [];
+      return queryAll(
+        this.db,
+        `SELECT * FROM api_plugins WHERE ${probe.sql} ORDER BY api_id ASC, plugin_name ASC`,
+        probe.params,
+      )
+        .map(mapApiPlugin)
+        .filter((row) => carriesConfigKey(row, keys));
     },
 
     upsert: async (input) => {

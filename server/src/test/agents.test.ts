@@ -1398,6 +1398,89 @@ describe('agent publishing and Nexus authorization', () => {
     assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
   });
 
+  // Review round 2, sol F2: the test gateway refuses a spec write beside an
+  // associated proxy-group deduplicator, as Edge does, and keeps the association.
+  it('has the test gateway refuse an agent spec beside a proxy-group deduplicator', async () => {
+    const { api } = await publish();
+    const proxyId = api.ferrum_proxy_id;
+    assert.ok(proxyId);
+    const id = 'operator-group-deduplication';
+    harness.edge.pluginConfigs.set(`nexus/${id}`, {
+      id,
+      namespace: 'nexus',
+      plugin_name: 'request_deduplication',
+      scope: 'proxy_group',
+      enabled: true,
+      config: {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy && Array.isArray(proxy.plugins));
+    proxy.plugins = [...proxy.plugins, { plugin_config_id: id }];
+    try {
+      const revised = await revise(api.id, '2');
+      assert.equal(revised.statusCode, 400, revised.body);
+      assert.equal(errorCode(revised.body), 'EDGE_REJECTED_SPEC');
+      const kept = harness.edge.proxies.get(`nexus/${proxyId}`)?.plugins as {
+        plugin_config_id: string;
+      }[];
+      assert.ok(kept.some((entry) => entry.plugin_config_id === id));
+    } finally {
+      harness.edge.pluginConfigs.delete(`nexus/${id}`);
+      const current = harness.edge.proxies.get(`nexus/${proxyId}`);
+      if (current && Array.isArray(current.plugins)) {
+        current.plugins = current.plugins.filter(
+          (entry) => (entry as { plugin_config_id?: unknown }).plugin_config_id !== id,
+        );
+      }
+    }
+  });
+
+  // Review round 2, dsf F3: a new proxy runs every enabled global, so the
+  // first publish of an agent API is checked too.
+  it('refuses to publish an agent API beside an operator global request_deduplication', async () => {
+    const id = 'operator-global-deduplication-publish';
+    harness.edge.pluginConfigs.set(`nexus/${id}`, {
+      id,
+      namespace: 'nexus',
+      plugin_name: 'request_deduplication',
+      scope: 'global',
+      enabled: true,
+      config: {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    try {
+      sequence += 1;
+      const slug = `agent-${sequence}`;
+      const before = harness.edge.requests.length;
+      const refused = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: {
+          name: 'Agent API',
+          slug,
+          spec: JSON.stringify(DOCUMENT),
+          auth_plugin: 'key_auth',
+          requestable: true,
+          visibility: 'public',
+          spec_enforcement: 'routes',
+          agents: AGENTS,
+        },
+      });
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+      const deployed = writesSince(before).filter(
+        (write) => write.includes('/proxies') || write.includes('/api-specs'),
+      );
+      assert.deepEqual(deployed, []);
+      assert.equal(await harness.store.apis.findBySlug(slug), null);
+    } finally {
+      harness.edge.pluginConfigs.delete(`nexus/${id}`);
+    }
+  });
+
   // Review dsf F2: the cap every group writer applies, consumer repair included.
   it('applies the group cap only to a write that grows a consumer past it', () => {
     const groups = (count: number) => Array.from({ length: count }, (_, index) => `g${index}`);

@@ -2071,7 +2071,9 @@ operator's, an associated proxy-group one, or an enabled global none of those sh
 as Edge resolves it) is refused with `400 VALIDATION_FAILED` and
 `details: { field: "agents", conflicting_plugin: "request_deduplication", plugin_config_id }`
 before any gateway or consumer write: no grantee is enrolled and a conversion does not
-take the live proxy down (issue #730). Turn deduplication off first.
+take the live proxy down (issue #730). Turn deduplication off first. Publishing an API
+with `agents` in `routes` mode is refused the same way when an enabled global
+`request_deduplication` would run on its new proxy.
 
 Catalog `ApiSummary` includes the selection for tool metadata. MCP is served by
 Edge at `<invoke_url>/mcp` with tools named `<slug>.<name>`. A normal Nexus account

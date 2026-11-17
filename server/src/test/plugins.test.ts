@@ -1566,7 +1566,7 @@ describe('provider plugin palette', () => {
 
       harness.edge.queueFailure(500, { error: 'boom' }, `/plugins/config/${configId}`, 'PUT');
       const failed = await strip();
-      assert.deepEqual(failed, { alreadyRecorded: false, rewritten: 0, failed: 1 });
+      assert.deepEqual(failed, { alreadyRecorded: false, rewritten: 0, deferred: 0, failed: 1 });
       assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
         allow: ['203.0.113.0/24'],
         mode: 'allow_first',
@@ -1592,7 +1592,12 @@ describe('provider plugin palette', () => {
       assert.deepEqual(audited[0]?.details.retired_keys, ['mode']);
       assert.equal((await harness.auditRows('api.plugin_keys_stripped')).length, 1);
 
-      assert.deepEqual(await strip(), { alreadyRecorded: true, rewritten: 0, failed: 0 });
+      assert.deepEqual(await strip(), {
+        alreadyRecorded: true,
+        rewritten: 0,
+        deferred: 0,
+        failed: 0,
+      });
     });
 
     it('writes a config saved with mode back without it on the next save', async () => {
@@ -1622,25 +1627,18 @@ describe('provider plugin palette', () => {
       assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
     });
 
-    // Review sol F2: deleting an API the pass already read shifts the next
-    // offset page past an unread one; the pass reads again until nothing is new.
-    it('finds a row an API deletion shifted behind the page cursor', async () => {
-      const older = await seedLegacyIpRestriction();
-      await publishApi();
-      const newer = await seedLegacyIpRestriction();
-      await publishApi();
-      // The newest API, read first (newest-first order) and clean.
-      const victim = apiId;
-      let deleted = false;
+    // Review round 2, dsf F4: an API deleted while the pass works on it has no
+    // row left to clean, so it is not a failure that holds the record back.
+    it('counts an API deleted during the pass as gone, not failed', async () => {
+      const deleted = apiId;
+      await seedLegacyIpRestriction();
       const result = await strip({
-        pageSize: 1,
         apiPlugins: {
           async stripRetiredConfigKeys(id, name) {
-            if (!deleted) {
-              deleted = true;
+            if (id === deleted) {
               const removed = await harness.authed(provider, {
                 method: 'DELETE',
-                url: `/api/apis/${victim}`,
+                url: `/api/apis/${deleted}`,
               });
               assert.equal(removed.statusCode, 200, removed.body);
             }
@@ -1648,10 +1646,33 @@ describe('provider plugin palette', () => {
           },
         },
       });
-      assert.equal(deleted, true);
       assert.equal(result.failed, 0);
-      assert.deepEqual(storedConfig(String(newer.id)).config, { allow: ['203.0.113.0/24'] });
-      assert.deepEqual(storedConfig(String(older.id)).config, { allow: ['203.0.113.0/24'] });
+      assert.equal(result.deferred, 0);
+      assert.equal(await harness.store.apis.findById(deleted), null);
+    });
+
+    // Review round 2, sol F1: an unfinished conversion's journal holds the live
+    // configs as they were, and its recovery refuses once one changes.
+    it('leaves an API with a recovery journal for its recovery to finish first', async () => {
+      const live = await seedLegacyIpRestriction();
+      const journal = `gateway_recovery:nexus:${apiId}`;
+      await harness.store.settings.set(journal, { pending: true });
+      const deferred = await strip();
+      assert.ok(deferred.deferred >= 1);
+      assert.deepEqual(storedConfig(String(live.id)).config, {
+        allow: ['203.0.113.0/24'],
+        mode: 'allow_first',
+      });
+      assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
+        allow: ['203.0.113.0/24'],
+        mode: 'allow_first',
+      });
+
+      await harness.store.settings.delete(journal);
+      const finished = await strip();
+      assert.equal(finished.deferred, 0);
+      assert.ok(finished.rewritten >= 1);
+      assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
     });
 
     // Review dsf F1: a restore that re-points the row during the gateway write

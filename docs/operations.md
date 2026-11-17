@@ -1110,20 +1110,23 @@ enabled config makes an Admin API write `400`, a reload fail, and a
 database-mode gateway refuse to start.
 
 This release stops writing them (a save that carries one is
-`400 VALIDATION_FAILED`, and every rebuild drops them from stored rows), and at
-every start it rewrites each palette config in `FERRUM_NAMESPACE` that still
-carries one: the gateway config the row owns (by recorded id, keeping
-operator fields such as `priority_override`) and the row itself. Each rewrite
-is an `api.plugin_set` audit row with `retired_keys` and no actor. A row it
-cannot rewrite (the gateway is unreachable, or the API changed under it) is
-logged at `warn` and retried at the next start; once nothing is left, a start
-only reads the store. The first run that finishes for the namespace with
-nothing failed records one `api.plugin_keys_stripped` row targeting it.
+`400 VALIDATION_FAILED`, and every rebuild or restore drops them from the
+gateway config and the stored row), and at every start it finds, with one store
+query, each palette row in `FERRUM_NAMESPACE` that still carries one, and
+rewrites it: the gateway config the row owns (by recorded id, keeping operator
+fields such as `priority_override`) and the row itself. Each rewrite is an
+`api.plugin_set` audit row with `retired_keys` and no actor. A row it cannot
+rewrite yet is logged at `warn` and found again at the next start: the gateway
+was unreachable or the API changed under it, or the API has an unfinished
+enforcement conversion or gateway restore, whose recovery needs the live
+configs unchanged (finish or restore it first). The first run that finishes for
+the namespace with nothing failed or left over records one
+`api.plugin_keys_stripped` row targeting it.
 
 **Before upgrading Edge past v0.9.20**, run this release (or a later one)
 against the v0.9.20 gateway until `api.plugin_keys_stripped` for your
 `FERRUM_NAMESPACE` is in the audit log, and restart it once more afterwards if
-it logged a failed rewrite since. An `ip_restriction` or `response_caching`
+it logged a row left for later since. An `ip_restriction` or `response_caching`
 config an operator wrote by hand is not the portal's to change: remove those
 keys from it yourself, as the Edge upgrade guide says.
 

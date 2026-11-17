@@ -3165,6 +3165,29 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   /**
+   * The plugin configs a spec write keeps on its proxy: every proxy-scoped one
+   * naming it, and every proxy-group one the proxy already associates, other
+   * than the configs the spec itself owns (which the write regenerates).
+   */
+  function survivingConfigIds(namespace: string, proxyId: string, specId: string | null): string[] {
+    const existing = proxies.get(key(namespace, proxyId));
+    const associated = new Set(
+      (Array.isArray(existing?.plugins) ? existing.plugins : [])
+        .filter(isRecord)
+        .map((association) => String(association.plugin_config_id)),
+    );
+    return [...pluginConfigs.values()]
+      .filter(
+        (config) =>
+          config.namespace === namespace &&
+          (specId === null || config.api_spec_id !== specId) &&
+          (config.proxy_id === proxyId ||
+            (config.scope === 'proxy_group' && associated.has(String(config.id)))),
+      )
+      .map((config) => String(config.id));
+  }
+
+  /**
    * Edge's `/api-specs` composition refusal (`422`, `resource_type:
    * plugin_composition`) for the plugins a spec write would leave on its
    * proxy: the embedded ones plus every config the spec does not own.
@@ -3175,12 +3198,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     specId: string | null,
     embedded: Record<string, unknown>[],
   ): Record<string, unknown> | null {
-    const survivors = [...pluginConfigs.values()].filter(
-      (config) =>
-        config.namespace === namespace &&
-        config.proxy_id === proxyId &&
-        (specId === null || config.api_spec_id !== specId),
-    );
+    const survivors = survivingConfigIds(namespace, proxyId, specId)
+      .map((id) => pluginConfigs.get(key(namespace, id)))
+      .filter((config): config is Record<string, unknown> => config !== undefined);
     const problem = mockDeduplicationCompositionError(
       withEffectiveGlobals(namespace, [...embedded, ...survivors]),
     );
@@ -3227,14 +3247,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       return Object.keys(labels).length === 0 ? {} : { labels };
     }
-    const survivors = [...pluginConfigs.values()]
-      .filter(
-        (config) =>
-          config.namespace === namespace &&
-          config.proxy_id === proxyId &&
-          config.api_spec_id !== specId,
-      )
-      .map((config) => String(config.id));
+    const survivors = survivingConfigIds(namespace, proxyId, specId);
     for (const [configKey, config] of pluginConfigs) {
       if (config.namespace === namespace && config.api_spec_id === specId) {
         pluginConfigs.delete(configKey);
