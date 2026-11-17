@@ -1610,7 +1610,10 @@ describe('provider plugin palette', () => {
       const recorded = (await harness.auditRows('api.plugin_keys_stripped')).filter(
         (entry) => entry.target_id === 'elsewhere',
       );
-      assert.deepEqual(recorded.map((entry) => entry.target_type), ['namespace']);
+      assert.deepEqual(
+        recorded.map((entry) => entry.target_type),
+        ['namespace'],
+      );
 
       const live = await seedLegacyIpRestriction();
       const later = await strip();
