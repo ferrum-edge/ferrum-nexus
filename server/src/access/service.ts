@@ -189,6 +189,7 @@ import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 import {
   canonicalConsumerLockKey,
+  isAclGroupLimitExceeded,
   type ConsumerProvisioner,
   type MutateAclGroupsOptions,
 } from '../credentials/consumers.js';
@@ -585,6 +586,18 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     ) {
       throw validationFailed('Tool subsets must contain unique currently published exposure IDs');
     }
+  }
+
+  /**
+   * Whether `error` is a refusal the provisioner raises before writing the
+   * consumer: the grantee is disabled, or the change would take its consumer
+   * past Edge's ACL group cap. Nothing reached the gateway, so there is no
+   * group to take back off.
+   */
+  function refusedBeforeWrite(error: unknown): boolean {
+    return (
+      (isNexusError(error) && error.code === 'USER_DISABLED') || isAclGroupLimitExceeded(error)
+    );
   }
 
   /**
@@ -2072,8 +2085,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         if (ownership.superseded) throw supersededApproval();
         if (ownership.regranted) throw inactiveGrant();
       } catch (error) {
-        // The provisioner's active-user guard runs before the ACL write.
-        if (isNexusError(error) && error.code === 'USER_DISABLED') {
+        // The provisioner's active-user guard and its ACL group cap (issue
+        // #729) both refuse before the ACL write.
+        if (refusedBeforeWrite(error)) {
           attempted = false;
           groupPossiblyApplied = false;
         }
@@ -3231,8 +3245,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               throw conflict('This identity already has an active grant for this API');
             }
           } catch (error) {
-            // The provisioner's active-user guard runs before the ACL write.
-            if (isNexusError(error) && error.code === 'USER_DISABLED') {
+            // The provisioner's active-user guard and its ACL group cap (issue
+            // #729) both refuse before the ACL write.
+            if (refusedBeforeWrite(error)) {
               addedGroup = null;
               groupPossiblyApplied = false;
             }

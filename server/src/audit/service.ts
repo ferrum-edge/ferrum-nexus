@@ -350,6 +350,14 @@ export const AuditAction = {
    */
   ACCESS_MCP_ENROLL: 'access.mcp_enroll',
   /**
+   * An agents enablement skipped an all-tools grantee whose consumer cannot
+   * take the API's MCP-all group: it already holds the 500 ACL groups Edge
+   * allows one consumer (issue #729). The provider's enablement goes on; the
+   * grantee keeps REST access and gets the group from a later rebuild once it
+   * has room.
+   */
+  ACCESS_MCP_ENROLL_SKIP: 'access.mcp_enroll_skip',
+  /**
    * Exposure ids this grant's explicit subset held stopped being published: an
    * agents edit removed their tools (`reason: 'tool_removed'`) or renamed them
    * (`reason: 'tool_renamed'`), or a spec revision or agents edit changed their
@@ -672,6 +680,9 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
       'repair that found nothing stranded still records that it ran, so later starts skip it.',
   ),
   [AuditAction.ACCESS_MCP_ENROLL]: INTENT,
+  [AuditAction.ACCESS_MCP_ENROLL_SKIP]: rowOnly(
+    'Records a write that was deliberately not made; there is no portal change to commit with it.',
+  ),
   [AuditAction.ACCESS_TOOLS_PRUNE]: TRANSACTIONAL,
   [AuditAction.ACCESS_TOOLS_REQUEST]: TRANSACTIONAL,
   [AuditAction.ACCESS_TOOLS_APPROVE]: TRANSACTIONAL,

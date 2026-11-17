@@ -5,6 +5,7 @@ import {
   mcpAllGroupForApi,
   mcpToolGroupForApi,
   consumerUsernameForUser,
+  MAX_ACL_GROUPS_PER_CONSUMER,
   MAX_SPEC_OPERATIONS,
   type ApiAgents,
   type ApiErrorBody,
@@ -1170,6 +1171,128 @@ describe('agent publishing and Nexus authorization', () => {
     assert.equal(enabled.statusCode, 200, enabled.body);
     assert.equal(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)), false);
     assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+  });
+
+  /** Gateway writes (anything but a read) recorded since `before`. */
+  function writesSince(before: number): string[] {
+    return harness.edge.requests
+      .slice(before)
+      .filter((request) => request.method !== 'GET')
+      .map((request) => `${request.method} ${request.path}`);
+  }
+
+  /** Pad a grantee's consumer with operator groups up to `count` in all. */
+  function fillGroups(subject: TestSession, count: number): void {
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(subject.user.id));
+    assert.ok(consumer);
+    const padding = count - consumer.acl_groups.length;
+    consumer.acl_groups = [
+      ...consumer.acl_groups,
+      ...Array.from({ length: padding }, (_, index) => `operator:team-${index}`),
+    ];
+  }
+
+  // Issue #729: Edge refuses a consumer with more than 500 ACL groups.
+  it('enables agents past an all-tools grantee at the group cap and audits the skip', async () => {
+    const { api } = await publish({ agents: null });
+    const full = await harness.registerUser({ role: 'client' });
+    const fullGrant = await approveFor(full, api.id);
+    const roomy = await harness.registerUser({ role: 'client' });
+    const roomyGrant = await approveFor(roomy, api.id);
+    fillGroups(full, MAX_ACL_GROUPS_PER_CONSUMER);
+
+    const enabled = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.equal(groupsOf(full).length, MAX_ACL_GROUPS_PER_CONSUMER);
+    assert.equal(groupsOf(full).includes(mcpAllGroupForApi(api.id)), false);
+    assert.ok(groupsOf(roomy).includes(mcpAllGroupForApi(api.id)));
+    const skipped = (await harness.auditRows('access.mcp_enroll_skip')).filter(
+      (row) => row.target_id === fullGrant.id,
+    );
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0]?.details.limit, MAX_ACL_GROUPS_PER_CONSUMER);
+    assert.equal(skipped[0]?.details.acl_group, mcpAllGroupForApi(api.id));
+    assert.equal(await countAudit('access.mcp_enroll', fullGrant.id), 0);
+    assert.equal(await countAudit('access.mcp_enroll', roomyGrant.id), 1);
+  });
+
+  it('skips a grantee that reaches the group cap under its consumer key', async () => {
+    const { api } = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    // Room for one more group when enrollment reads the consumer; a
+    // concurrent change takes it before the write, so the cap check under the
+    // consumer key is the one that refuses.
+    fillGroups(grantee, MAX_ACL_GROUPS_PER_CONSUMER - 1);
+    const provisioner = harness.services.credentials.provisioner;
+    const mutate = provisioner.mutateAclGroups.bind(provisioner);
+    provisioner.mutateAclGroups = async (...args) => {
+      provisioner.mutateAclGroups = mutate;
+      fillGroups(grantee, MAX_ACL_GROUPS_PER_CONSUMER);
+      return mutate(...args);
+    };
+    try {
+      const enabled = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${api.id}`,
+        payload: { agents: AGENTS },
+      });
+      assert.equal(enabled.statusCode, 200, enabled.body);
+    } finally {
+      provisioner.mutateAclGroups = mutate;
+    }
+    assert.equal(groupsOf(grantee).length, MAX_ACL_GROUPS_PER_CONSUMER);
+    assert.equal(groupsOf(grantee).includes(mcpAllGroupForApi(api.id)), false);
+    const skipped = (await harness.auditRows('access.mcp_enroll_skip')).filter(
+      (row) => row.target_id === grant.id,
+    );
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0]?.details.acl_groups, MAX_ACL_GROUPS_PER_CONSUMER + 1);
+  });
+
+  it('refuses an approval past the group cap before any consumer write', async () => {
+    const first = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    await approveFor(grantee, first.api.id);
+    // An all-tools agent grant adds two groups: the REST group and MCP-all.
+    fillGroups(grantee, MAX_ACL_GROUPS_PER_CONSUMER - 1);
+    const groupsBefore = groupsOf(grantee);
+    const { api } = await publish();
+    const request = await harness.authed(grantee, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: api.id, justification: 'Use agent tools' },
+    });
+    assert.equal(request.statusCode, 201, request.body);
+    const requestId = request.json<CreateAccessRequestResponse>().access_request.id;
+    const before = harness.edge.requests.length;
+    const refused = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.equal(refused.statusCode, 409, refused.body);
+    const body = JSON.parse(refused.body) as ApiErrorBody;
+    assert.equal(body.error.code, 'CONFLICT');
+    assert.deepEqual(body.error.details, {
+      reason: 'acl_group_limit',
+      limit: MAX_ACL_GROUPS_PER_CONSUMER,
+      acl_groups: MAX_ACL_GROUPS_PER_CONSUMER + 1,
+      consumer_id: harness.edge.consumerByUsername(consumerUsernameForUser(grantee.user.id))?.id,
+    });
+    assert.deepEqual(
+      writesSince(before).filter((write) => write.startsWith('PUT /consumers/')),
+      [],
+    );
+    assert.deepEqual(groupsOf(grantee), groupsBefore);
+    assert.equal(
+      await harness.store.grants.findActiveByApiAndUser(api.id, grantee.user.id, null),
+      null,
+    );
   });
 
   it('carries explicit subsets across spec revisions and prunes only removed tools', async () => {

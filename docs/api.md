@@ -2969,7 +2969,10 @@ identity already holds an active grant, the API is retired or no longer
 requestable, the API is still recorded under another gateway namespace — it was
 published before a `FERRUM_NAMESPACE` change, and only publishing it again
 under the current namespace, as a new API, makes access approvable — or the
-request's application is disabled; the request stays `pending`); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
+request's application is disabled; the request stays `pending`; or the approval
+would give the identity's consumer more than the 500 ACL groups Edge allows one
+consumer, with `details: { reason: "acl_group_limit", limit: 500, acl_groups,
+consumer_id }`, refused before the consumer write, issue #729); `502 EDGE_ERROR` / `EDGE_UNAVAILABLE`. A failed approval removes the ACL
 addition and returns the request to `pending` where possible; the
 `access.approve_rollback` audit row records the outcome (with
 `acl_group_possibly_applied: true` when the gateway write was not
@@ -3039,8 +3042,13 @@ account re-enable and consumer repair rebuild it. Only a change that turns agent
 or that gives a selection published before tool subsets its exposure IDs, enrolls
 existing all-tools grantees, committing an `access.mcp_enroll` intent row before each
 consumer write. Enrollment skips disabled grantees (their grant rows remain, and
-re-enable rebuilds their groups) and consumers missing from the gateway, so no
-grantee's state can fail a provider's build. Ordinary spec revisions, rollbacks, agents
+re-enable rebuilds their groups), consumers missing from the gateway, and consumers
+that already hold the 500 ACL groups Edge allows one consumer (recorded as
+`access.mcp_enroll_skip`; issue #729), so no grantee's state can fail a provider's
+build. Every grant puts its REST group, and either the MCP-all group or one group per
+approved tool, on the identity's one consumer, so any change that would take a consumer
+past 500 groups (an approval, a tool request approval, a re-enable or a repair) is
+refused with `409 CONFLICT` and `details.reason: "acl_group_limit"` before the write. Ordinary spec revisions, rollbacks, agents
 edits, restores and conversions read no grantee consumer from the gateway. See the
 [migration notes](mcp-subsets-migration-draft.md).
 

@@ -262,6 +262,18 @@ export function mockCacheStorageAllowed(authenticated: boolean, cacheControl = '
   return !authenticated || directives.some((value) => CACHEABLE_DIRECTIVE.test(value));
 }
 
+/**
+ * Edge's `MAX_ACL_GROUPS_PER_CONSUMER`, written out rather than imported from
+ * Nexus so the mock keeps modelling the gateway if Nexus's copy drifts.
+ */
+const EDGE_MAX_ACL_GROUPS = 500;
+
+/** Edge's `Consumer::validate` cap on `acl_groups`, as its `400` text. */
+export function aclGroupsProblem(groups: unknown): string | null {
+  if (!Array.isArray(groups) || groups.length <= EDGE_MAX_ACL_GROUPS) return null;
+  return `acl_groups must not have more than ${EDGE_MAX_ACL_GROUPS} entries (got ${groups.length})`;
+}
+
 /** Model the compression/deduplication composition rule, including equal priorities. */
 export function mockPaletteCompositionError(plugins: Record<string, unknown>[]): string | null {
   const active = plugins.filter((plugin) => plugin.enabled !== false);
@@ -2403,6 +2415,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        const groupsProblem = aclGroupsProblem(body.acl_groups);
+        if (groupsProblem) return fail(res, 400, groupsProblem);
         const submitted = normaliseCredentials(body.credentials);
         const credentials =
           submitted === null ? null : prepareCredentials(submitted, maxCredentials);
@@ -2459,6 +2473,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        const groupsProblem = aclGroupsProblem(body.acl_groups);
+        if (groupsProblem) return fail(res, 400, groupsProblem);
         const merged = mergeCredentialsOnReplace(stored.credentials, body.credentials);
         const credentials = merged === null ? null : prepareCredentials(merged, maxCredentials);
         if (credentials === null) return fail(res, 400, 'Invalid consumer credentials');

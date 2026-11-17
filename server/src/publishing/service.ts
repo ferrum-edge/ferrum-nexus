@@ -198,6 +198,7 @@ import {
   DEFAULT_BACKEND_READ_TIMEOUT_MS,
   DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
   DEFAULT_SPEC_ENFORCEMENT,
+  MAX_ACL_GROUPS_PER_CONSUMER,
   MAX_PAGE_SIZE,
   MAX_SPEC_PATHS,
   RATE_LIMIT_PLUGIN,
@@ -255,6 +256,7 @@ import {
   LIVE_CREDENTIAL_STATUSES,
   type CredentialsService,
 } from '../credentials/service.js';
+import { isAclGroupLimitExceeded } from '../credentials/consumers.js';
 import {
   assertNamespaceServed,
   deploymentNotDispatched,
@@ -6407,6 +6409,32 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const groups = (await edge.consumers.get(consumerId))?.acl_groups ?? [];
       if (!groups.includes(grant.acl_group) || groups.includes(group)) continue;
       actor ??= await store.users.findById(subject);
+      // A grantee whose consumer is at Edge's group cap cannot take the group.
+      // That is its own limit, never the provider's failure (issue #729): the
+      // skip is audited and the enablement goes on. Checked again under the
+      // consumer key below, where the count can no longer move.
+      const skip = async (count: number): Promise<void> => {
+        await store.transaction(async (tx) => {
+          await audit.forStore(tx).record(
+            { id: subject, role: actor?.role ?? null },
+            AuditAction.ACCESS_MCP_ENROLL_SKIP,
+            { type: 'grant', id: grant.id },
+            {
+              api_id: apiId,
+              user_id: grant.user_id,
+              application_id: grant.application_id,
+              consumer_id: consumerId,
+              acl_group: group,
+              acl_groups: count,
+              limit: MAX_ACL_GROUPS_PER_CONSUMER,
+            },
+          );
+        });
+      };
+      if (groups.length >= MAX_ACL_GROUPS_PER_CONSUMER) {
+        await skip(groups.length + 1);
+        continue;
+      }
       await store.transaction(async (tx) => {
         await audit.forStore(tx).record(
           { id: subject, role: actor?.role ?? null },
@@ -6421,22 +6449,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           },
         );
       });
-      await credentials.provisioner.mutateAclGroups(
-        consumerId,
-        (current) => {
-          // Re-checked under the consumer key: the REST group still proves
-          // membership, and the grantee is still active, so this cannot hand
-          // a group back to an account a disable has just stripped.
-          return current.includes(grant.acl_group) ? [...new Set([...current, group])] : current;
-        },
-        subject,
-        {
-          requireActiveUser: grant.user_id,
-          skipInactiveUser: true,
-          absentIsDone: true,
-          skipUnchanged: true,
-        },
-      );
+      try {
+        await credentials.provisioner.mutateAclGroups(
+          consumerId,
+          (current) => {
+            // Re-checked under the consumer key: the REST group still proves
+            // membership, and the grantee is still active, so this cannot hand
+            // a group back to an account a disable has just stripped.
+            return current.includes(grant.acl_group) ? [...new Set([...current, group])] : current;
+          },
+          subject,
+          {
+            requireActiveUser: grant.user_id,
+            skipInactiveUser: true,
+            absentIsDone: true,
+            skipUnchanged: true,
+          },
+        );
+      } catch (error) {
+        if (!isAclGroupLimitExceeded(error)) throw error;
+        const { acl_groups: count } = error.details as { acl_groups: number };
+        await skip(count);
+      }
     }
   }
 

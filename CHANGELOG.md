@@ -228,6 +228,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Nexus honours Edge's 500-ACL-group cap per consumer** (#729). Every grant
+  puts its REST group, and on an agent API the MCP-all group or one group per
+  approved tool, on the identity's one consumer, and Edge refuses a consumer with
+  more than 500 groups with a `400` Nexus does not echo for consumer writes. A
+  change that would take a consumer past the cap (an approval, a tool request
+  approval, a re-enable, a repair) is now refused before the write with
+  `409 CONFLICT` and `details.reason: "acl_group_limit"`, and an approval refused
+  this way leaves no group to take back. Turning AI agents on no longer fails
+  for the provider when one all-tools grantee's consumer is full: that grantee is
+  skipped and recorded as `access.mcp_enroll_skip`. The test gateway enforces the
+  cap.
+
 - **The production image keeps dependencies npm installs inside a workspace.** The
   runtime stage copied only the root `node_modules`, so a lock that placed a server
   dependency in `server/node_modules` (as Dependabot's npm 10 update of better-sqlite3

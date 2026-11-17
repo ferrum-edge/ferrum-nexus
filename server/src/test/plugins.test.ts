@@ -27,7 +27,11 @@ import {
 
 import { createKeyedSerializer, proxyLockKey } from '../lib/keyed-serializer.js';
 import { stripRetiredPaletteKeys } from '../plugins/retired-keys.js';
-import { mockCacheStorageAllowed, mockPaletteCompositionError } from './mock-ferrum-edge.js';
+import {
+  aclGroupsProblem,
+  mockCacheStorageAllowed,
+  mockPaletteCompositionError,
+} from './mock-ferrum-edge.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 const COMPRESSION_REQUEST_DEDUPLICATION = /compression.*request_deduplication/;
@@ -36,6 +40,7 @@ const BACKEND_CACHE_CONTROL = /backend Cache-Control/;
 const DOES_NOT_ACCEPT_EXECUTION = /does not accept an execution trigger/;
 const VALIDATION_FAILED_CODE = /VALIDATION_FAILED/;
 const CORRELATION_ID_CONFIGURATION_NOT = /Correlation ID configuration is not valid/i;
+const ACL_GROUPS_CAP = /acl_groups must not have more than 500 entries \(got 501\)/;
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -364,6 +369,13 @@ describe('provider plugin palette', () => {
         mockPaletteCompositionError([{ ...compressor, enabled: false }, deduplicator]),
         null,
       );
+    });
+
+    // Issue #729: Edge's `MAX_ACL_GROUPS_PER_CONSUMER`.
+    it('models the native acl_groups cap on a consumer write', () => {
+      const groups = (count: number) => Array.from({ length: count }, (_, index) => `g${index}`);
+      assert.equal(aclGroupsProblem(groups(500)), null);
+      assert.match(aclGroupsProblem(groups(501)) ?? '', ACL_GROUPS_CAP);
     });
 
     it('preserves a legacy compression config and orders new deduplication after it', async () => {
