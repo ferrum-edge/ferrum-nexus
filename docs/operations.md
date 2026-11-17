@@ -3473,7 +3473,10 @@ adds or removes an entry between the read and the indexed delete moves the index
 onto a different credential. So every credential write decided from a read (the
 indexed delete of a revoke or rotation, the whole-type delete of a revoke, the
 append of a rotation below the cap, and the take-back of an appended entry)
-sends the consumer `ETag` of that read (`GET /consumers/{id}`) as `If-Match`:
+sends the consumer `ETag` of that read as `If-Match`. A take-back reads the
+consumer credential-complete (`GET /consumers/{id}/verification`) and locates
+its entry by material, never by position; every other write uses
+`GET /consumers/{id}`. An append Edge certainly refused is never taken back.
 
 - **Edge with ferrum-edge#7393** compares it with the consumer's tag under its
   admission lease and answers `412` to a changed consumer, with nothing written.

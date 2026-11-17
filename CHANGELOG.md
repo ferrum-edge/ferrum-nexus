@@ -242,7 +242,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   requested one kept working. Every write Nexus decides from a read (the
   indexed delete of a revoke or rotation, the whole-type delete of a revoke,
   the append of a rotation below the cap, and the take-back of an appended
-  entry) now sends that read's consumer `ETag` as `If-Match`. A changed
+  entry) now sends that read's consumer `ETag` as `If-Match`. A take-back
+  finds the appended entry by its material in a credential-complete read
+  rather than by position, and is skipped altogether when Edge certainly
+  refused the append, so it can no longer delete another writer's key. A changed
   consumer is refused with `409 CONFLICT`, nothing is deleted or appended,
   the credential stays `active`, and nothing is retried automatically: read
   the credentials again and repeat the operation. Edge v0.9.20, the pinned

@@ -20,9 +20,9 @@
  * - **#144.** `issueForConsumer` computed its compensating delete from the
  *   *portal's* row count, so on a Nexus-only restore — a state
  *   `docs/operations.md` documents — a failed issue deleted an older,
- *   still-live gateway key and kept the orphan it had just created. The index
- *   now comes from the gateway, and the delete is only issued against an array
- *   that still looks the way the append left it.
+ *   still-live gateway key and kept the orphan it had just created. The
+ *   compensating delete now locates the orphan by its material in a
+ *   credential-complete read and is conditioned on that read's consumer tag.
  *
  * The negatives matter as much as the repairs: genuine out-of-band drift must
  * still refuse, because acting on a stale index is how somebody else's live
@@ -610,17 +610,17 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(await statusOf(stranded), 'retiring');
   });
 
-  it('deletes nothing when the array moved under an in-flight append', async () => {
+  it('takes back exactly its own append when the array moved under it', async () => {
     const user = await client();
     const original = await issue(user, 'mine');
     const consumerId = original.credential.ferrum_consumer_id;
     const foreign = 'nxs_out_of_band_entry_written_by_an_operator';
 
-    // Edge redacts credential material on every read, so the fingerprint the
-    // append computed can never be matched against the array; what can be
-    // checked is that the array is still one entry longer than the length the
-    // index came from. Here an operator prepends an entry while the append is
-    // in flight, and index 1 stops meaning "the entry we just wrote".
+    // An operator prepends an entry while the append is in flight, so index 1
+    // stops meaning "the entry we just wrote" and now names the original key.
+    // The take-back finds its entry by material in a credential-complete read
+    // instead, and deletes it conditioned on that read's tag (review dsf
+    // round 2), so neither the foreign key nor the original is touched.
     failNextCreate(harness, () => {
       const username = consumerUsernameForUser(user.user.id);
       const entries = harness.edge.consumerByUsername(username)?.credentials.keyauth;
@@ -635,12 +635,12 @@ describe('credential durability across a lost gateway write', () => {
     assert.ok(issued.statusCode >= 500, issued.body);
 
     const keys = liveKeys(user.user.id);
-    assert.equal(keys.length, 3, 'nothing was deleted at a position that had moved');
-    assert.ok(keys.includes(foreign), 'the entry the delete would have taken is still live');
+    assert.equal(keys.length, 2, 'only the orphan went');
+    assert.ok(keys.includes(foreign), 'the entry at the stale position is still live');
     assert.ok(keys.includes(String(original.secret.key)));
     const rollback = await rowsFor('credential.append_rollback', consumerId);
     assert.equal(rollback.length, 1);
-    assert.equal(rollback[0]?.details.withdrawn, false, 'the orphan is recorded, not guessed at');
+    assert.equal(rollback[0]?.details.withdrawn, true);
   });
 
   it('takes back an append whose own acknowledgement was lost', async () => {

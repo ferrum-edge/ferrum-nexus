@@ -346,6 +346,14 @@ function assertRotatedByOwner(user: UserRecord, credential: CredentialRecord): v
 }
 
 /**
+ * Raised when a rotation's fresh read after its append no longer shows the
+ * array as the append left it: something outside the portal changed the
+ * consumer, so the index of the entry being retired cannot be trusted.
+ */
+const CONSUMER_CHANGED_DURING_ROTATION =
+  'The gateway consumer changed while this credential was being rotated, so the previous credential was not removed; review the consumer’s credentials and try again';
+
+/**
  * Raised whenever the Nexus mirror and the live Edge array disagree in a way
  * that cannot be read unambiguously.
  *
@@ -357,14 +365,6 @@ function assertRotatedByOwner(user: UserRecord, credential: CredentialRecord): v
  * operator holding the 502 is the one who has to apply it; the full procedure
  * is `operations.md` §12, "The credential mirror".
  */
-/**
- * Raised when a rotation's fresh read after its append no longer shows the
- * array as the append left it: something outside the portal changed the
- * consumer, so the index of the entry being retired cannot be trusted.
- */
-const CONSUMER_CHANGED_DURING_ROTATION =
-  'The gateway consumer changed while this credential was being rotated, so the previous credential was not removed; review the consumer’s credentials and try again';
-
 const RECONCILE_MESSAGE =
   'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
 
@@ -425,6 +425,22 @@ interface AppendWithdrawal {
    * and must never be reported as something an administrator has to repair.
    */
   arrayLength: number | null;
+  /**
+   * Whether a credential-complete read found this call's entry by its
+   * material (`true`), proved it absent (`false`), or could not tell
+   * (`null`: unreadable, `basicauth`, or not identifiable uniquely).
+   */
+  located: boolean | null;
+}
+
+/** Where a credential-complete read found the entry an append created. */
+interface AppendedEntryLocation {
+  /** Its index; `'ambiguous'` for several matches or an entry whose material is hidden. */
+  index: number | 'absent' | 'ambiguous';
+  /** Entries the type held in that read. */
+  arrayLength: number;
+  /** The read's consumer tag, which conditions the take-back delete. */
+  etag: string;
 }
 
 /** Generated plaintext plus the Edge entry that carries it. */
@@ -918,6 +934,26 @@ export function generateCredential(
 }
 
 /**
+ * Whether a failed credential append certainly appended nothing.
+ *
+ * A refusal and a lost acknowledgement read the same on the wire, except a
+ * definite 4xx: it proves Edge did not append. A 5xx, a connection error
+ * after send, and a `408` — a timeout, whichever side gave up first — remain
+ * an unknown outcome. A conditional append that certainly wrote nothing
+ * proves it too: Edge's `412`, or a tag the client could not verify before
+ * sending ({@link credentialWriteNotApplied}).
+ */
+function appendCertainlyRefused(error: unknown): boolean {
+  if (credentialWriteNotApplied(error)) return true;
+  const details =
+    error instanceof NexusError && typeof error.details === 'object' && error.details !== null
+      ? (error.details as { status?: unknown })
+      : {};
+  const status = typeof details.status === 'number' ? details.status : null;
+  return status !== null && status >= 400 && status < 500 && status !== 408;
+}
+
+/**
  * The plaintext an Edge credential entry carries, or `null` when it is hidden.
  *
  * Every ordinary Admin API read replaces `keyauth.key` and `jwt.secret` with
@@ -1317,26 +1353,26 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * Take back an entry this call appended — or leave the array alone and say
    * so.
    *
-   * `appendIndex` is where `POST` put the entry: Edge appends, so it is the
-   * array length read from the gateway immediately before the call. The delete
-   * that undoes it is destructive and addressed by position, so it is only
-   * issued when the array still looks the way the append left it — exactly one
-   * entry longer than the length the index came from. Anything else means the
-   * array moved underneath the call, and deleting at a stale index is how an
-   * older, still-live key dies; "delete nothing" is strictly better, and the
-   * caller audits the entry it had to leave behind.
+   * The entry is found by **identity**, never by position (review dsf round
+   * 2). Ordinary reads redact credential material, so a position counted off
+   * an earlier read names this call's entry only while nothing else touched
+   * the array — and the append that index came from was not always
+   * conditioned on that read. So the consumer is read credential-complete
+   * (`GET /consumers/{id}/verification`, which Edge audits), the entry whose
+   * material has this call's fingerprint is located in it, and the delete is
+   * conditioned on that read's tag: a consumer that changes before the delete
+   * is refused with nothing removed. No match means the entry is not on the
+   * gateway; more than one, or any entry whose material is hidden, means it
+   * cannot be identified, and nothing is deleted — the caller audits the
+   * entry it had to leave behind.
    *
-   * **`basicauth` is never deleted here.** It appears in no read projection at
-   * all, so there is no array to check it against and the only index available
-   * is one counted off the mirror — and a Nexus-only restore is documented to
-   * leave the mirror shorter than the array, where that index points at a
-   * pre-restore password rather than at the orphan this call created. Deleting
-   * on that word is the very defect this function exists to prevent, with one
-   * credential type in front of it, so the entry is left standing and the
-   * caller records it as an orphan instead.
+   * `appendIndex` (where `POST` put the entry, the array length read before
+   * it) only decides {@link AppendWithdrawal.arrayAsAppended} and is never
+   * deleted at on its own word.
    *
-   * Answers whether the entry is gone, whether the array it was read from was
-   * still exactly as the append left it, and how long that array was.
+   * **`basicauth` is never deleted here.** Edge stores only its hash, so no
+   * read can tie an entry to this call's password, and the entry is left
+   * standing for the caller to record as an orphan.
    */
   async function withdrawAppendedEntry(input: {
     consumerId: string;
@@ -1346,67 +1382,104 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     fingerprint: string;
     actorId: Uuid;
   }): Promise<AppendWithdrawal> {
-    if (input.type === 'basicauth') {
-      return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
-    }
-    // Tagged: the delete below is conditioned on exactly this read.
-    const read = await edge.consumers
-      .getTagged(input.consumerId, CONFIRMED_ABSENCE)
-      .catch(() => undefined);
+    const unproved: AppendWithdrawal = {
+      withdrawn: false,
+      arrayAsAppended: false,
+      arrayLength: null,
+      located: null,
+    };
+    if (input.type === 'basicauth') return unproved;
     // A consumer that no longer exists took its credentials with it; one that
     // cannot be read is a question mark, and a question mark is not grounds
-    // for a positional delete.
-    if (read === null) return { withdrawn: true, arrayAsAppended: false, arrayLength: 0 };
-    if (read === undefined) return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
-    const entries = read.consumer.credentials[input.type];
-    const arrayLength = Array.isArray(entries) ? entries.length : 0;
-    const entry = Array.isArray(entries) ? entries[input.appendIndex] : undefined;
-    if (arrayLength !== input.appendIndex + 1 || entry === undefined) {
-      return { withdrawn: false, arrayAsAppended: false, arrayLength };
+    // for a delete.
+    const read = await locateAppendedEntry(input);
+    if (read === null) {
+      return { withdrawn: true, arrayAsAppended: false, arrayLength: 0, located: null };
     }
-    const material = credentialMaterial(entry, input.type);
-    if (material !== null && crypto.fingerprint(material) !== input.fingerprint) {
-      return { withdrawn: false, arrayAsAppended: false, arrayLength };
+    if (read === undefined) return unproved;
+    const { index, arrayLength, etag } = read;
+    if (index === 'ambiguous') return { ...unproved, arrayLength };
+    if (index === 'absent') {
+      // Not on the gateway: the append never landed, or the entry is gone.
+      return { withdrawn: true, arrayAsAppended: false, arrayLength, located: false };
     }
+    const arrayAsAppended = index === input.appendIndex && arrayLength === input.appendIndex + 1;
     try {
       await edge.consumers.deleteCredentialAt(
         input.consumerId,
         input.type,
-        input.appendIndex,
+        index,
         input.actorId,
-        read.etag,
+        etag,
       );
-      return { withdrawn: true, arrayAsAppended: true, arrayLength };
+      return { withdrawn: true, arrayAsAppended, arrayLength, located: true };
     } catch (error) {
       // Nothing was deleted: the consumer changed after the read above
       // (another writer, outside the portal's lease), or the tag could not
       // be verified before the delete was sent. The array may have moved, so
-      // neither the entry nor the array can be vouched for any more.
-      if (credentialWriteNotApplied(error)) {
-        return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
-      }
+      // it cannot be vouched for any more.
+      if (credentialWriteNotApplied(error)) return unproved;
       // A DELETE's acknowledgement can be lost after Edge applies it.
       // Re-read while the consumer lease is still held before deciding which
       // metadata rows survive the rollback.
-      const after = await edge.consumers
-        .get(input.consumerId, CONFIRMED_ABSENCE)
-        .catch(() => undefined);
+      const after = await locateAppendedEntry(input);
       if (after === null) {
-        return { withdrawn: true, arrayAsAppended: true, arrayLength: 0 };
+        return { withdrawn: true, arrayAsAppended: true, arrayLength: 0, located: null };
       }
-      if (after === undefined) {
-        return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
+      if (after === undefined || after.index === 'ambiguous') return unproved;
+      if (after.index === 'absent') {
+        return {
+          withdrawn: true,
+          arrayAsAppended: after.arrayLength === input.appendIndex,
+          arrayLength: after.arrayLength,
+          located: false,
+        };
       }
-      const afterEntries = after.credentials[input.type];
-      const afterLength = Array.isArray(afterEntries) ? afterEntries.length : 0;
-      if (afterLength === input.appendIndex) {
-        return { withdrawn: true, arrayAsAppended: true, arrayLength: afterLength };
-      }
-      if (afterLength === input.appendIndex + 1) {
-        return { withdrawn: false, arrayAsAppended: true, arrayLength: afterLength };
-      }
-      return { withdrawn: false, arrayAsAppended: false, arrayLength: afterLength };
+      const stillAsAppended =
+        after.index === input.appendIndex && after.arrayLength === input.appendIndex + 1;
+      return {
+        withdrawn: false,
+        arrayAsAppended: stillAsAppended,
+        arrayLength: after.arrayLength,
+        located: true,
+      };
     }
+  }
+
+  /**
+   * Read the consumer credential-complete and find the entry whose material
+   * has `fingerprint`: its index, `'absent'`, or `'ambiguous'` (more than one
+   * match, or an entry whose material is hidden), with the array's length
+   * and the read's tag. `null` when Edge confirms the consumer is gone,
+   * `undefined` when it could not be read.
+   */
+  async function locateAppendedEntry(input: {
+    consumerId: string;
+    type: CredentialType;
+    fingerprint: string;
+    actorId: Uuid;
+  }): Promise<AppendedEntryLocation | null | undefined> {
+    const snapshot = await edge.consumers
+      .verification(input.consumerId, input.actorId)
+      .catch(() => undefined);
+    if (snapshot === null || snapshot === undefined) return snapshot;
+    const entries = snapshot.consumer.credentials[input.type];
+    const etag = snapshot.etag;
+    if (entries === undefined) return { index: 'absent', arrayLength: 0, etag };
+    if (!Array.isArray(entries)) return { index: 'ambiguous', arrayLength: 0, etag };
+    const matches: number[] = [];
+    for (const [position, entry] of entries.entries()) {
+      const material =
+        typeof entry === 'object' && entry !== null
+          ? credentialMaterial(entry as EdgeCredentialEntry, input.type)
+          : null;
+      if (material === null) return { index: 'ambiguous', arrayLength: entries.length, etag };
+      if (crypto.fingerprint(material) === input.fingerprint) matches.push(position);
+    }
+    let index: AppendedEntryLocation['index'] = 'ambiguous';
+    if (matches.length === 0) index = 'absent';
+    else if (matches.length === 1) index = matches[0]!;
+    return { index, arrayLength: entries.length, etag };
   }
 
   /**
@@ -1644,9 +1717,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       fingerprint: input.fingerprint,
       actorId: input.actor.id,
     });
-    // The array never grew, so the `POST` never landed: there is no orphan to
-    // take back and nothing to put in front of an operator.
-    if (!withdrawal.arrayAsAppended && withdrawal.arrayLength === input.appendIndex) return;
+    // A credential-complete read shows no entry with this call's material,
+    // so the `POST` never landed: there is no orphan to take back and
+    // nothing to put in front of an operator.
+    if (withdrawal.located === false) return;
     await recordAppendRollback({
       consumerId: input.consumerId,
       type: input.type,
@@ -2050,21 +2124,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           input.ifMatch,
         );
       } catch (error) {
-        const errorDetails =
-          error instanceof NexusError && typeof error.details === 'object' && error.details !== null
-            ? (error.details as { status?: unknown })
-            : {};
-        const status = typeof errorDetails.status === 'number' ? errorDetails.status : null;
-        // A refusal and a lost acknowledgement read the same on the wire,
-        // except a definite 4xx: it proves Edge did not append. A 5xx, a
-        // connection error after send, and a `408` — a timeout, whichever side
-        // gave up first — remain an unknown outcome.
-        // A conditional append that certainly wrote nothing proves it too:
-        // Edge's `412`, or a tag the client could not verify before sending.
-        if (
-          credentialWriteNotApplied(error) ||
-          (status !== null && status >= 400 && status < 500 && status !== 408)
-        ) {
+        if (appendCertainlyRefused(error)) {
           await store.transaction((tx) => tx.credentials.delete(pending.id));
           throw error;
         }
@@ -2117,12 +2177,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         input.ifMatch,
       );
     } catch (error) {
-      // A conditional append that certainly wrote nothing (a refused
-      // precondition, or a tag that could not be verified before sending)
-      // leaves nothing to reclaim; and an array that moved meanwhile proves
-      // nothing about this call's entry, which a reclaim would read it as
-      // (review sol F2).
-      if (input.appendIndex !== undefined && !credentialWriteNotApplied(error)) {
+      // An append that certainly wrote nothing leaves nothing to take back,
+      // so nothing is looked for: only an unknown outcome is reclaimed
+      // (review sol F2, dsf round 2).
+      if (input.appendIndex !== undefined && !appendCertainlyRefused(error)) {
         await reclaimUnacknowledgedAppend({
           consumerId: input.consumerId,
           type: input.type,

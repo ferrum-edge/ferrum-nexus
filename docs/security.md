@@ -1377,9 +1377,12 @@ write. See [operations, the credential mirror](operations.md#conditioned-on-the-
   `credential.settle`. A delete proven not to have applied puts the row back to
   `active`.
 - An append whose row could not be written, or a rotation replacement whose
-  delete failed, is withdrawn — but only against an array still exactly one
-  entry longer than before, with the index read from the gateway. Anything not
-  withdrawn is recorded as `credential.append_rollback` with
+  delete failed, is withdrawn — located by its material in a credential-complete
+  read (`GET /consumers/{id}/verification`), never by position, and deleted
+  conditioned on that read's consumer tag. An append Edge certainly refused (a
+  definite 4xx, or a conditional write that was never sent) is never taken back.
+  Anything not withdrawn — no unique match, an unreadable consumer, or any
+  `basicauth` entry — is recorded as `credential.append_rollback` with
   `withdrawn: false`.
 - **`basicauth` fails closed.** Edge never shows it, so its positions are the
   portal's rows alone, and an entry those rows do not account for would make a

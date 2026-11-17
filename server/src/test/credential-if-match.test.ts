@@ -349,12 +349,58 @@ describe('credential writes conditioned on the consumer tag', () => {
     };
 
     const failed = await rotate(user, only.credential.id);
-    assert.equal(failed.statusCode, 502, failed.body);
+    assert.equal(failed.statusCode, 409, failed.body);
+    assert.equal(errorOf(failed.body).code, 'CONFLICT');
     assert.ok(!('secret' in JSON.parse(failed.body)), 'no secret was handed out');
 
-    const labels = labelled(consumerId, { foreign: FOREIGN_KEY, only });
-    assert.ok(labels.includes('only'), 'the previous key was not deleted');
+    // The previous key was never deleted, and the replacement was taken back
+    // by its identity, not by the position the other writer moved.
+    assert.deepEqual(labelled(consumerId, { foreign: FOREIGN_KEY, only }), ['foreign', 'only']);
     assert.equal(await statusOf(only.credential.id), 'active');
-    assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'nothing was deleted');
+    assert.equal(credentialWrites(consumerId, 'DELETE').length, 1, 'only the take-back');
+  });
+
+  it('takes nothing back after Edge certainly refused the append (dsf round 2)', async () => {
+    const user = await client();
+    const only = await issue(user);
+    const consumerId = only.credential.ferrum_consumer_id;
+
+    // Another writer appends right after the portal's read, filling the type
+    // to the gateway's cap of two: Edge refuses the portal's append with a
+    // definite `400`. The array is now exactly one entry longer than the
+    // index the append was given, so a positional take-back would delete the
+    // other writer's key.
+    const consumers = harness.edgeClient.consumers;
+    const addCredential = consumers.addCredential.bind(consumers);
+    consumers.addCredential = async (...args) => {
+      consumers.addCredential = addCredential;
+      const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
+      assert.ok(stored);
+      stored.credentials.keyauth = [...(stored.credentials.keyauth ?? []), { key: FOREIGN_KEY }];
+      return addCredential(...args);
+    };
+    restore = () => {
+      consumers.addCredential = addCredential;
+    };
+
+    const refused = await harness.authed(user, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.notEqual(refused.statusCode, 201, refused.body);
+    assert.ok(!('secret' in JSON.parse(refused.body)), 'no secret was handed out');
+
+    assert.deepEqual(labelled(consumerId, { foreign: FOREIGN_KEY, only }), ['only', 'foreign']);
+    assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'nothing was taken back');
+    assert.equal(
+      harness.edge.callsTo('GET', `/consumers/${consumerId}/verification`).length,
+      0,
+      'nothing was even looked for',
+    );
+    const rollback = (await harness.auditRows('credential.append_rollback')).filter(
+      (row) => row.details.consumer_id === consumerId,
+    );
+    assert.equal(rollback.length, 0);
   });
 });
