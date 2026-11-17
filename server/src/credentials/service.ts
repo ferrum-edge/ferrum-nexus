@@ -237,8 +237,8 @@ import type {
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import {
-  consumerPreconditionFailed,
   consumerWithAclGroups,
+  credentialWriteNotApplied,
   type FerrumAdminClient,
 } from '../ferrum-admin/index.js';
 import type {
@@ -1378,10 +1378,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       );
       return { withdrawn: true, arrayAsAppended: true, arrayLength };
     } catch (error) {
-      // The consumer changed after the read above (another writer, outside
-      // the portal's lease), so nothing was deleted and the array may have
-      // moved: neither the entry nor the array can be vouched for any more.
-      if (consumerPreconditionFailed(error)) {
+      // Nothing was deleted: the consumer changed after the read above
+      // (another writer, outside the portal's lease), or the tag could not
+      // be verified before the delete was sent. The array may have moved, so
+      // neither the entry nor the array can be vouched for any more.
+      if (credentialWriteNotApplied(error)) {
         return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
       }
       // A DELETE's acknowledgement can be lost after Edge applies it.
@@ -1806,11 +1807,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // {@link settleLostRetirement} settle the wrong row — after
             // which a positional delete takes somebody else's live key — so
             // the intent is withdrawn and the caller retries the revoke.
-            // A refused precondition proves it too: the consumer changed
-            // since the read, and Edge deleted nothing. An outcome that
-            // cannot be proved stays `retiring`, which is the safe reading.
+            // A delete that certainly wrote nothing (a refused precondition,
+            // or a tag that could not be verified before sending) proves it
+            // too, but only for the retirement this attempt started: a row
+            // that was already `retiring` stands for an earlier outcome
+            // nobody confirmed, and stays that way (review sol F1). An
+            // outcome that cannot be proved stays `retiring`, which is the
+            // safe reading.
             if (
-              consumerPreconditionFailed(error) ||
+              (current.status === 'active' && credentialWriteNotApplied(error)) ||
               (await deleteDidNotApply(consumerId, type, length))
             ) {
               await withdrawRetirement({
@@ -1976,7 +1981,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     /**
      * The consumer tag of the read `appendIndex` came from. With it the
      * append lands on exactly that consumer or not at all: a changed one is
-     * refused with nothing appended ({@link consumerPreconditionFailed}).
+     * refused with nothing appended ({@link credentialWriteNotApplied}).
      */
     ifMatch?: string;
     ip?: string | null;
@@ -2054,10 +2059,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // except a definite 4xx: it proves Edge did not append. A 5xx, a
         // connection error after send, and a `408` — a timeout, whichever side
         // gave up first — remain an unknown outcome.
-        // A refused precondition proves it too, whether Edge answered `412`
-        // or the re-read refused before anything was sent.
+        // A conditional append that certainly wrote nothing proves it too:
+        // Edge's `412`, or a tag the client could not verify before sending.
         if (
-          consumerPreconditionFailed(error) ||
+          credentialWriteNotApplied(error) ||
           (status !== null && status >= 400 && status < 500 && status !== 408)
         ) {
           await store.transaction((tx) => tx.credentials.delete(pending.id));
@@ -2112,10 +2117,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         input.ifMatch,
       );
     } catch (error) {
-      // A refused precondition appended nothing, so there is nothing to
-      // reclaim; and the array it was refused for having moved proves nothing
-      // about this call's entry, which a reclaim would read it as.
-      if (input.appendIndex !== undefined && !consumerPreconditionFailed(error)) {
+      // A conditional append that certainly wrote nothing (a refused
+      // precondition, or a tag that could not be verified before sending)
+      // leaves nothing to reclaim; and an array that moved meanwhile proves
+      // nothing about this call's entry, which a reclaim would read it as
+      // (review sol F2).
+      if (input.appendIndex !== undefined && !credentialWriteNotApplied(error)) {
         await reclaimUnacknowledgedAppend({
           consumerId: input.consumerId,
           type: input.type,
@@ -2979,12 +2986,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // be: `retiring` over an entry that is demonstrably live is the
             // one input that could make a later {@link settleLostRetirement}
             // settle the wrong row, after which a positional delete takes
-            // somebody else's live key. A refused precondition proves the
-            // same. Nothing else changed — no append has been attempted yet —
-            // so the account is left exactly as the rotation found it, cap
-            // slot included.
+            // somebody else's live key. A delete that certainly wrote nothing
+            // proves the same for a retirement this attempt started (never
+            // for a row that was already `retiring`). Nothing else changed —
+            // no append has been attempted yet — so the account is left
+            // exactly as the rotation found it, cap slot included.
             if (
-              consumerPreconditionFailed(error) ||
+              (current.status === 'active' && credentialWriteNotApplied(error)) ||
               (await deleteDidNotApply(consumerId, type, length))
             ) {
               await withdrawRetirement({
@@ -3067,8 +3075,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         });
 
         if (appendFirst) {
-          // Whether the delete of the previous entry was sent without being
-          // refused for a changed consumer: only then may it have applied.
+          // Whether the delete of the previous entry may have applied: set
+          // when it is attempted, and cleared again when its failure proves
+          // nothing was written — a refused precondition, or a failure before
+          // anything was sent (review dsf F2).
           let deleteMayHaveApplied = false;
           try {
             // As above: the retirement is recorded before it is attempted, so a
@@ -3099,7 +3109,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             deleteMayHaveApplied = true;
             await removeAt(consumerId, type, position, user.id, appended.etag);
           } catch (error) {
-            if (consumerPreconditionFailed(error)) deleteMayHaveApplied = false;
+            if (credentialWriteNotApplied(error)) deleteMayHaveApplied = false;
             // A rotation either hands the caller a new secret or leaves the
             // account as it found it. The replacement's plaintext is already
             // lost — it is show-once and this call is not returning it — so an
@@ -3117,14 +3127,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               // only ever be a credential the owner cannot use or explain.
               await store.credentials.delete(created.credential.id).catch(() => undefined);
             }
-            if (arrayAsAppended || !deleteMayHaveApplied) {
+            if (arrayAsAppended || (!deleteMayHaveApplied && current.status === 'active')) {
               // The array still held every entry the append landed on, or the
-              // delete was never sent or was refused for a changed consumer,
-              // so the entry being retired was not removed by it. Withdraw the
-              // intent with the append: leaving a row `retiring` over a
-              // credential that is demonstrably live is the one input that
-              // could later make {@link settleLostRetirement} settle the wrong
-              // row.
+              // delete certainly wrote nothing and the retirement was this
+              // attempt's own, so the entry being retired was not removed by
+              // it. Withdraw the intent with the append: leaving a row
+              // `retiring` over a credential that is demonstrably live is the
+              // one input that could later make {@link settleLostRetirement}
+              // settle the wrong row.
               await store.credentials
                 .update(current.id, { status: 'active' })
                 .catch(() => undefined);
@@ -3812,7 +3822,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * `ifMatch` is the consumer tag of the read `position` was decided from
    * (ferrum-edge#7393): if anything changed the consumer since, the index may
    * name another credential, so the delete is refused with nothing removed
-   * ({@link consumerPreconditionFailed}) and the caller's operation fails
+   * ({@link credentialWriteNotApplied}) and the caller's operation fails
    * rather than being retried on a stale decision.
    */
   async function removeAt(

@@ -660,6 +660,15 @@ function isIfMatchUnsupportedRefusal(parsed: unknown): boolean {
 /** Credential writes an Edge without the credential precondition refused for their `If-Match`. */
 const IF_MATCH_UNSUPPORTED_ERRORS = new WeakSet<object>();
 
+/** Errors a conditional credential write raised before anything was written. */
+const CREDENTIAL_WRITE_NOT_APPLIED = new WeakSet<object>();
+
+/** Mark `error` as raised before any credential write was sent, and return it. */
+function notApplied(error: unknown): unknown {
+  if (typeof error === 'object' && error !== null) CREDENTIAL_WRITE_NOT_APPLIED.add(error);
+  return error;
+}
+
 const CONSUMER_CHANGED_MESSAGE = 'The gateway consumer changed; read it again before retrying';
 
 /**
@@ -675,6 +684,20 @@ export function consumerPreconditionFailed(error: unknown): boolean {
     error.code === 'CONFLICT' &&
     isRecord(error.details) &&
     error.details.kind === 'precondition_failed'
+  );
+}
+
+/**
+ * Whether a conditional credential write certainly wrote nothing: a refused
+ * precondition ({@link consumerPreconditionFailed}), or a failure before the
+ * write was sent — an unusable tag, or, on an Edge that refuses `If-Match` on
+ * credential routes, a re-read that could not verify the tag. Any other
+ * failure may still have applied and stays an unknown outcome.
+ */
+export function credentialWriteNotApplied(error: unknown): boolean {
+  return (
+    consumerPreconditionFailed(error) ||
+    (typeof error === 'object' && error !== null && CREDENTIAL_WRITE_NOT_APPLIED.has(error))
   );
 }
 
@@ -2118,9 +2141,11 @@ export function createFerrumAdminClient(
     send: (ifMatch: string | undefined) => Promise<T>,
   ): Promise<T> {
     if (!isStrongRowTag(ifMatch)) {
-      throw edgeError(
-        'A credential change needs the strong consumer tag of the read it was decided from',
-        { kind: 'consumer_tag_missing' },
+      throw notApplied(
+        edgeError(
+          'A credential change needs the strong consumer tag of the read it was decided from',
+          { kind: 'consumer_tag_missing' },
+        ),
       );
     }
     try {
@@ -2136,7 +2161,16 @@ export function createFerrumAdminClient(
           '(ferrum-edge#7393); re-reading the consumer to verify its tag instead',
       );
     }
-    const current = await readTaggedConsumer(consumerId, true);
+    // Until the unconditional write below is sent, nothing has been written:
+    // the router refused the conditional one before acting. A re-read that
+    // fails (unreachable, untagged, a protocol error) says so too, rather
+    // than passing for a write whose outcome is unknown (review sol F2).
+    let current: Awaited<ReturnType<typeof readTaggedConsumer>>;
+    try {
+      current = await readTaggedConsumer(consumerId, true);
+    } catch (error) {
+      throw notApplied(error);
+    }
     if (current === null || current.etag !== ifMatch) {
       throw conflict(CONSUMER_CHANGED_MESSAGE, { kind: 'precondition_failed' });
     }

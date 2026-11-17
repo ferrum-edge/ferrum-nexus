@@ -20,6 +20,7 @@ import {
   CONSUMER_SCAN_LIMIT,
   consumerPreconditionFailed,
   createFerrumAdminClient,
+  credentialWriteNotApplied,
   createKeyedSerializer,
   type FerrumAdminClient,
 } from './client.js';
@@ -706,6 +707,54 @@ describe('ferrum admin client', () => {
       );
       assert.equal(deletesTo('other-400').length, 1, 'no fallback was attempted');
       assert.equal(keysOf('other-400').length, 2);
+    });
+
+    it('refuses a consumer read that carries no strong tag (review dsf F1)', async () => {
+      await twoKeys('cached');
+      // Edge's cached fallback after a failed store read issues no tag.
+      edge.setConsumerTagIssued(false);
+      const plain = await client.consumers.get('cached');
+      assert.equal(plain?.id, 'cached', 'a plain read still works');
+      await assert.rejects(
+        () => client.consumers.getTagged('cached'),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'EDGE_ERROR');
+          assert.deepEqual(error.details, { kind: 'consumer_tag_missing' });
+          return true;
+        },
+      );
+    });
+
+    it('Edge v0.9.20: a failed re-read is a definite non-write (review sol F2)', async () => {
+      edge.setCredentialIfMatch('unsupported');
+      const etag = await twoKeys('reread-fails');
+      edge.queueFailure(503, { error: 'unavailable' }, '/consumers/reread-fails', 'GET');
+      await assert.rejects(
+        () => client.consumers.deleteCredentialAt('reread-fails', 'keyauth', 1, undefined, etag),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(consumerPreconditionFailed(error), false, 'not a changed consumer');
+          assert.equal(credentialWriteNotApplied(error), true, 'but certainly not written');
+          return true;
+        },
+      );
+      assert.equal(deletesTo('reread-fails').length, 1, 'the unconditional delete was not sent');
+      assert.equal(keysOf('reread-fails').length, 2);
+    });
+
+    it('keeps a failure of the write itself an unknown outcome', async () => {
+      const etag = await twoKeys('write-fails');
+      edge.queueFailure(503, { error: 'unavailable' }, '/credentials/', 'DELETE');
+      await assert.rejects(
+        () => client.consumers.deleteCredentialAt('write-fails', 'keyauth', 1, undefined, etag),
+        (error: unknown) => credentialWriteNotApplied(error) === false,
+      );
+      // A refusal for an unusable tag happens before sending, so it is definite.
+      await assert.rejects(
+        () => client.consumers.deleteCredentialAt('write-fails', 'keyauth', 1, undefined, '*'),
+        (error: unknown) => credentialWriteNotApplied(error),
+      );
     });
 
     it('refuses a missing or unusable tag before sending anything', async () => {

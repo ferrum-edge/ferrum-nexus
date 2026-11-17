@@ -25,6 +25,7 @@ import { after, afterEach, before, describe, it } from 'node:test';
 
 import type {
   ApiErrorBody,
+  CredentialType,
   IssueCredentialResponse,
   RotateCredentialResponse,
   ShowOnceSecret,
@@ -51,6 +52,7 @@ describe('credential writes conditioned on the consumer tag', () => {
     restore?.();
     restore = null;
     harness.edge.setCredentialIfMatch('evaluate');
+    harness.edge.setConsumerTagIssued(true);
     harness.edge.clearInjections();
   });
 
@@ -64,11 +66,14 @@ describe('credential writes conditioned on the consumer tag', () => {
     return harness.registerUser({ email: `if-match-${nonce}@example.test`, role: 'client' });
   }
 
-  async function issue(session: TestSession): Promise<IssueCredentialResponse> {
+  async function issue(
+    session: TestSession,
+    type: CredentialType = 'keyauth',
+  ): Promise<IssueCredentialResponse> {
     const response = await harness.authed(session, {
       method: 'POST',
       url: '/api/credentials',
-      payload: { credential_type: 'keyauth' },
+      payload: { credential_type: type },
     });
     assert.equal(response.statusCode, 201, response.body);
     return response.json<IssueCredentialResponse>();
@@ -228,6 +233,101 @@ describe('credential writes conditioned on the consumer tag', () => {
       }
     });
   }
+
+  for (const mode of ['evaluate', 'unsupported'] as const) {
+    const gateway = mode === 'evaluate' ? 'Edge with #7393' : 'Edge v0.9.20';
+
+    it(`${gateway}: a refused clear keeps an earlier unconfirmed retirement (sol F1)`, async () => {
+      const user = await client();
+      const first = await issue(user, 'basicauth');
+      const second = await issue(user, 'basicauth');
+      const consumerId = first.credential.ferrum_consumer_id;
+      const passwords = (): number =>
+        harness.edge.consumers.get(`nexus/${consumerId}`)?.credentials.basicauth?.length ?? 0;
+
+      // Edge removes the first password and the answer is lost: the row is
+      // `retiring`, an outcome nobody confirmed.
+      harness.edge.queueLostAck(503, { error: 'timeout' }, '/credentials/basicauth/', 'DELETE');
+      const lost = await revoke(user, first.credential.id);
+      assert.equal(lost.statusCode, 502, lost.body);
+      assert.equal(await statusOf(first.credential.id), 'retiring');
+      assert.equal(passwords(), 1);
+
+      // The clear is refused because another writer changed the consumer.
+      harness.edge.setCredentialIfMatch(mode);
+      afterNextTaggedRead(consumerId, () => {
+        const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
+        assert.ok(stored);
+        stored.acl_groups = [...stored.acl_groups, 'operator-group'];
+        stored.updated_at = new Date(Date.now() + 60_000).toISOString();
+      });
+      const refused = await harness.authed(user, {
+        method: 'DELETE',
+        url: `/api/credentials/${first.credential.id}?clear_type=true`,
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(errorOf(refused.body).code, 'CONFLICT');
+
+      // The refusal proves only that this delete did not run, not that the
+      // earlier one did not: promoting the row would let a later positional
+      // revoke of it land on the second password.
+      assert.equal(await statusOf(first.credential.id), 'retiring');
+      assert.equal(await statusOf(second.credential.id), 'active');
+      assert.equal(passwords(), 1);
+    });
+  }
+
+  it('refuses a revoke or rotation decided from an untagged read (dsf F1)', async () => {
+    const user = await client();
+    const first = await issue(user);
+    const second = await issue(user);
+    const consumerId = first.credential.ferrum_consumer_id;
+    const appendsBefore = credentialWrites(consumerId, 'POST').length;
+
+    // Edge's cached fallback after a failed store read issues no tag.
+    harness.edge.setConsumerTagIssued(false);
+    const revoked = await revoke(user, first.credential.id);
+    assert.equal(revoked.statusCode, 502, revoked.body);
+    assert.equal(errorOf(revoked.body).code, 'EDGE_ERROR');
+    const rotated = await rotate(user, second.credential.id);
+    assert.equal(rotated.statusCode, 502, rotated.body);
+    assert.ok(!('secret' in JSON.parse(rotated.body)), 'no secret was handed out');
+
+    assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'nothing was deleted');
+    assert.equal(credentialWrites(consumerId, 'POST').length, appendsBefore, 'nothing appended');
+    assert.deepEqual(labelled(consumerId, { first, second }), ['first', 'second']);
+    assert.equal(await statusOf(first.credential.id), 'active');
+    assert.equal(await statusOf(second.credential.id), 'active');
+  });
+
+  it('Edge v0.9.20: a failed re-read reclaims nothing (sol F2)', async () => {
+    harness.edge.setCredentialIfMatch('unsupported');
+    const user = await client();
+    const only = await issue(user);
+    const consumerId = only.credential.ferrum_consumer_id;
+    const appendsBefore = credentialWrites(consumerId, 'POST').length;
+
+    // Another writer appends a key after the rotation's read, so the array
+    // has exactly the length the rotation's own append would have left; then
+    // the fallback's re-read of the consumer fails. Nothing of the rotation's
+    // was appended, so nothing may be taken back: a reclaim would read the
+    // other writer's key as the rotation's and delete it.
+    afterNextTaggedRead(consumerId, () => {
+      const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
+      assert.ok(stored);
+      stored.credentials.keyauth = [...(stored.credentials.keyauth ?? []), { key: FOREIGN_KEY }];
+      stored.updated_at = new Date(Date.now() + 60_000).toISOString();
+      harness.edge.queueFailure(503, { error: 'unavailable' }, `/consumers/${consumerId}`, 'GET');
+    });
+    const failed = await rotate(user, only.credential.id);
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.ok(!('secret' in JSON.parse(failed.body)), 'no secret was handed out');
+
+    assert.deepEqual(labelled(consumerId, { foreign: FOREIGN_KEY, only }), ['only', 'foreign']);
+    assert.equal(await statusOf(only.credential.id), 'active');
+    assert.equal(credentialWrites(consumerId, 'POST').length, appendsBefore + 1);
+    assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'nothing was taken back');
+  });
 
   it('a rotation keeps the previous key when its fresh read shows another change', async () => {
     const user = await client();

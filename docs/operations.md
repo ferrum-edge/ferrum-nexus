@@ -3484,10 +3484,14 @@ sends the consumer `ETag` of that read (`GET /consumers/{id}`) as `If-Match`:
   write.
 
 Either refusal is `409 CONFLICT` to the caller. Nothing was deleted or appended,
-the credential's row is back to (or still) `active`, and Nexus does not retry:
-the user reads the credentials again and repeats the operation. A consumer read
-without a strong `ETag` (Edge's cached fallback when its store is unreadable) is
-refused before anything is decided from it. A rotation below the cap re-reads
+a retirement the attempt itself started is withdrawn (a row that was already
+`retiring` from an earlier unconfirmed outcome stays `retiring`), and Nexus
+does not retry: the user reads the credentials again and repeats the
+operation. A consumer read without a strong `ETag` (Edge's cached fallback when
+its store is unreadable) is refused before anything is decided from it. On Edge
+v0.9.20, a re-read that fails counts as a definite non-write too: the
+unconditional write was never sent, so nothing is reclaimed or settled as
+though it might have landed. A rotation below the cap re-reads
 the consumer after its own append, because Edge returns no tag with a write; if
 that read no longer shows the array as the append left it, the previous
 credential is kept and the replacement is taken back or recorded as
