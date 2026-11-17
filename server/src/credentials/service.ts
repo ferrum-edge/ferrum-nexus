@@ -1502,6 +1502,32 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }
 
   /**
+   * Whether the entry a retirement was removing is still on the gateway, by
+   * its material in a credential-complete read: `true` present, `false` gone
+   * (or the consumer with it), `null` when that cannot be told — `basicauth`,
+   * whose material Edge keeps only hashed, an unreadable consumer, or an
+   * entry that cannot be identified uniquely.
+   *
+   * A delete that certainly wrote nothing (Edge's `412`, or a failure before
+   * sending) proves only that this delete did not run. A `412` means another
+   * writer changed the consumer, possibly by removing this very entry, so the
+   * row goes back to `active` only on this positive evidence (review dsf
+   * round 3); otherwise it stays `retiring` for {@link settleLostRetirement}.
+   */
+  async function retiredEntryPresent(
+    consumerId: string,
+    type: CredentialType,
+    fingerprint: string,
+    actorId: Uuid,
+  ): Promise<boolean | null> {
+    if (type === 'basicauth') return null;
+    const read = await locateAppendedEntry({ consumerId, type, fingerprint, actorId });
+    if (read === null) return false;
+    if (read === undefined || read.index === 'ambiguous') return null;
+    return read.index !== 'absent';
+  }
+
+  /**
    * Whether a delete that reported failure provably never touched the array.
    *
    * `length` is the number of entries the caller read from the gateway inside
@@ -1701,19 +1727,22 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * local records the entry, so nothing can settle it, and the operator is
    * left with a working credential the portal has never heard of.
    *
-   * So the array is re-read — inside the lease the caller already holds, so
-   * nothing else is moving it — and the answer is one of three:
+   * So the consumer is read credential-complete and this call's entry is
+   * looked for by its material ({@link withdrawAppendedEntry}), and the
+   * answer is one of three:
    *
-   * - **Unchanged.** The append demonstrably did not apply: the failure means
+   * - **Not there.** The append demonstrably did not apply: the failure means
    *   exactly what it said. Nothing is deleted and nothing is recorded; the
    *   caller's error stands on its own.
-   * - **One entry longer, with this call's entry at the tail.** It landed. The
-   *   entry is withdrawn and the withdrawal audited: the plaintext is not
-   *   being returned to anybody, so leaving it would spend a cap slot on a
+   * - **There, exactly once.** It landed. The entry is withdrawn under that
+   *   read's tag and the withdrawal audited: the plaintext is not being
+   *   returned to anybody, so leaving it would spend a cap slot on a
    *   credential nobody holds.
-   * - **Anything else** — `basicauth`, an unreadable consumer, an array that
-   *   moved. The orphan can be neither confirmed nor deleted safely, so it is
-   *   audited as `suspected` and left exactly where it is.
+   * - **Anything else** — `basicauth`, an unreadable consumer, an entry that
+   *   cannot be identified uniquely. The orphan can be neither confirmed nor
+   *   deleted safely, so it is audited as `suspected` and left where it is.
+   *
+   * An append Edge certainly refused never gets here (`appendCertainlyRefused`).
    */
   async function reclaimUnacknowledgedAppend(input: {
     consumerId: string;
@@ -1901,16 +1930,16 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // which a positional delete takes somebody else's live key — so
             // the intent is withdrawn and the caller retries the revoke.
             // A delete that certainly wrote nothing (a refused precondition,
-            // or a tag that could not be verified before sending) proves it
-            // too, but only for the retirement this attempt started: a row
-            // that was already `retiring` stands for an earlier outcome
-            // nobody confirmed, and stays that way (review sol F1). An
-            // outcome that cannot be proved stays `retiring`, which is the
-            // safe reading.
-            if (
-              (current.status === 'active' && credentialWriteNotApplied(error)) ||
-              (await deleteDidNotApply(consumerId, type, length))
-            ) {
+            // or a tag that could not be verified before sending) proves
+            // only that it did not run: the entry is withdrawn only when a
+            // credential-complete read still holds it. A row that was
+            // already `retiring` therefore stays so unless its entry is
+            // proved live (review sol F1, dsf round 3). An outcome that
+            // cannot be proved stays `retiring`, which is the safe reading.
+            const entryKept = credentialWriteNotApplied(error)
+              ? await retiredEntryPresent(consumerId, type, current.fingerprint, actor.id)
+              : await deleteDidNotApply(consumerId, type, length);
+            if (entryKept === true) {
               await withdrawRetirement({
                 credential: current,
                 operation: 'revoke',
@@ -3064,14 +3093,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // one input that could make a later {@link settleLostRetirement}
             // settle the wrong row, after which a positional delete takes
             // somebody else's live key. A delete that certainly wrote nothing
-            // proves the same for a retirement this attempt started (never
-            // for a row that was already `retiring`). Nothing else changed —
-            // no append has been attempted yet — so the account is left
-            // exactly as the rotation found it, cap slot included.
-            if (
-              (current.status === 'active' && credentialWriteNotApplied(error)) ||
-              (await deleteDidNotApply(consumerId, type, length))
-            ) {
+            // proves only that it did not run, so the entry must still be in
+            // a credential-complete read. Nothing else changed — no append
+            // has been attempted yet — so the account is left exactly as the
+            // rotation found it, cap slot included.
+            const entryKept = credentialWriteNotApplied(error)
+              ? await retiredEntryPresent(consumerId, type, current.fingerprint, user.id)
+              : await deleteDidNotApply(consumerId, type, length);
+            if (entryKept === true) {
               await withdrawRetirement({
                 credential: current,
                 operation: 'rotate',
@@ -3205,14 +3234,22 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               // only ever be a credential the owner cannot use or explain.
               await store.credentials.delete(created.credential.id).catch(() => undefined);
             }
-            if (arrayAsAppended || (!deleteMayHaveApplied && current.status === 'active')) {
-              // The array still held every entry the append landed on, or the
-              // delete certainly wrote nothing and the retirement was this
-              // attempt's own, so the entry being retired was not removed by
-              // it. Withdraw the intent with the append: leaving a row
-              // `retiring` over a credential that is demonstrably live is the
-              // one input that could later make {@link settleLostRetirement}
-              // settle the wrong row.
+            // Whether the entry being retired is still live, by its material:
+            // the only evidence that licenses withdrawing the intent. Neither
+            // a delete that certainly wrote nothing nor an array of the right
+            // length proves it, since another writer may have removed the
+            // entry (review dsf round 3).
+            const retiredKept = await retiredEntryPresent(
+              consumerId,
+              type,
+              current.fingerprint,
+              user.id,
+            );
+            if (retiredKept === true) {
+              // Withdraw the intent with the append: leaving a row `retiring`
+              // over a credential that is demonstrably live is the one input
+              // that could later make {@link settleLostRetirement} settle the
+              // wrong row.
               await store.credentials
                 .update(current.id, { status: 'active' })
                 .catch(() => undefined);
@@ -3235,7 +3272,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               // only one of the three shapes is an administrator's problem.
               let message =
                 'The previous credential could not be removed from the gateway and the replacement created for it could not be taken back; an administrator must reconcile this consumer';
-              if (arrayLength === length && deleteMayHaveApplied) {
+              if (retiredKept === false || (arrayLength === length && deleteMayHaveApplied)) {
                 // The array is back to the length the append index came from:
                 // the delete landed after all and only its acknowledgement was
                 // lost. The previous credential is gone, the replacement is the
