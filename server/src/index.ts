@@ -270,7 +270,7 @@ export interface BuildServerDeps {
    */
   startReconciliationWorker?: boolean;
   /**
-   * Run the one-off rewrite of palette configs that carry a key Edge removed
+   * Run the start-up rewrite of palette configs that carry a key Edge removed
    * (`plugins/retired-keys.ts`, issue #727). Same default as
    * {@link BuildServerDeps.startOutboxWorker}: tests call
    * `stripRetiredPaletteKeys` themselves.
@@ -1110,10 +1110,10 @@ export async function buildServer(
   }
   if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
   if (deps.startRetiredKeysPass ?? config.env !== 'test') {
-    // Once per database, while the gateway still accepts them: rewrite the
+    // At every start, while the gateway still accepts them: rewrite the
     // palette configs an earlier release wrote with a key the next Edge
-    // release refuses (issue #727). In the background; a run that meets a
-    // failure records nothing and the next start tries again.
+    // release refuses (issue #727). In the background; it only reads the
+    // store once nothing is left, and whatever a run misses the next retries.
     void stripRetiredPaletteKeys({
       store: deps.store,
       audit,
@@ -1123,7 +1123,7 @@ export async function buildServer(
       log: warn,
     })
       .then((result) => {
-        if (!result.alreadyRecorded) {
+        if (result.rewritten > 0 || !result.alreadyRecorded) {
           app.log.info(result, 'Stripped removed keys from palette plugin configs');
         }
       })

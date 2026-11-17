@@ -1111,19 +1111,21 @@ database-mode gateway refuse to start.
 
 This release stops writing them (a save that carries one is
 `400 VALIDATION_FAILED`, and every rebuild drops them from stored rows), and at
-its first start it rewrites every palette config in `FERRUM_NAMESPACE` that
-still carries one: the gateway config the row owns (by recorded id, keeping
+every start it rewrites each palette config in `FERRUM_NAMESPACE` that still
+carries one: the gateway config the row owns (by recorded id, keeping
 operator fields such as `priority_override`) and the row itself. Each rewrite
-is an `api.plugin_set` audit row with `retired_keys` and no actor; the run ends
-with one `api.plugin_keys_stripped` row. A run that cannot rewrite a row (the
-gateway is unreachable, say) logs it at `warn`, records no completion row, and
-runs again at the next start.
+is an `api.plugin_set` audit row with `retired_keys` and no actor. A row it
+cannot rewrite (the gateway is unreachable, or the API changed under it) is
+logged at `warn` and retried at the next start; once nothing is left, a start
+only reads the store. The first run that finishes for the namespace with
+nothing failed records one `api.plugin_keys_stripped` row targeting it.
 
 **Before upgrading Edge past v0.9.20**, run this release (or a later one)
-against the v0.9.20 gateway until `api.plugin_keys_stripped` is in the audit
-log. An `ip_restriction` or `response_caching` config an operator wrote by hand
-is not the portal's to change: remove those keys from it yourself, as the Edge
-upgrade guide says.
+against the v0.9.20 gateway until `api.plugin_keys_stripped` for your
+`FERRUM_NAMESPACE` is in the audit log, and restart it once more afterwards if
+it logged a failed rewrite since. An `ip_restriction` or `response_caching`
+config an operator wrote by hand is not the portal's to change: remove those
+keys from it yourself, as the Edge upgrade guide says.
 
 ### Email
 

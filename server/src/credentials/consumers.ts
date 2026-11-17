@@ -210,6 +210,23 @@ export function aclGroupLimitExceeded(consumerId: string, groups: number): Nexus
   );
 }
 
+/**
+ * Refuse a write that would take a consumer from `current` groups to more than
+ * Edge's cap. A write that shrinks or keeps the count is never refused, so a
+ * consumer an operator overfilled can still lose groups. Every Nexus writer of
+ * a consumer's groups calls this before the write: `mutateAclGroups`, the
+ * account re-enable and consumer repair.
+ */
+export function assertAclGroupCap(
+  consumerId: string,
+  next: readonly string[],
+  current: readonly string[] = [],
+): void {
+  if (next.length > MAX_ACL_GROUPS_PER_CONSUMER && next.length > current.length) {
+    throw aclGroupLimitExceeded(consumerId, next.length);
+  }
+}
+
 /** Whether `error` is the refusal {@link aclGroupLimitExceeded} raises. */
 export function isAclGroupLimitExceeded(error: unknown): error is NexusError {
   return (
@@ -352,12 +369,7 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         // Edge refuses a consumer past its group cap with a `400` Nexus cannot
         // echo; refuse a change that grows the set past it here instead. A
         // change that shrinks or keeps the count is never refused.
-        if (
-          groups.length > MAX_ACL_GROUPS_PER_CONSUMER &&
-          groups.length > (current.acl_groups ?? []).length
-        ) {
-          throw aclGroupLimitExceeded(ferrumConsumerId, groups.length);
-        }
+        assertAclGroupCap(ferrumConsumerId, groups, current.acl_groups ?? []);
         if (
           options?.skipUnchanged &&
           !options.afterWrite &&

@@ -17,6 +17,7 @@ import {
 } from '@ferrum-nexus/shared';
 import type { NexusStore, TransactionOptions } from '../db/store.js';
 import type { EdgePluginConfigWrite } from '../ferrum-admin/types.js';
+import { assertAclGroupCap, isAclGroupLimitExceeded } from '../credentials/consumers.js';
 import { stampAgentDocument } from '../publishing/agents.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -1360,6 +1361,74 @@ describe('agent publishing and Nexus authorization', () => {
     assert.equal(current?.spec_enforcement, 'docs_only');
     assert.equal(current?.gateway_state, 'deployed');
     assert.ok(harness.edge.proxies.get(`nexus/${proxyId}`));
+  });
+
+  // Review sol F1: Edge merges an enabled global into every proxy that has no
+  // enabled deduplication config of its own, so an operator's global counts.
+  it('refuses to enable agents beside an operator global request_deduplication', async () => {
+    const { api } = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    const groupsBefore = groupsOf(grantee);
+    const id = 'operator-global-deduplication';
+    harness.edge.pluginConfigs.set(`nexus/${id}`, {
+      id,
+      namespace: 'nexus',
+      plugin_name: 'request_deduplication',
+      scope: 'global',
+      enabled: true,
+      config: {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    try {
+      const before = harness.edge.requests.length;
+      const refused = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${api.id}`,
+        payload: { agents: AGENTS },
+      });
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+      assert.deepEqual(writesSince(before), []);
+    } finally {
+      harness.edge.pluginConfigs.delete(`nexus/${id}`);
+    }
+    assert.deepEqual(groupsOf(grantee), groupsBefore);
+    assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+  });
+
+  // Review dsf F2: the cap every group writer applies, consumer repair included.
+  it('applies the group cap only to a write that grows a consumer past it', () => {
+    const groups = (count: number) => Array.from({ length: count }, (_, index) => `g${index}`);
+    assert.doesNotThrow(() => assertAclGroupCap('consumer', groups(500)));
+    assert.throws(() => assertAclGroupCap('consumer', groups(501)), isAclGroupLimitExceeded);
+    assert.doesNotThrow(() => assertAclGroupCap('consumer', groups(501), groups(502)));
+  });
+
+  // Review dsf F2: the account re-enable writes groups without
+  // mutateAclGroups, and is held to the same cap.
+  it('refuses a re-enable that would take a consumer past the group cap', async () => {
+    const { api } = await publish();
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    await setStatus(grantee, 'disabled');
+    // An explicit subset this long cannot be approved; written directly, it is
+    // a consumer the rebuild would take to 601 groups.
+    const tools = Array.from({ length: 600 }, (_, index) => `tool-${index}`);
+    const widened = await harness.store.grants.updateIfStatus(grant.id, 'active', {
+      approved_tools: tools,
+    });
+    assert.ok(widened);
+    const before = harness.edge.requests.length;
+    await assert.rejects(
+      harness.services.credentials.restoreGatewayAccess(grantee.user.id, admin.user.id),
+      (error: unknown) => isAclGroupLimitExceeded(error),
+    );
+    assert.deepEqual(
+      writesSince(before).filter((write) => write.startsWith('PUT /consumers/')),
+      [],
+    );
   });
 
   it('carries explicit subsets across spec revisions and prunes only removed tools', async () => {

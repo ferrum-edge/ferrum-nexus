@@ -26,7 +26,13 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { createKeyedSerializer, proxyLockKey } from '../lib/keyed-serializer.js';
-import { stripRetiredPaletteKeys } from '../plugins/retired-keys.js';
+import { effectiveInstances } from '../ferrum-admin/palette.js';
+import type { EdgePluginConfig } from '../ferrum-admin/types.js';
+import {
+  stripRetiredPaletteKeys,
+  type RetiredKeysDeps,
+  type RetiredKeysResult,
+} from '../plugins/retired-keys.js';
 import {
   aclGroupsProblem,
   mockCacheStorageAllowed,
@@ -42,6 +48,7 @@ const DOES_NOT_ACCEPT_EXECUTION = /does not accept an execution trigger/;
 const VALIDATION_FAILED_CODE = /VALIDATION_FAILED/;
 const CORRELATION_ID_CONFIGURATION_NOT = /Correlation ID configuration is not valid/i;
 const ACL_GROUPS_CAP = /acl_groups must not have more than 500 entries \(got 501\)/;
+const CHANGED_WHILE_STRIPPED = /changed while its removed keys were stripped/;
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -406,6 +413,61 @@ describe('provider plugin palette', () => {
       // Stored switched off, it runs nothing, which Edge composes with anything.
       const off = await setPlugin('request_deduplication', { enabled: false, config: {} });
       assert.equal(off.statusCode, 200, off.body);
+    });
+
+    // Review sol F1: Edge merges an unshadowed global into every proxy.
+    it('refuses deduplication beside an operator global mcp_gateway (issue #730)', async () => {
+      const id = 'operator-global-mcp';
+      harness.edge.pluginConfigs.set(`nexus/${id}`, {
+        id,
+        namespace: 'nexus',
+        plugin_name: 'mcp_gateway',
+        scope: 'global',
+        enabled: true,
+        config: {},
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      try {
+        const response = await setPlugin('request_deduplication', { config: {} });
+        assert.equal(response.statusCode, 400, response.body);
+        assert.match(errorCode(response.body), VALIDATION_FAILED_CODE);
+        assert.equal(configsNamed('request_deduplication').length, 0);
+      } finally {
+        harness.edge.pluginConfigs.delete(`nexus/${id}`);
+      }
+    });
+
+    it('resolves effective plugins the way Edge merges them', () => {
+      const config = (
+        id: string,
+        scope: EdgePluginConfig['scope'],
+        overrides: Partial<EdgePluginConfig> = {},
+      ): EdgePluginConfig => ({
+        id,
+        namespace: 'nexus',
+        plugin_name: 'request_deduplication',
+        scope,
+        enabled: true,
+        config: {},
+        ...overrides,
+      });
+      const global = config('global', 'global');
+      const own = config('own', 'proxy', { proxy_id: 'p1' });
+      const group = config('group', 'proxy_group');
+      const proxy = (...ids: string[]) => ({
+        id: 'p1',
+        plugins: ids.map((plugin_config_id) => ({ plugin_config_id })),
+      });
+      const ids = (found: EdgePluginConfig[]) => found.map((entry) => entry.id);
+      const name = 'request_deduplication';
+      assert.deepEqual(ids(effectiveInstances(proxy(), [global, own, group], name)), ['global']);
+      assert.deepEqual(ids(effectiveInstances(proxy('own'), [global, own], name)), ['own']);
+      assert.deepEqual(ids(effectiveInstances(proxy('group'), [global, group], name)), ['group']);
+      const disabled = { ...own, enabled: false };
+      assert.deepEqual(ids(effectiveInstances(proxy('own'), [global, disabled], name)), ['global']);
+      const elsewhere = { ...own, proxy_id: 'p2' };
+      assert.deepEqual(ids(effectiveInstances(proxy('own'), [elsewhere], name)), []);
     });
 
     // Issue #729: Edge's `MAX_ACL_GROUPS_PER_CONSUMER`.
@@ -842,11 +904,14 @@ describe('provider plugin palette', () => {
     });
 
     it('rejects an enum value outside the offered set', async () => {
-      assert.equal(
-        (await setPlugin('ip_restriction', { config: { allow: ['10.0.0.1'], order: 'sideways' } }))
-          .statusCode,
-        400,
-      );
+      // `frame_options` is a `kind: 'enum'` field; the list fields below take
+      // the `string_list` options branch.
+      const framed = await setPlugin('security_headers', {
+        config: { frame_options: 'SOMETIMES' },
+      });
+      assert.equal(framed.statusCode, 400, framed.body);
+      const details = (JSON.parse(framed.body) as ApiErrorBody).error.details as { path: string }[];
+      assert.ok(details.some((detail) => detail.path === 'security_headers.frame_options'));
       assert.equal(
         (await setPlugin('compression', { config: { algorithms: ['zstd'] } })).statusCode,
         400,
@@ -1481,19 +1546,20 @@ describe('provider plugin palette', () => {
       return live;
     }
 
-    function strip(): ReturnType<typeof stripRetiredPaletteKeys> {
+    function strip(overrides: Partial<RetiredKeysDeps> = {}): Promise<RetiredKeysResult> {
       return stripRetiredPaletteKeys({
         store: harness.store,
         audit: harness.services.audit,
         apiPlugins: harness.services.apiPlugins,
         locks: createKeyedSerializer({ leases: harness.store.leases }),
         namespace: 'nexus',
+        ...overrides,
       });
     }
 
-    // One test, because the run is recorded once per database and this file
-    // shares one: the failed first run must record nothing, and the run that
-    // succeeds must record itself so a third finds nothing to do.
+    // One test, because the namespace is recorded once and this file shares
+    // one database: the failed first run must record nothing, and the run that
+    // succeeds must record it so a third finds it recorded and nothing to do.
     it('rewrites a config saved with mode, keeping operator fields, and records the run once', async () => {
       const live = await seedLegacyIpRestriction();
       const configId = String(live.id);
@@ -1535,6 +1601,88 @@ describe('provider plugin palette', () => {
       const resaved = await setPlugin('ip_restriction', { config: { allow: ['203.0.113.0/24'] } });
       assert.equal(resaved.statusCode, 200, resaved.body);
       assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
+    });
+
+    // Review sol F3: the record is per namespace, and never stops a later scan.
+    it('records each namespace on its own and keeps rewriting after the record', async () => {
+      assert.equal((await strip({ namespace: 'elsewhere' })).alreadyRecorded, false);
+      assert.equal((await strip({ namespace: 'elsewhere' })).alreadyRecorded, true);
+      const recorded = (await harness.auditRows('api.plugin_keys_stripped')).filter(
+        (entry) => entry.target_id === 'elsewhere',
+      );
+      assert.deepEqual(recorded.map((entry) => entry.target_type), ['namespace']);
+
+      const live = await seedLegacyIpRestriction();
+      const later = await strip();
+      assert.equal(later.failed, 0);
+      assert.ok(later.rewritten >= 1);
+      assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
+    });
+
+    // Review sol F2: deleting an API the pass already read shifts the next
+    // offset page past an unread one; the pass reads again until nothing is new.
+    it('finds a row an API deletion shifted behind the page cursor', async () => {
+      const older = await seedLegacyIpRestriction();
+      await publishApi();
+      const newer = await seedLegacyIpRestriction();
+      await publishApi();
+      // The newest API, read first (newest-first order) and clean.
+      const victim = apiId;
+      let deleted = false;
+      const result = await strip({
+        pageSize: 1,
+        apiPlugins: {
+          async stripRetiredConfigKeys(id, name) {
+            if (!deleted) {
+              deleted = true;
+              const removed = await harness.authed(provider, {
+                method: 'DELETE',
+                url: `/api/apis/${victim}`,
+              });
+              assert.equal(removed.statusCode, 200, removed.body);
+            }
+            return harness.services.apiPlugins.stripRetiredConfigKeys(id, name);
+          },
+        },
+      });
+      assert.equal(deleted, true);
+      assert.equal(result.failed, 0);
+      assert.deepEqual(storedConfig(String(newer.id)).config, { allow: ['203.0.113.0/24'] });
+      assert.deepEqual(storedConfig(String(older.id)).config, { allow: ['203.0.113.0/24'] });
+    });
+
+    // Review dsf F1: a restore that re-points the row during the gateway write
+    // owns it; the pass gives up (and the next start looks again) instead of
+    // writing the old config id back.
+    it('does not write back a config id that changed during the rewrite', async () => {
+      await seedLegacyIpRestriction();
+      const pluginConfigs = harness.edgeClient.pluginConfigs;
+      const replace = pluginConfigs.replace.bind(pluginConfigs);
+      pluginConfigs.replace = async (...args) => {
+        pluginConfigs.replace = replace;
+        const row = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
+        assert.ok(row);
+        await harness.store.apiPlugins.upsert({
+          api_id: apiId,
+          plugin_name: 'ip_restriction',
+          enabled: row.enabled,
+          config: row.config,
+          trigger: row.trigger,
+          ferrum_plugin_config_id: 'restored-config',
+        });
+        return replace(...args);
+      };
+      try {
+        await assert.rejects(
+          harness.services.apiPlugins.stripRetiredConfigKeys(apiId, 'ip_restriction'),
+          CHANGED_WHILE_STRIPPED,
+        );
+      } finally {
+        pluginConfigs.replace = replace;
+      }
+      const row = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
+      assert.equal(row?.ferrum_plugin_config_id, 'restored-config');
+      assert.deepEqual(row?.config, { allow: ['203.0.113.0/24'], mode: 'allow_first' });
     });
   });
 

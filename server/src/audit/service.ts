@@ -196,11 +196,11 @@ export const AuditAction = {
    */
   API_PLUGIN_ROLLBACK: 'api.plugin_rollback',
   /**
-   * The one-off startup pass rewrote every palette config that carried a key
-   * Edge has removed (`ip_restriction.mode`, issue #727). Written by the system
-   * once, after every such row was rewritten (each with its own
-   * `api.plugin_set` row naming `retired_keys`); its presence stops later
-   * starts from scanning again.
+   * The startup pass finished for a namespace with every palette config that
+   * carried a key Edge has removed (`ip_restriction.mode`, issue #727)
+   * rewritten, each with its own `api.plugin_set` row naming `retired_keys`.
+   * Written by the system once per namespace, targeting it; the pass itself
+   * still runs at every start.
    */
   API_PLUGIN_KEYS_STRIPPED: 'api.plugin_keys_stripped',
   /**
@@ -638,8 +638,8 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_PLUGIN_REMOVE]: TRANSACTIONAL,
   [AuditAction.API_PLUGIN_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.API_PLUGIN_KEYS_STRIPPED]: rowOnly(
-    'A one-time marker: each rewrite committed its own api.plugin_set row before it, and a ' +
-      'run that found nothing to rewrite still records that it ran, so later starts skip it.',
+    'A once-per-namespace marker: each rewrite committed its own api.plugin_set row before ' +
+      'it, and a run that found nothing to rewrite still records that the namespace is clean.',
   ),
   [AuditAction.API_GATEWAY_REPAIR_REQUIRED]: postCommit(
     `${COMPENSATION_TRAIL} The reconciliation flag, which is a change of its own, records ` +

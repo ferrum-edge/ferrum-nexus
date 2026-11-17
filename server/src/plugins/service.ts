@@ -140,7 +140,7 @@ export interface ApiPluginsService {
    * Rewrite one palette row, and the gateway config it owns, without the keys
    * Edge has removed (`RETIRED_PLUGIN_CONFIG_KEYS`, issue #727).
    *
-   * The system's own change, made by the one-off startup pass in
+   * The system's own change, made by the startup pass in
    * `retired-keys.ts`: no actor and no ownership check. Only the config the
    * row owns is written, under the same locks and undo stack as a provider's
    * save; a config the row does not own (or a missing proxy) leaves only the
@@ -254,14 +254,18 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
   /**
    * Refuse to switch `request_deduplication` on where Edge would refuse it
    * beside the API's `mcp_gateway` (issue #730): an API with AI agents on, or
-   * a proxy already running an MCP gateway. Called under the proxy lease,
+   * a proxy whose effective plugins (its own, associated proxy-group ones, or
+   * enabled globals) include an MCP gateway. Called under the proxy lease,
    * before any gateway write, so the provider gets a reason to act on instead
    * of a gateway `400` and a rollback.
    */
   async function assertDeduplicationComposes(target: { apiId: Uuid; proxyId: string }) {
     const api = await store.apis.findById(target.apiId);
-    const gateway = activeMcpGateway(await binder.listByProxy(target.proxyId));
-    if (!api?.agents && !gateway) return;
+    if (!api?.agents) {
+      // What the proxy runs, an operator's global or proxy-group gateway too.
+      const proxy = await edge.proxies.get(target.proxyId);
+      if (!proxy || !activeMcpGateway(proxy, await edge.pluginConfigs.listAll())) return;
+    }
     throw validationFailed(
       'Request deduplication cannot run on an API with AI agents: the gateway replays a ' +
         'stored response without the MCP gateway rewriting it, so it refuses the pair. Turn ' +
@@ -604,6 +608,12 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
       if (!api) return [];
       const proxyId = api.ferrum_proxy_id;
       const rewrite = async (): Promise<string[]> => {
+        // Re-read under the locks: a restore that rebuilt the API on a new
+        // proxy since the read above re-pointed both the API and the row, and
+        // this pass must not write the old proxy's config id back over them.
+        if ((await store.apis.findById(apiId))?.ferrum_proxy_id !== proxyId) {
+          throw conflict('The API moved to another gateway proxy while its keys were stripped');
+        }
         const row = await store.apiPlugins.find(apiId, pluginName);
         if (!row) return [];
         const removed = retired.filter((key) => Object.hasOwn(row.config, key));
@@ -632,9 +642,16 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
             );
           }
           await store.transaction(async (tx) => {
-            // A provider save since the read above owns the row now.
+            // A provider save, a restore or a deletion since the reads above
+            // owns the row now; the next start looks again.
+            const parent = await tx.apis.findById(apiId);
             const current = await tx.apiPlugins.find(apiId, pluginName);
-            if (!current || !isDeepStrictEqual(current.config, row.config)) {
+            if (
+              parent?.ferrum_proxy_id !== proxyId ||
+              !current ||
+              current.ferrum_plugin_config_id !== row.ferrum_plugin_config_id ||
+              !isDeepStrictEqual(current.config, row.config)
+            ) {
               throw conflict('The palette plugin changed while its removed keys were stripped');
             }
             await tx.apiPlugins.upsert({

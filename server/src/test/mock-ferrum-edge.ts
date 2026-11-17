@@ -2701,13 +2701,36 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
-    const composition = mockPaletteCompositionError(
-      [...seen]
-        .map((id) => pluginConfigs.get(key(namespace, id)))
-        .filter((config): config is Record<string, unknown> => config !== undefined),
-    );
+    const associated = [...seen]
+      .map((id) => pluginConfigs.get(key(namespace, id)))
+      .filter((config): config is Record<string, unknown> => config !== undefined);
+    const composition =
+      mockPaletteCompositionError(associated) ??
+      mockDeduplicationCompositionError(withEffectiveGlobals(namespace, associated));
     if (composition) errors.push(composition);
     return errors.length === 0 ? null : `Invalid proxy plugin associations: ${errors.join('; ')}`;
+  }
+
+  /**
+   * `scoped` plus the enabled globals none of its enabled configs shadows by
+   * name: the set Edge's runtime merge, and its deduplication composition
+   * check, resolve for a proxy.
+   */
+  function withEffectiveGlobals(
+    namespace: string,
+    scoped: Record<string, unknown>[],
+  ): Record<string, unknown>[] {
+    const shadowed = new Set(
+      scoped.filter((config) => config.enabled !== false).map((config) => config.plugin_name),
+    );
+    const globals = [...pluginConfigs.values()].filter(
+      (config) =>
+        config.namespace === namespace &&
+        config.scope === 'global' &&
+        config.enabled !== false &&
+        !shadowed.has(config.plugin_name),
+    );
+    return [...scoped, ...globals];
   }
 
   /**
@@ -3158,7 +3181,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         config.proxy_id === proxyId &&
         (specId === null || config.api_spec_id !== specId),
     );
-    const problem = mockDeduplicationCompositionError([...embedded, ...survivors]);
+    const problem = mockDeduplicationCompositionError(
+      withEffectiveGlobals(namespace, [...embedded, ...survivors]),
+    );
     if (!problem) return null;
     return {
       error: 'Spec validation failed',

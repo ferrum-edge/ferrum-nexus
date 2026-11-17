@@ -1,7 +1,12 @@
 import { withoutRetiredConfigKeys, type ApiPluginTrigger } from '@ferrum-nexus/shared';
 
 import type { EdgeRateLimitSyncConfig } from '../config/index.js';
-import type { EdgePluginConfig, EdgePluginSettings, EdgePluginTrigger } from './types.js';
+import type {
+  EdgePluginConfig,
+  EdgePluginSettings,
+  EdgePluginTrigger,
+  EdgeProxy,
+} from './types.js';
 
 /**
  * Compression mutates request headers before deduplication fingerprints them.
@@ -31,27 +36,61 @@ export function incompatiblePaletteSibling(
 }
 
 /**
- * An enabled `request_deduplication` config on the proxy, or `undefined`.
+ * The enabled `name` configs Edge merges into `proxy`, resolved the way its
+ * runtime merge (and `request_deduplication::validate_composition`) resolves
+ * them: the proxy's associated configs (proxy-scoped ones naming this proxy,
+ * and proxy-group ones), or, when none of those is enabled, every enabled
+ * global of that name. `configs` is the whole namespace (`listAll`), so an
+ * operator's global or proxy-group config counts as well as a proxy's own.
+ */
+export function effectiveInstances(
+  proxy: Pick<EdgeProxy, 'id' | 'plugins'>,
+  configs: EdgePluginConfig[],
+  name: string,
+): EdgePluginConfig[] {
+  const byId = new Map(configs.map((config) => [config.id, config]));
+  const local = (proxy.plugins ?? [])
+    .map((association) => byId.get(association.plugin_config_id))
+    .filter(
+      (config): config is EdgePluginConfig =>
+        config !== undefined &&
+        config.enabled &&
+        config.plugin_name === name &&
+        (config.scope === 'proxy' ? config.proxy_id === proxy.id : config.scope === 'proxy_group'),
+    );
+  if (local.length > 0) return local;
+  return configs.filter(
+    (config) => config.scope === 'global' && config.enabled && config.plugin_name === name,
+  );
+}
+
+/**
+ * An effective `request_deduplication` on the proxy, or `undefined`.
  *
  * Edge refuses `request_deduplication` beside an active `mcp_gateway` on one
  * proxy (`DYNAMIC_RESPONSE_PRESENTATION_PLUGINS`): a replay skips the MCP
  * gateway's response rewrite, which follows live upstream state. An AI-agents
  * API carries that `mcp_gateway`, so the two are refused here, both ways,
- * before any gateway write (issue #730). Any enabled config counts, an
+ * before any gateway write (issue #730). Any effective config counts, an
  * operator's included: Edge judges the proxy, not who wrote the config.
  */
-export function activeDeduplication(onProxy: EdgePluginConfig[]): EdgePluginConfig | undefined {
-  return onProxy.find((plugin) => plugin.plugin_name === 'request_deduplication' && plugin.enabled);
+export function activeDeduplication(
+  proxy: Pick<EdgeProxy, 'id' | 'plugins'>,
+  configs: EdgePluginConfig[],
+): EdgePluginConfig | undefined {
+  return effectiveInstances(proxy, configs, 'request_deduplication')[0];
 }
 
 /**
- * An `mcp_gateway` config on the proxy whose hooks run, or `undefined`: outer
- * `enabled` on and its own `config.enabled` not `false`, as Edge decides.
+ * An effective `mcp_gateway` on the proxy whose hooks run, or `undefined`: its
+ * own `config.enabled` is not `false`, judged after shadowing, as Edge does.
  */
-export function activeMcpGateway(onProxy: EdgePluginConfig[]): EdgePluginConfig | undefined {
-  return onProxy.find(
-    (plugin) =>
-      plugin.plugin_name === 'mcp_gateway' && plugin.enabled && plugin.config?.enabled !== false,
+export function activeMcpGateway(
+  proxy: Pick<EdgeProxy, 'id' | 'plugins'>,
+  configs: EdgePluginConfig[],
+): EdgePluginConfig | undefined {
+  return effectiveInstances(proxy, configs, 'mcp_gateway').find(
+    (config) => config.config?.enabled !== false,
   );
 }
 

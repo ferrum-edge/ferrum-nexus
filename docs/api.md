@@ -2065,9 +2065,10 @@ API published before this limit, and `agents: null` turns its agents off so it c
 revised again.
 
 Edge refuses `request_deduplication` beside the `mcp_gateway` an agent API runs, so a
-`PATCH` that turns agents on (or a conversion to `routes` that carries them) while any
-enabled `request_deduplication` config is on the API's proxy, the portal's or an
-operator's, is refused with `400 VALIDATION_FAILED` and
+`PATCH` that turns agents on (or a conversion to `routes` that carries them) while the
+API's proxy runs an enabled `request_deduplication` (its own config, the portal's or an
+operator's, an associated proxy-group one, or an enabled global none of those shadows,
+as Edge resolves it) is refused with `400 VALIDATION_FAILED` and
 `details: { field: "agents", conflicting_plugin: "request_deduplication", plugin_config_id }`
 before any gateway or consumer write: no grantee is enrolled and a conversion does not
 take the live proxy down (issue #730). Turn deduplication off first.
@@ -2768,7 +2769,8 @@ The palette itself — which plugins exist and what each accepts — is the stat
   incompatible pair is `400 VALIDATION_FAILED` naming both plugins.
 - Switching `request_deduplication` on is `400 VALIDATION_FAILED` (with
   `conflicting_plugin: "mcp_gateway"`) on an API with AI agents on, or whose
-  proxy runs an enabled `mcp_gateway`: Edge refuses the pair, because a replay
+  proxy runs an enabled `mcp_gateway` (its own, an associated proxy-group one,
+  or an unshadowed global): Edge refuses the pair, because a replay
   skips the MCP gateway's response rewrite (issue #730). It can still be saved
   switched off.
 - `request_deduplication` with `enforce_required: true` is admission policy, and it

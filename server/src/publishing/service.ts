@@ -3624,7 +3624,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // enrollment, a conversion's proxy removal and the agent build itself
         // all come after this (issue #730).
         if (nextAgents && (agentsMoved || enforcementMoved) && proxyId) {
-          assertAgentsCompose(plugins);
+          await assertAgentsCompose(proxyId);
         }
 
         // ── Which first-class configs are the portal's to change ──────────
@@ -6335,10 +6335,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * Refuse an agent deployment onto a proxy running `request_deduplication`,
    * which Edge refuses beside the deployment's `mcp_gateway` (issue #730).
    * `VALIDATION_FAILED` naming the config, instead of a gateway `400` after
-   * grantees were enrolled or a conversion took the live proxy down.
+   * grantees were enrolled or a conversion took the live proxy down. Judged on
+   * the proxy's effective plugins, as Edge judges it: its own and associated
+   * proxy-group configs, or an enabled global none of them shadows.
    */
-  function assertAgentsCompose(onProxy: EdgePluginConfig[]): void {
-    const deduplication = activeDeduplication(onProxy);
+  async function assertAgentsCompose(proxyId: string): Promise<void> {
+    const proxy = await edge.proxies.get(proxyId);
+    if (!proxy) return;
+    const deduplication = activeDeduplication(proxy, await edge.pluginConfigs.listAll());
     if (!deduplication) return;
     throw validationFailed(
       'AI agents cannot be enabled while request deduplication runs on this API: the gateway ' +
@@ -6385,11 +6389,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       return preserveRouteValidator(routesSpecDocument(document, { proxy }), live, spec?.id);
     }
     const proxyId = String(proxy.id);
+    if (enroll) {
+      // Checked before enrolling: a build Edge will refuse must not first put
+      // the MCP-all group on grantees' consumers (issue #730).
+      await assertAgentsCompose(proxyId);
+      await enrollAllToolGrantees(api.id, subject);
+    }
     const live = await edge.pluginConfigs.listByProxy(proxyId);
-    // Read before enrolling: a build Edge will refuse must not first put the
-    // MCP-all group on grantees' consumers (issue #730).
-    assertAgentsCompose(live);
-    if (enroll) await enrollAllToolGrantees(api.id, subject);
     const spec = await edge.apiSpecs.findByProxy(proxyId);
     return routesSpecDocument(document, {
       proxy,

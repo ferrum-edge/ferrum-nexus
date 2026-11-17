@@ -201,10 +201,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   which for a fail-closed plugin stops a database-mode gateway from starting. A
   palette save that carries one of these keys is now `400 VALIDATION_FAILED`
   (breaking for an API client that sent `mode`: drop it), every rebuild writes
-  stored rows without them, and the first start of this release rewrites every
-  palette config Nexus wrote with one, on the gateway and in the store, then
-  records `api.plugin_keys_stripped`. Let that run finish against Edge v0.9.20
-  before upgrading Edge past it; see
+  stored rows without them, and every start rewrites each palette config Nexus
+  wrote with one, on the gateway and in the store; the first run that finishes
+  for the namespace records `api.plugin_keys_stripped`. Let that happen against
+  Edge v0.9.20 before upgrading Edge past it; see
   [Palette keys the next Edge release removes](docs/operations.md#palette-keys-the-next-edge-release-removes).
 
 - **One contracts `PIN`, checked against the vendored tree** (#728).
@@ -233,9 +233,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   approved tool, on the identity's one consumer, and Edge refuses a consumer with
   more than 500 groups with a `400` Nexus does not echo for consumer writes. A
   change that would take a consumer past the cap (an approval, a tool request
-  approval, a re-enable, a repair) is now refused before the write with
-  `409 CONFLICT` and `details.reason: "acl_group_limit"`, and an approval refused
-  this way leaves no group to take back. Turning AI agents on no longer fails
+  approval, an account re-enable, a consumer repair) is now refused before the
+  write with `409 CONFLICT` and `details.reason: "acl_group_limit"`, and an
+  approval refused this way leaves no group to take back. Turning AI agents on no longer fails
   for the provider when one all-tools grantee's consumer is full: that grantee is
   skipped and recorded as `access.mcp_enroll_skip`. The test gateway enforces the
   cap.
@@ -247,8 +247,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   deduplication config is on the proxy, failed at the gateway after Nexus had
   enrolled grantees with the MCP-all group, or after a conversion had taken the
   live proxy down and had to restore it. Both are now `400 VALIDATION_FAILED`
-  before any gateway or consumer write, and the test gateway enforces Edge's
-  composition rule on plugin, proxy and `/api-specs` writes.
+  before any gateway or consumer write, judged like Edge on the proxy's
+  effective plugins (its own, associated proxy-group ones, or an enabled global
+  none of them shadows), and the test gateway enforces Edge's composition rule
+  on plugin, proxy and `/api-specs` writes.
 
 - **The production image keeps dependencies npm installs inside a workspace.** The
   runtime stage copied only the root `node_modules`, so a lock that placed a server
