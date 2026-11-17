@@ -3465,6 +3465,36 @@ by ordinal, **mirror** the Edge array; a row's position is its index.
 Every destructive call checks the mirror against the live array length, read in
 the same critical section.
 
+### Conditioned on the read (ferrum-edge#7393)
+
+The consumer lease keeps the portal's own writers out of that critical section,
+but not another writer on the gateway: an operator, Foundry or automation that
+adds or removes an entry between the read and the indexed delete moves the index
+onto a different credential. So every credential write decided from a read (the
+indexed delete of a revoke or rotation, the whole-type delete of a revoke, the
+append of a rotation below the cap, and the take-back of an appended entry)
+sends the consumer `ETag` of that read (`GET /consumers/{id}`) as `If-Match`:
+
+- **Edge with ferrum-edge#7393** compares it with the consumer's tag under its
+  admission lease and answers `412` to a changed consumer, with nothing written.
+- **Edge v0.9.20** (the pinned release) refuses `If-Match` on these routes with
+  a `400` (`If-Match is only supported on …`) before acting. Nexus then reads the
+  consumer again and writes without the header only if that read carries the
+  same tag. The remaining window is the moment between that re-read and the
+  write.
+
+Either refusal is `409 CONFLICT` to the caller. Nothing was deleted or appended,
+the credential's row is back to (or still) `active`, and Nexus does not retry:
+the user reads the credentials again and repeats the operation. A consumer read
+without a strong `ETag` (Edge's cached fallback when its store is unreadable) is
+refused before anything is decided from it. A rotation below the cap re-reads
+the consumer after its own append, because Edge returns no tag with a write; if
+that read no longer shows the array as the append left it, the previous
+credential is kept and the replacement is taken back or recorded as
+`credential.append_rollback`. A change between the append and that read that
+keeps the array length, or any change to `basicauth` (which no read shows), is
+the window that remains on that path.
+
 ### The `retiring` status: a retirement recorded before it is attempted
 
 Before deleting an entry, Nexus moves its row to **`retiring`**, and after Edge

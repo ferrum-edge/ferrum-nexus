@@ -1357,6 +1357,17 @@ rotating or revoking them is `409 CONFLICT` until an admin runs
 `POST /api/admin/credentials/reconcile`, which clears the type on the gateway
 and revokes the rows.
 
+**Positional writes are conditioned on the read** (ferrum-edge#7393). The
+consumer lease does not keep out another writer on the gateway, and an entry it
+adds or removes between the read and the delete moves the index onto a
+different credential. Every credential write decided from a read sends that
+read's consumer `ETag` as `If-Match`; a changed consumer is refused with
+nothing written and surfaces as `409 CONFLICT`, never retried automatically.
+Against Edge v0.9.20, which refuses `If-Match` on credential routes, Nexus
+re-reads the consumer and writes unconditionally only when the tag is
+unchanged, which narrows the window to the moment between that re-read and the
+write. See [operations, the credential mirror](operations.md#conditioned-on-the-read-ferrum-edge7393).
+
 **Retirements and appends cannot drift silently.**
 
 - A row is moved to `retiring` before the gateway delete and to `revoked` after.
