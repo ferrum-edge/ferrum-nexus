@@ -2022,10 +2022,13 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const found = (await store.apiPlugins.listCarryingConfigKeys(keys)).filter(
         (entry) => entry.api_id === legacy.id || entry.api_id === clean.id,
       );
-      assert.deepEqual(found.map((entry) => [entry.api_id, entry.plugin_name]), [
-        [legacy.id, 'ip_restriction'],
-        [legacy.id, 'response_caching'],
-      ]);
+      assert.deepEqual(
+        found.map((entry) => [entry.api_id, entry.plugin_name]),
+        [
+          [legacy.id, 'ip_restriction'],
+          [legacy.id, 'response_caching'],
+        ],
+      );
       assert.deepEqual(await store.apiPlugins.listCarryingConfigKeys({}), []);
     });
 
