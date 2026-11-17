@@ -365,13 +365,19 @@ const CONSUMER_CHANGED_DURING_ROTATION =
  * operator holding the 502 is the one who has to apply it; the full procedure
  * is `operations.md` §12, "The credential mirror".
  */
+/** A credential delete refused because the consumer changed since the decision read. */
+const CONSUMER_CHANGED_MESSAGE = 'The gateway consumer changed; read it again before retrying';
+
+/** A credential delete refused because the consumer could not be read to locate it. */
+const UNREADABLE_CONSUMER_MESSAGE =
+  'The gateway consumer could not be read to locate this credential, so nothing was deleted; try again';
+
 /**
- * Raised when a credential whose row is `retiring` (an earlier gateway change
- * nobody confirmed) cannot be located on the gateway by its material, so no
- * position can be trusted for it.
+ * A credential delete refused because the entry cannot be identified by its
+ * material: several entries share it, or the gateway hides it.
  */
-const RETIRING_UNCONFIRMED_MESSAGE =
-  'An earlier change to this credential on the gateway was never confirmed, and its entry cannot be located safely; an administrator must reconcile this consumer';
+const UNLOCATED_CREDENTIAL_MESSAGE =
+  'This credential cannot be located on the gateway by its value, so nothing was deleted; an administrator must reconcile this consumer';
 
 const RECONCILE_MESSAGE =
   'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
@@ -1536,32 +1542,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }
 
   /**
-   * For a row that is already `retiring` (an earlier outcome nobody
-   * confirmed), whether `position` still names its entry, by material, in the
-   * state `etag` pins: `'confirmed'`, `'absent'` (the entry is gone), or
-   * `'unconfirmed'` (elsewhere, not identifiable, unreadable, or the consumer
-   * changed since `etag`).
-   *
-   * A replacement by another writer keeps the array's length, so the ordinal
-   * of a `retiring` row can still look valid while it names somebody else's
-   * entry; a retry must never delete on it alone (review sol round 4).
-   */
-  async function confirmRetiringPosition(
-    consumerId: string,
-    type: CredentialType,
-    fingerprint: string,
-    position: number,
-    etag: string,
-    actorId: Uuid,
-  ): Promise<'confirmed' | 'absent' | 'unconfirmed'> {
-    const read = await locateAppendedEntry({ consumerId, type, fingerprint, actorId });
-    if (read === null) return 'absent';
-    if (read === undefined || read.index === 'ambiguous') return 'unconfirmed';
-    if (read.index === 'absent') return 'absent';
-    return read.index === position && read.etag === etag ? 'confirmed' : 'unconfirmed';
-  }
-
-  /**
    * Settle a retirement whose entry a credential-complete read proved gone:
    * the row moves to `revoked` with its `credential.settle` row in one
    * transaction, so no later call can retry it by position (review sol
@@ -1967,29 +1947,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             'This consumer holds HTTP Basic credentials that belong to another account; an administrator must clear them',
           );
         }
-        // A row already `retiring` stands for an earlier outcome nobody
-        // confirmed, and another writer's replacement can keep the array's
-        // length, so its position is confirmed by material before anything
-        // is deleted (review sol round 4). Gone: the revoke is complete.
-        if (typeof position === 'number' && current.status === 'retiring' && type !== 'basicauth') {
-          const located = await confirmRetiringPosition(
-            consumerId,
-            type,
-            current.fingerprint,
-            position,
-            read.etag,
-            actor.id,
-          );
-          if (located === 'absent') {
-            return settleAbsentRetirement({ credential: current, actor, ip });
-          }
-          if (located === 'unconfirmed') {
-            throw conflict(RETIRING_UNCONFIRMED_MESSAGE, {
-              consumer_id: consumerId,
-              credential_type: type,
-            });
-          }
-        }
         // `not-live` follows the status check above whenever the settlement
         // was this very row — its entry is already gone. Either way, treat it
         // as a completed revoke rather than a whole-type delete.
@@ -2013,7 +1970,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               );
           });
           try {
-            await removeAt(consumerId, type, position, actor.id, read.etag);
+            await removeAt(consumerId, type, position, actor.id, read.etag, current.fingerprint);
           } catch (error) {
             // A delete the array proves never happened is not a lost
             // acknowledgement. Leaving the row `retiring` over an entry that
@@ -3145,32 +3102,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // a show-once secret that authenticates nothing.
           throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: length });
         }
-        // As in a revoke: a `retiring` row's position is confirmed by
-        // material before anything is written (review sol round 4).
-        if (current.status === 'retiring' && type !== 'basicauth') {
-          const located = await confirmRetiringPosition(
-            consumerId,
-            type,
-            current.fingerprint,
-            position,
-            read.etag,
-            user.id,
-          );
-          if (located === 'absent') {
-            await settleAbsentRetirement({
-              credential: current,
-              actor: { id: user.id, role: user.role },
-              ip,
-            });
-            throw conflict('This credential has already been revoked');
-          }
-          if (located === 'unconfirmed') {
-            throw conflict(RETIRING_UNCONFIRMED_MESSAGE, {
-              consumer_id: consumerId,
-              credential_type: type,
-            });
-          }
-        }
         // Again inside the key, right before anything is written: a rotation
         // that passed the route's check before a reset committed would
         // otherwise mint a key the recovery's listing has already missed.
@@ -3210,7 +3141,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             );
           });
           try {
-            await removeAt(consumerId, type, position, user.id, read.etag);
+            await removeAt(consumerId, type, position, user.id, read.etag, current.fingerprint);
           } catch (error) {
             // A delete that provably never touched the array is not a lost
             // acknowledgement, and the row must not be left claiming it might
@@ -3344,7 +3275,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               });
             }
             deleteMayHaveApplied = true;
-            await removeAt(consumerId, type, position, user.id, appended.etag);
+            await removeAt(consumerId, type, position, user.id, appended.etag, current.fingerprint);
           } catch (error) {
             if (credentialWriteNotApplied(error)) deleteMayHaveApplied = false;
             // A rotation either hands the caller a new secret or leaves the
@@ -4067,13 +3998,28 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }
 
   /**
-   * Delete one entry by index, or the whole type when the index is unusable.
+   * Delete the credential `fingerprint` names, or the whole type.
    *
-   * `ifMatch` is the consumer tag of the read `position` was decided from
-   * (ferrum-edge#7393): if anything changed the consumer since, the index may
-   * name another credential, so the delete is refused with nothing removed
-   * ({@link credentialWriteNotApplied}) and the caller's operation fails
-   * rather than being retried on a stale decision.
+   * `keyauth` and `jwt` entries are **never deleted at a stored or remembered
+   * index** (review sol round 5). Reads redact them and another writer can
+   * reorder, replace or remove entries at any time, so a position counted off
+   * the portal's rows — or off any earlier read — can name somebody else's
+   * key while every length check still agrees. So the consumer is read
+   * credential-complete (`/verification`), the target is located by its
+   * material, and the delete goes to that read's index with that read's tag
+   * as `If-Match`:
+   *
+   * - the read must be the state the caller decided from (`ifMatch`), or the
+   *   delete is refused as a changed consumer, nothing sent;
+   * - the target absent from it means its entry is already gone: nothing to
+   *   delete, and the caller's retirement stands;
+   * - several matches, hidden material or an unreadable consumer refuse,
+   *   nothing sent, for an administrator to reconcile.
+   *
+   * Every refusal is a `precondition_failed` `CONFLICT`, so
+   * {@link credentialWriteNotApplied} reads it as a certain non-write.
+   * `basicauth`, whose material Edge keeps only hashed, keeps its positional
+   * delete behind `assertPositionsConfirmed`; `'whole-type'` needs no position.
    */
   async function removeAt(
     consumerId: string,
@@ -4081,11 +4027,39 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     position: number | 'whole-type',
     subject: string,
     ifMatch: string,
+    fingerprint: string,
   ): Promise<void> {
     if (position === 'whole-type') {
       await edge.consumers.deleteCredentialType(consumerId, type, subject, ifMatch);
       return;
     }
-    await edge.consumers.deleteCredentialAt(consumerId, type, position, subject, ifMatch);
+    if (type === 'basicauth') {
+      await edge.consumers.deleteCredentialAt(consumerId, type, position, subject, ifMatch);
+      return;
+    }
+    const located = await locateAppendedEntry({ consumerId, type, fingerprint, actorId: subject });
+    if (located === null) return;
+    if (located === undefined) {
+      throw conflict(UNREADABLE_CONSUMER_MESSAGE, {
+        kind: 'precondition_failed',
+        consumer_id: consumerId,
+      });
+    }
+    if (located.etag !== ifMatch) {
+      throw conflict(CONSUMER_CHANGED_MESSAGE, {
+        kind: 'precondition_failed',
+        consumer_id: consumerId,
+      });
+    }
+    if (located.index === 'absent') return;
+    if (located.index === 'ambiguous') {
+      throw conflict(UNLOCATED_CREDENTIAL_MESSAGE, {
+        kind: 'precondition_failed',
+        consumer_id: consumerId,
+        credential_type: type,
+      });
+    }
+    await edge.consumers.deleteCredentialAt(consumerId, type, located.index, subject, located.etag);
   }
+
 }

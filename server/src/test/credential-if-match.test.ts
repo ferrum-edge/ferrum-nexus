@@ -169,7 +169,7 @@ describe('credential writes conditioned on the consumer tag', () => {
       assert.deepEqual(labels, ['foreign', 'first', 'second']);
       assert.equal(await statusOf(second.credential.id), 'active', 'the intent was withdrawn');
       assert.equal(await statusOf(first.credential.id), 'active');
-      assert.equal(credentialWrites(consumerId, 'DELETE').length, 1, 'never resent');
+      assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'refused before sending');
     });
 
     it(`${gateway}: a rotation appends nothing once the consumer changed`, async () => {
@@ -210,7 +210,7 @@ describe('credential writes conditioned on the consumer tag', () => {
       assert.deepEqual(labels, ['foreign', 'first', 'second']);
       assert.equal(await statusOf(second.credential.id), 'active', 'the intent was withdrawn');
       assert.equal(credentialWrites(consumerId, 'POST').length, appendsBefore, 'no append');
-      assert.equal(credentialWrites(consumerId, 'DELETE').length, 1, 'never resent');
+      assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'refused before sending');
     });
 
     it(`${gateway}: an unchanged consumer is revoked and rotated as before`, async () => {
@@ -359,7 +359,7 @@ describe('credential writes conditioned on the consumer tag', () => {
       const labels = labelled(consumerId, { foreign: FOREIGN_KEY, first, second });
       assert.deepEqual(labels, ['second', 'foreign'], 'the other key survived');
       assert.equal(await statusOf(second.credential.id), 'active');
-      assert.equal(credentialWrites(consumerId, 'DELETE').length, 1, 'only the refused delete');
+      assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'none for the stale read');
     });
 
     it(`${gateway}: a retiring row is located by material, never by its ordinal`, async () => {
@@ -422,6 +422,135 @@ describe('credential writes conditioned on the consumer tag', () => {
     assert.equal(stored?.credentials.keyauth?.length, 1);
     assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'nothing was deleted');
   });
+
+  /* ── No keyauth/jwt delete ever uses a stored or remembered index ───── */
+
+  /** Another writer reorders the consumer's keys: same entries, new positions. */
+  function reorder(consumerId: string): void {
+    const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
+    assert.ok(stored);
+    const [head, ...rest] = stored.credentials.keyauth ?? [];
+    assert.ok(head);
+    stored.credentials.keyauth = [...rest, head];
+    stored.updated_at = new Date(Date.now() + 60_000 + rest.length).toISOString();
+  }
+
+  /** Reorder the consumer's keys right after the `nth` call of a read the portal makes. */
+  function reorderAfter(
+    consumerId: string,
+    read: 'getTagged' | 'verification' | 'addCredential',
+    nth: number,
+  ): () => void {
+    const consumers = harness.edgeClient.consumers;
+    let calls = 0;
+    const after = (): void => {
+      calls += 1;
+      if (calls === nth) reorder(consumerId);
+    };
+    if (read === 'getTagged') {
+      const original = consumers.getTagged.bind(consumers);
+      consumers.getTagged = async (...args) => {
+        const result = await original(...args);
+        if (args[0] === consumerId) after();
+        return result;
+      };
+      return () => {
+        consumers.getTagged = original;
+      };
+    }
+    if (read === 'verification') {
+      const original = consumers.verification.bind(consumers);
+      consumers.verification = async (...args) => {
+        const result = await original(...args);
+        if (args[0] === consumerId) after();
+        return result;
+      };
+      return () => {
+        consumers.verification = original;
+      };
+    }
+    const original = consumers.addCredential.bind(consumers);
+    consumers.addCredential = async (...args) => {
+      const result = await original(...args);
+      if (args[0] === consumerId) after();
+      return result;
+    };
+    return () => {
+      consumers.addCredential = original;
+    };
+  }
+
+  const SHIFT_POINTS = [
+    // After the decision read: the delete's read no longer matches it.
+    ['getTagged', 1],
+    // After the read that locates the target, before its delete is sent.
+    ['verification', 1],
+  ] as const;
+
+  for (const mode of ['evaluate', 'unsupported'] as const) {
+    const gateway = mode === 'evaluate' ? 'Edge with #7393' : 'Edge v0.9.20';
+
+    for (const [read, nth] of SHIFT_POINTS) {
+      for (const operation of ['revoke', 'rotate'] as const) {
+        it(`${gateway}: ${operation} shifted after ${read} deletes only its target`, async () => {
+          harness.edge.setCredentialIfMatch(mode);
+          const user = await client();
+          const sibling = await issue(user);
+          const target = await issue(user);
+          const consumerId = target.credential.ferrum_consumer_id;
+
+          // First attempt: the keys are reordered at this step. Whatever the
+          // answer, the sibling is never deleted and the target stays listed
+          // as live while its key is.
+          restore = reorderAfter(consumerId, read, nth);
+          const first =
+            operation === 'revoke'
+              ? await revoke(user, target.credential.id)
+              : await rotate(user, target.credential.id);
+          restore();
+          restore = null;
+          assert.ok(labelled(consumerId, { sibling }).includes('sibling'), first.body);
+          if (labelled(consumerId, { target }).includes('target')) {
+            assert.equal(await statusOf(target.credential.id), 'active', first.body);
+          }
+
+          // Then shifted once more before a retry with no interference.
+          reorder(consumerId);
+          if (first.statusCode !== 200) {
+            const retried =
+              operation === 'revoke'
+                ? await revoke(user, target.credential.id)
+                : await rotate(user, target.credential.id);
+            assert.equal(retried.statusCode, 200, retried.body);
+          }
+
+          // Exactly the target is gone; the sibling (and any replacement) live.
+          const live = labelled(consumerId, { sibling, target });
+          assert.ok(live.includes('sibling'), 'the sibling survived every step');
+          assert.ok(!live.includes('target'), 'the target is gone');
+          assert.equal(await statusOf(sibling.credential.id), 'active');
+          assert.equal(await statusOf(target.credential.id), 'revoked');
+        });
+      }
+    }
+
+    it(`${gateway}: append-first rotation shifted after its append`, async () => {
+      harness.edge.setCredentialIfMatch(mode);
+      const user = await client();
+      const only = await issue(user);
+      const consumerId = only.credential.ferrum_consumer_id;
+
+      // `[only]` + replacement, then reordered to `[replacement, only]`: the
+      // stored position of `only` (0) now names the replacement.
+      restore = reorderAfter(consumerId, 'addCredential', 1);
+      const rotated = await rotate(user, only.credential.id);
+      assert.equal(rotated.statusCode, 200, rotated.body);
+      const body = rotated.json<RotateCredentialResponse>();
+      const replacement = { secret: body.secret };
+      assert.deepEqual(labelled(consumerId, { only, replacement }), ['replacement']);
+      assert.equal(await statusOf(only.credential.id), 'revoked');
+    });
+  }
 
   it('refuses a revoke or rotation decided from an untagged read (dsf F1)', async () => {
     const user = await client();

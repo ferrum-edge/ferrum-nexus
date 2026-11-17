@@ -3493,9 +3493,19 @@ entry survived (another writer may have removed it), so a credential-complete
 read decides: the row goes back to `active` when that read still holds the
 entry's material, is settled `revoked` (`credential.settle`, `evidence:
 "entry_absent"`) when it proves the entry gone, and otherwise, and always for
-`basicauth`, stays `retiring`. A retry of a `retiring` `keyauth` or `jwt` row
-locates its entry by material before deleting anything, never by its ordinal
-alone: another writer's replacement can keep the array's length. A consumer read without a strong `ETag` (Edge's cached fallback when
+`basicauth`, stays `retiring`.
+
+**No `keyauth` or `jwt` delete uses a stored or remembered index.** Another
+writer can reorder, replace or remove entries while every length check still
+agrees, so each delete (revoke, rotation, retry, take-back) reads the consumer
+credential-complete, locates the target by its material, and deletes at that
+read's index with that read's `ETag` as `If-Match`. A read that is not the
+state the decision was made from, or that cannot identify the target uniquely,
+refuses with nothing sent; a target absent from it is already gone. The
+`edge_ordinal` positions still gate drift (a mirror and array of different
+lengths are refused) but never choose what is deleted. `basicauth`, whose
+material Edge keeps only hashed, keeps its positional delete behind the
+refusals described below. A consumer read without a strong `ETag` (Edge's cached fallback when
 its store is unreadable) is refused before anything is decided from it. On Edge
 v0.9.20, a re-read that fails counts as a definite non-write too: the
 unconditional write was never sent, so nothing is reclaimed or settled as

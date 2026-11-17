@@ -1357,6 +1357,12 @@ rotating or revoking them is `409 CONFLICT` until an admin runs
 `POST /api/admin/credentials/reconcile`, which clears the type on the gateway
 and revokes the rows.
 
+**`keyauth` and `jwt` deletes are by identity, never by stored index.** Each
+reads the consumer credential-complete, locates the target by its material,
+and deletes at that read's index under that read's `ETag`; a target that cannot
+be identified uniquely refuses for reconciliation. `basicauth` keeps the
+positional rules below.
+
 **Positional writes are conditioned on the read** (ferrum-edge#7393). The
 consumer lease does not keep out another writer on the gateway, and an entry it
 adds or removes between the read and the delete moves the index onto a
