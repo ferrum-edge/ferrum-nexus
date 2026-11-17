@@ -486,11 +486,12 @@ describe('credential durability across a lost gateway write', () => {
     assert.ok(typeof stranded === 'string', 'the error names the credential to revoke');
     assert.equal(details?.retired_credential_id, original.credential.id);
 
-    assert.equal(await statusOf(original.credential.id), 'retiring');
-    assert.equal(liveKeys(user.user.id).length, 1, 'one entry against two live rows');
+    // A credential-complete read proves the previous entry gone, so its row
+    // is settled at once rather than left for a later call to place.
+    assert.equal(await statusOf(original.credential.id), 'revoked');
+    assert.equal(liveKeys(user.user.id).length, 1, 'one entry, one live row');
 
-    // The next call settles the drift rather than refusing it, and everything
-    // left behind is ordinary self-service.
+    // Everything left behind is ordinary self-service.
     const fresh = await issue(user, 'after the lost acknowledgement');
     assert.equal(await statusOf(original.credential.id), 'revoked');
     assert.equal((await rowsFor('credential.settle', consumerId)).length, 1);

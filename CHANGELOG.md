@@ -247,8 +247,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   rather than by position, and is skipped altogether when Edge certainly
   refused the append, so it can no longer delete another writer's key. A changed
   consumer is refused with `409 CONFLICT`, nothing is deleted or appended,
-  the credential stays `active`, and nothing is retried automatically: read
-  the credentials again and repeat the operation. Edge v0.9.20, the pinned
+  and nothing is retried automatically: read the credentials again and repeat
+  the operation. The credential stays `active` when a credential-complete read
+  still holds it, and is settled `revoked` when that read proves another writer
+  removed it. Edge v0.9.20, the pinned
   release, refuses `If-Match` on these routes, so on it Nexus re-reads the
   consumer and writes without the header only when the tag is unchanged; the
   remaining window is the moment between that re-read and the write, which

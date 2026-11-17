@@ -289,7 +289,7 @@ describe('credential writes conditioned on the consumer tag', () => {
   for (const mode of ['evaluate', 'unsupported'] as const) {
     const gateway = mode === 'evaluate' ? 'Edge with #7393' : 'Edge v0.9.20';
 
-    it(`${gateway}: a revoke refused because its entry was removed stays retiring`, async () => {
+    it(`${gateway}: a revoke refused because its entry was removed settles it`, async () => {
       harness.edge.setCredentialIfMatch(mode);
       const user = await client();
       const first = await issue(user);
@@ -298,14 +298,14 @@ describe('credential writes conditioned on the consumer tag', () => {
 
       // Another writer removes the very credential being revoked after the
       // portal's read: the delete is refused, but the entry is gone, so the
-      // row must not claim it is live again (review dsf round 3).
+      // row must not claim it is live again (review dsf round 3), and is
+      // settled `revoked` on that proof (review sol round 4).
       afterNextTaggedRead(consumerId, () => removeKey(consumerId, first));
       const refused = await revoke(user, first.credential.id);
       assert.equal(refused.statusCode, 409, refused.body);
       assert.deepEqual(labelled(consumerId, { first, second }), ['second']);
-      assert.equal(await statusOf(first.credential.id), 'retiring', 'not reactivated');
+      assert.equal(await statusOf(first.credential.id), 'revoked', 'settled, not reactivated');
 
-      // The next call on the pair settles it to what the gateway says.
       const next = await revoke(user, second.credential.id);
       assert.equal(next.statusCode, 200, next.body);
       assert.equal(await statusOf(first.credential.id), 'revoked');
@@ -313,7 +313,7 @@ describe('credential writes conditioned on the consumer tag', () => {
       assert.deepEqual(labelled(consumerId, { first, second }), []);
     });
 
-    it(`${gateway}: a refused capped rotation of a removed entry stays retiring`, async () => {
+    it(`${gateway}: a refused capped rotation of a removed entry settles it`, async () => {
       harness.edge.setCredentialIfMatch(mode);
       const user = await client();
       const first = await issue(user);
@@ -325,8 +325,69 @@ describe('credential writes conditioned on the consumer tag', () => {
       const refused = await rotate(user, second.credential.id);
       assert.equal(refused.statusCode, 409, refused.body);
       assert.deepEqual(labelled(consumerId, { first, second }), ['first']);
-      assert.equal(await statusOf(second.credential.id), 'retiring', 'not reactivated');
+      assert.equal(await statusOf(second.credential.id), 'revoked', 'settled, not reactivated');
       assert.equal(credentialWrites(consumerId, 'POST').length, appendsBefore, 'no append');
+    });
+  }
+
+  for (const mode of ['evaluate', 'unsupported'] as const) {
+    const gateway = mode === 'evaluate' ? 'Edge with #7393' : 'Edge v0.9.20';
+
+    it(`${gateway}: a retry after a same-length replacement never hits another key`, async () => {
+      harness.edge.setCredentialIfMatch(mode);
+      const user = await client();
+      const first = await issue(user);
+      const second = await issue(user);
+      const consumerId = first.credential.ferrum_consumer_id;
+
+      // Another writer replaces `first` after the portal's read: `[first,
+      // second]` becomes `[second, foreign]`, the same length. The refused
+      // delete proves `first` gone, so it is settled; were it left
+      // `retiring`, a retry would resolve its ordinal to index 0, `second`.
+      afterNextTaggedRead(consumerId, () => {
+        removeKey(consumerId, first);
+        const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
+        assert.ok(stored);
+        stored.credentials.keyauth = [...(stored.credentials.keyauth ?? []), { key: FOREIGN_KEY }];
+      });
+      const refused = await revoke(user, first.credential.id);
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(await statusOf(first.credential.id), 'revoked');
+
+      const retried = await revoke(user, first.credential.id);
+      assert.equal(retried.statusCode, 200, retried.body);
+      const labels = labelled(consumerId, { foreign: FOREIGN_KEY, first, second });
+      assert.deepEqual(labels, ['second', 'foreign'], 'the other key survived');
+      assert.equal(await statusOf(second.credential.id), 'active');
+      assert.equal(credentialWrites(consumerId, 'DELETE').length, 1, 'only the refused delete');
+    });
+
+    it(`${gateway}: a retiring row is located by material, never by its ordinal`, async () => {
+      const user = await client();
+      const first = await issue(user);
+      const second = await issue(user);
+      const consumerId = first.credential.ferrum_consumer_id;
+
+      // Edge removes `first` and the answer is lost: the row stays
+      // `retiring`. Then another writer appends, so the mirror and the array
+      // have the same length again and nothing settles the row by count.
+      harness.edge.queueLostAck(503, { error: 'timeout' }, '/credentials/keyauth/', 'DELETE');
+      const lost = await revoke(user, first.credential.id);
+      assert.equal(lost.statusCode, 502, lost.body);
+      assert.equal(await statusOf(first.credential.id), 'retiring');
+      const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
+      assert.ok(stored);
+      stored.credentials.keyauth = [...(stored.credentials.keyauth ?? []), { key: FOREIGN_KEY }];
+
+      // The retry would have deleted index 0 — `second`. It finds `first`
+      // absent by material and settles it instead.
+      harness.edge.setCredentialIfMatch(mode);
+      const retried = await revoke(user, first.credential.id);
+      assert.equal(retried.statusCode, 200, retried.body);
+      const labels = labelled(consumerId, { foreign: FOREIGN_KEY, first, second });
+      assert.deepEqual(labels, ['second', 'foreign'], 'the other key survived');
+      assert.equal(await statusOf(first.credential.id), 'revoked');
+      assert.equal(await statusOf(second.credential.id), 'active');
     });
   }
 
@@ -353,9 +414,10 @@ describe('credential writes conditioned on the consumer tag', () => {
     assert.equal(failed.statusCode, 502, failed.body);
     assert.ok(!('secret' in JSON.parse(failed.body)), 'no secret was handed out');
 
-    // The previous key is gone, so its row is not reactivated, and the
-    // replacement is left as the pair's only entry for its owner to revoke.
-    assert.equal(await statusOf(only.credential.id), 'retiring', 'not reactivated');
+    // The previous key is gone, so its row is settled rather than
+    // reactivated, and the replacement is left as the pair's only entry for
+    // its owner to revoke.
+    assert.equal(await statusOf(only.credential.id), 'revoked', 'settled, not reactivated');
     const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
     assert.equal(stored?.credentials.keyauth?.length, 1);
     assert.equal(credentialWrites(consumerId, 'DELETE').length, 0, 'nothing was deleted');

@@ -365,6 +365,14 @@ const CONSUMER_CHANGED_DURING_ROTATION =
  * operator holding the 502 is the one who has to apply it; the full procedure
  * is `operations.md` §12, "The credential mirror".
  */
+/**
+ * Raised when a credential whose row is `retiring` (an earlier gateway change
+ * nobody confirmed) cannot be located on the gateway by its material, so no
+ * position can be trusted for it.
+ */
+const RETIRING_UNCONFIRMED_MESSAGE =
+  'An earlier change to this credential on the gateway was never confirmed, and its entry cannot be located safely; an administrator must reconcile this consumer';
+
 const RECONCILE_MESSAGE =
   'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
 
@@ -1528,6 +1536,67 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }
 
   /**
+   * For a row that is already `retiring` (an earlier outcome nobody
+   * confirmed), whether `position` still names its entry, by material, in the
+   * state `etag` pins: `'confirmed'`, `'absent'` (the entry is gone), or
+   * `'unconfirmed'` (elsewhere, not identifiable, unreadable, or the consumer
+   * changed since `etag`).
+   *
+   * A replacement by another writer keeps the array's length, so the ordinal
+   * of a `retiring` row can still look valid while it names somebody else's
+   * entry; a retry must never delete on it alone (review sol round 4).
+   */
+  async function confirmRetiringPosition(
+    consumerId: string,
+    type: CredentialType,
+    fingerprint: string,
+    position: number,
+    etag: string,
+    actorId: Uuid,
+  ): Promise<'confirmed' | 'absent' | 'unconfirmed'> {
+    const read = await locateAppendedEntry({ consumerId, type, fingerprint, actorId });
+    if (read === null) return 'absent';
+    if (read === undefined || read.index === 'ambiguous') return 'unconfirmed';
+    if (read.index === 'absent') return 'absent';
+    return read.index === position && read.etag === etag ? 'confirmed' : 'unconfirmed';
+  }
+
+  /**
+   * Settle a retirement whose entry a credential-complete read proved gone:
+   * the row moves to `revoked` with its `credential.settle` row in one
+   * transaction, so no later call can retry it by position (review sol
+   * round 4). Only while the row is still `retiring`. Answers whether this
+   * call settled it.
+   */
+  async function settleAbsentRetirement(input: {
+    credential: CredentialRecord;
+    actor: { id: Uuid; role: Role };
+    ip: string | null;
+  }): Promise<boolean> {
+    const { credential, actor, ip } = input;
+    return store.transaction(async (tx) => {
+      const settled = await tx.credentials.updateIfStatus(credential.id, 'retiring', {
+        status: 'revoked',
+      });
+      if (!settled) return false;
+      await audit.forStore(tx).record(
+        { id: actor.id, role: actor.role },
+        AuditAction.CREDENTIAL_SETTLE,
+        { type: 'credential', id: credential.id },
+        {
+          credential_type: credential.credential_type,
+          consumer_id: credential.ferrum_consumer_id,
+          last4: credential.last4,
+          owner_user_id: credential.user_id,
+          evidence: 'entry_absent',
+        },
+        ip,
+      );
+      return true;
+    });
+  }
+
+  /**
    * Whether a delete that reported failure provably never touched the array.
    *
    * `length` is the number of entries the caller read from the gateway inside
@@ -1898,6 +1967,29 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             'This consumer holds HTTP Basic credentials that belong to another account; an administrator must clear them',
           );
         }
+        // A row already `retiring` stands for an earlier outcome nobody
+        // confirmed, and another writer's replacement can keep the array's
+        // length, so its position is confirmed by material before anything
+        // is deleted (review sol round 4). Gone: the revoke is complete.
+        if (typeof position === 'number' && current.status === 'retiring' && type !== 'basicauth') {
+          const located = await confirmRetiringPosition(
+            consumerId,
+            type,
+            current.fingerprint,
+            position,
+            read.etag,
+            actor.id,
+          );
+          if (located === 'absent') {
+            return settleAbsentRetirement({ credential: current, actor, ip });
+          }
+          if (located === 'unconfirmed') {
+            throw conflict(RETIRING_UNCONFIRMED_MESSAGE, {
+              consumer_id: consumerId,
+              credential_type: type,
+            });
+          }
+        }
         // `not-live` follows the status check above whenever the settlement
         // was this very row — its entry is already gone. Either way, treat it
         // as a completed revoke rather than a whole-type delete.
@@ -1936,7 +2028,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // already `retiring` therefore stays so unless its entry is
             // proved live (review sol F1, dsf round 3). An outcome that
             // cannot be proved stays `retiring`, which is the safe reading.
-            const entryKept = credentialWriteNotApplied(error)
+            // When that read proves the entry gone instead, the row is
+            // settled `revoked` now: left `retiring`, a retry could resolve
+            // its stale ordinal onto another writer's replacement (review sol
+            // round 4).
+            const notWritten = credentialWriteNotApplied(error);
+            const entryKept = notWritten
               ? await retiredEntryPresent(consumerId, type, current.fingerprint, actor.id)
               : await deleteDidNotApply(consumerId, type, length);
             if (entryKept === true) {
@@ -1947,6 +2044,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
                 cause: error,
                 ip,
               });
+            } else if (notWritten && entryKept === false) {
+              await settleAbsentRetirement({ credential: current, actor, ip }).catch(() => false);
             }
             throw error;
           }
@@ -3046,6 +3145,32 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // a show-once secret that authenticates nothing.
           throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: length });
         }
+        // As in a revoke: a `retiring` row's position is confirmed by
+        // material before anything is written (review sol round 4).
+        if (current.status === 'retiring' && type !== 'basicauth') {
+          const located = await confirmRetiringPosition(
+            consumerId,
+            type,
+            current.fingerprint,
+            position,
+            read.etag,
+            user.id,
+          );
+          if (located === 'absent') {
+            await settleAbsentRetirement({
+              credential: current,
+              actor: { id: user.id, role: user.role },
+              ip,
+            });
+            throw conflict('This credential has already been revoked');
+          }
+          if (located === 'unconfirmed') {
+            throw conflict(RETIRING_UNCONFIRMED_MESSAGE, {
+              consumer_id: consumerId,
+              credential_type: type,
+            });
+          }
+        }
         // Again inside the key, right before anything is written: a rotation
         // that passed the route's check before a reset committed would
         // otherwise mint a key the recovery's listing has already missed.
@@ -3097,17 +3222,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // a credential-complete read. Nothing else changed — no append
             // has been attempted yet — so the account is left exactly as the
             // rotation found it, cap slot included.
-            const entryKept = credentialWriteNotApplied(error)
+            // Proved gone instead, the row is settled `revoked` now, so no
+            // retry can resolve its stale ordinal (review sol round 4).
+            const notWritten = credentialWriteNotApplied(error);
+            const entryKept = notWritten
               ? await retiredEntryPresent(consumerId, type, current.fingerprint, user.id)
               : await deleteDidNotApply(consumerId, type, length);
+            const actor = { id: user.id, role: user.role };
             if (entryKept === true) {
               await withdrawRetirement({
                 credential: current,
                 operation: 'rotate',
-                actor: { id: user.id, role: user.role },
+                actor,
                 cause: error,
                 ip,
               });
+            } else if (notWritten && entryKept === false) {
+              await settleAbsentRetirement({ credential: current, actor, ip }).catch(() => false);
             }
             throw error;
           }
@@ -3253,6 +3384,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               await store.credentials
                 .update(current.id, { status: 'active' })
                 .catch(() => undefined);
+            } else if (retiredKept === false) {
+              // Gone: settled now rather than left for a retry to place.
+              const actor = { id: user.id, role: user.role };
+              await settleAbsentRetirement({ credential: current, actor, ip }).catch(() => false);
             }
             await recordAppendRollback({
               consumerId,
@@ -3275,9 +3410,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               if (retiredKept === false || (arrayLength === length && deleteMayHaveApplied)) {
                 // The array is back to the length the append index came from:
                 // the delete landed after all and only its acknowledgement was
-                // lost. The previous credential is gone, the replacement is the
-                // entry that remains, and the row left `retiring` is settled by
-                // the next call on this consumer and type. Steering the
+                // lost (or another writer removed it). The previous credential
+                // is gone, the replacement is the entry that remains, and the
+                // previous row is settled `revoked` above. Steering the
                 // operator at `reconcile`, which empties the type on both
                 // sides, would destroy a state that repairs itself.
                 message =
