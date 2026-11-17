@@ -833,7 +833,10 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
   ],
   request_size_limiting: ['max_bytes'],
   response_size_limiting: ['max_bytes', 'require_buffered_check'],
-  ip_restriction: ['allow', 'deny', 'mode'],
+  // Edge main (after v0.9.20) refuses `ip_restriction.mode` and the two
+  // `response_caching` cache-key switches as unknown keys (issue #727); the
+  // mock refuses them too, so no test can pass on a body the next Edge refuses.
+  ip_restriction: ['allow', 'deny'],
   bot_detection: [
     'blocked_patterns',
     'allow_list',
@@ -864,8 +867,6 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'respect_cache_control',
     'respect_no_cache',
     'vary_by_headers',
-    'cache_key_include_query',
-    'cache_key_include_consumer',
     'anonymous_caller_scope',
     'add_cache_status_header',
     'invalidate_on_unsafe_methods',
@@ -1483,12 +1484,6 @@ function palettePluginError(pluginName: string, config: Record<string, unknown>)
       const deny = Array.isArray(config.deny) ? config.deny : [];
       if (allow.length === 0 && deny.length === 0) {
         return "ip_restriction: at least one of 'allow' or 'deny' must be non-empty";
-      }
-      if (
-        config.mode !== undefined &&
-        !['allow_first', 'deny_first'].includes(String(config.mode))
-      ) {
-        return `ip_restriction: unsupported mode '${String(config.mode)}'`;
       }
       // Edge v0.9.19: a prefix length is canonical decimal (`/8`, not `/08`).
       for (const entry of [...allow, ...deny]) {

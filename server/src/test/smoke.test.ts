@@ -1882,7 +1882,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         api_id: api.id,
         plugin_name: 'ip_restriction',
         enabled: true,
-        config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+        config: { allow: ['203.0.113.0/24'], deny: ['203.0.113.7'] },
         trigger: { methods: ['POST'], path_prefix: '/nexus/orders' },
         ferrum_plugin_config_id: 'edge-config-0001',
       });
@@ -1890,7 +1890,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(first.enabled, true);
       // Structured columns cross the store boundary as parsed objects, never
       // as the JSON text the SQL adapters keep in their `*_json` columns.
-      assert.deepEqual(first.config, { allow: ['203.0.113.0/24'], mode: 'allow_first' });
+      assert.deepEqual(first.config, { allow: ['203.0.113.0/24'], deny: ['203.0.113.7'] });
       assert.deepEqual(first.trigger, { methods: ['POST'], path_prefix: '/nexus/orders' });
       // The portal's ownership claim on one gateway config (issue #153).
       assert.equal(first.ferrum_plugin_config_id, 'edge-config-0001');

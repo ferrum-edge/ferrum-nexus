@@ -116,7 +116,7 @@ export function runGatewayRecoveryAtomicityContract(
       });
       await harness.services.apiPlugins.set(actor, apiId, 'ip_restriction', {
         enabled: false,
-        config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+        config: { allow: ['203.0.113.0/24'] },
         trigger: null,
       });
       await harness.services.publishing.createTestConsumer(actor, apiId);

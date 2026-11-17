@@ -209,6 +209,7 @@ import {
   listenPathFor,
   roleAtLeast,
   testConsumerUsername,
+  withoutRetiredConfigKeys,
   type AccessDisruptionDetails,
   type Api,
   type ApiAgents,
@@ -1979,8 +1980,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         plugin.plugin_name !== row.plugin_name ||
         plugin.enabled !== row.enabled ||
         !running.has(plugin.id) ||
+        // A config written before the palette dropped a key Edge removed
+        // still matches until the startup pass rewrites it (issue #727).
         !isDeepStrictEqual(
-          plugin.config,
+          plugin.config && withoutRetiredConfigKeys(row.plugin_name, plugin.config),
           paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit),
         ) ||
         !isDeepStrictEqual(plugin.trigger ?? null, edgeTriggerFor(row.trigger) ?? null)

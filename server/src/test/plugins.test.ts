@@ -25,7 +25,8 @@ import {
   type SetApiPluginResponse,
 } from '@ferrum-nexus/shared';
 
-import { proxyLockKey } from '../lib/keyed-serializer.js';
+import { createKeyedSerializer, proxyLockKey } from '../lib/keyed-serializer.js';
+import { stripRetiredPaletteKeys } from '../plugins/retired-keys.js';
 import { mockCacheStorageAllowed, mockPaletteCompositionError } from './mock-ferrum-edge.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -244,20 +245,35 @@ describe('provider plugin palette', () => {
       assert.deepEqual(edgeConfig('response_size_limiting').config, { max_bytes: 1_048_576 });
     });
 
-    it('ip_restriction: the allow/deny lists and the evaluation order', async () => {
+    it('ip_restriction: the allow and deny lists', async () => {
       const response = await setPlugin('ip_restriction', {
         config: {
           allow: ['203.0.113.0/24', '2001:db8::/32'],
           deny: ['203.0.113.7'],
-          mode: 'deny_first',
         },
       });
       assert.equal(response.statusCode, 200);
       assert.deepEqual(edgeConfig('ip_restriction').config, {
         allow: ['203.0.113.0/24', '2001:db8::/32'],
         deny: ['203.0.113.7'],
-        mode: 'deny_first',
       });
+    });
+
+    // Issue #727: `mode` decided nothing, and the next Edge release refuses it
+    // as an unknown key, so a save carrying it is refused before any write.
+    it('ip_restriction: refuses the removed mode key before touching the gateway', async () => {
+      const before = harness.edge.requests.length;
+      const response = await setPlugin('ip_restriction', {
+        config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      assert.match(errorCode(response.body), VALIDATION_FAILED_CODE);
+      assert.equal(
+        harness.edge.requests
+          .slice(before)
+          .some((request) => request.method !== 'GET' && request.path.startsWith('/plugins')),
+        false,
+      );
     });
 
     it('bot_detection: patterns, allow list, missing-UA policy and status', async () => {
@@ -778,7 +794,7 @@ describe('provider plugin palette', () => {
 
     it('rejects an enum value outside the offered set', async () => {
       assert.equal(
-        (await setPlugin('ip_restriction', { config: { allow: ['10.0.0.1'], mode: 'sideways' } }))
+        (await setPlugin('ip_restriction', { config: { allow: ['10.0.0.1'], order: 'sideways' } }))
           .statusCode,
         400,
       );
@@ -795,7 +811,7 @@ describe('provider plugin palette', () => {
 
     it('enforces ip_restriction’s "at least one list" rule', async () => {
       const response = await setPlugin('ip_restriction', {
-        config: { allow: [], deny: [], mode: 'allow_first' },
+        config: { allow: [], deny: [] },
       });
       assert.equal(response.statusCode, 400);
       assert.match(errorCode(response.body), VALIDATION_FAILED_CODE);
@@ -1385,6 +1401,91 @@ describe('provider plugin palette', () => {
         was_attached: false,
         plugin_config_id: null,
       });
+    });
+  });
+
+  /* ── Keys Edge removed (issue #727) ────────────────────────────────────── */
+
+  describe('keys Edge removed', () => {
+    /**
+     * Put back what an earlier release left on an `ip_restriction` save: the
+     * row and the gateway config both carrying `mode`, which the palette no
+     * longer accepts and the mock (like Edge after v0.9.20) refuses on write.
+     */
+    async function seedLegacyIpRestriction(): Promise<Record<string, unknown>> {
+      const saved = await setPlugin('ip_restriction', { config: { allow: ['203.0.113.0/24'] } });
+      assert.equal(saved.statusCode, 200, saved.body);
+      const row = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
+      assert.ok(row);
+      const legacy = { allow: ['203.0.113.0/24'], mode: 'allow_first' };
+      await harness.store.apiPlugins.upsert({
+        api_id: apiId,
+        plugin_name: 'ip_restriction',
+        enabled: row.enabled,
+        config: legacy,
+        trigger: row.trigger,
+        ferrum_plugin_config_id: row.ferrum_plugin_config_id,
+      });
+      const live = edgeConfig('ip_restriction');
+      live.config = { ...legacy };
+      live.priority_override = 2_222;
+      return live;
+    }
+
+    function strip(): ReturnType<typeof stripRetiredPaletteKeys> {
+      return stripRetiredPaletteKeys({
+        store: harness.store,
+        audit: harness.services.audit,
+        apiPlugins: harness.services.apiPlugins,
+        locks: createKeyedSerializer({ leases: harness.store.leases }),
+        namespace: 'nexus',
+      });
+    }
+
+    // One test, because the run is recorded once per database and this file
+    // shares one: the failed first run must record nothing, and the run that
+    // succeeds must record itself so a third finds nothing to do.
+    it('rewrites a config saved with mode, keeping operator fields, and records the run once', async () => {
+      const live = await seedLegacyIpRestriction();
+      const configId = String(live.id);
+
+      harness.edge.queueFailure(500, { error: 'boom' }, `/plugins/config/${configId}`, 'PUT');
+      const failed = await strip();
+      assert.deepEqual(failed, { alreadyRecorded: false, rewritten: 0, failed: 1 });
+      assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
+        allow: ['203.0.113.0/24'],
+        mode: 'allow_first',
+      });
+      assert.equal((await harness.auditRows('api.plugin_keys_stripped')).length, 0);
+
+      const done = await strip();
+      assert.equal(done.alreadyRecorded, false);
+      assert.equal(done.failed, 0);
+      assert.ok(done.rewritten >= 1);
+      const written = storedConfig(configId);
+      assert.deepEqual(written.config, { allow: ['203.0.113.0/24'] });
+      assert.equal(written.priority_override, 2_222, 'the operator override survives');
+      assert.ok(effectiveIds(harness, proxyId).includes(configId));
+      assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
+        allow: ['203.0.113.0/24'],
+      });
+      const audited = (await harness.auditRows('api.plugin_set')).filter(
+        (entry) => entry.target_id === apiId && entry.details.retired_keys !== undefined,
+      );
+      assert.equal(audited.length, 1);
+      assert.equal(audited[0]?.actor_user_id, null);
+      assert.deepEqual(audited[0]?.details.retired_keys, ['mode']);
+      assert.equal((await harness.auditRows('api.plugin_keys_stripped')).length, 1);
+
+      assert.deepEqual(await strip(), { alreadyRecorded: true, rewritten: 0, failed: 0 });
+    });
+
+    it('writes a config saved with mode back without it on the next save', async () => {
+      const live = await seedLegacyIpRestriction();
+      // The form never sends `mode`, so re-saving the same settings is enough.
+      const resaved = await setPlugin('ip_restriction', { config: { allow: ['203.0.113.0/24'] } });
+      assert.equal(resaved.statusCode, 200, resaved.body);
+      assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
     });
   });
 

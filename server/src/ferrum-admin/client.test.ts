@@ -1679,7 +1679,7 @@ describe('ferrum admin client', () => {
         plugin_name: 'ip_restriction',
         scope: 'proxy',
         enabled: false,
-        config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+        config: { allow: ['203.0.113.0/24'] },
         labels: { operator: 'preserve', 'provisioned-by': 'operator-origin' },
         priority_override: 2_900,
         trigger,

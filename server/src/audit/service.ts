@@ -196,6 +196,14 @@ export const AuditAction = {
    */
   API_PLUGIN_ROLLBACK: 'api.plugin_rollback',
   /**
+   * The one-off startup pass rewrote every palette config that carried a key
+   * Edge has removed (`ip_restriction.mode`, issue #727). Written by the system
+   * once, after every such row was rewritten (each with its own
+   * `api.plugin_set` row naming `retired_keys`); its presence stops later
+   * starts from scanning again.
+   */
+  API_PLUGIN_KEYS_STRIPPED: 'api.plugin_keys_stripped',
+  /**
    * A `spec_enforcement` conversion could neither finish nor put the original
    * proxy back, so the API has no gateway object at all.
    *
@@ -621,6 +629,10 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_PLUGIN_REMOVE_START]: INTENT,
   [AuditAction.API_PLUGIN_REMOVE]: TRANSACTIONAL,
   [AuditAction.API_PLUGIN_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.API_PLUGIN_KEYS_STRIPPED]: rowOnly(
+    'A one-time marker: each rewrite committed its own api.plugin_set row before it, and a ' +
+      'run that found nothing to rewrite still records that it ran, so later starts skip it.',
+  ),
   [AuditAction.API_GATEWAY_REPAIR_REQUIRED]: postCommit(
     `${COMPENSATION_TRAIL} The reconciliation flag, which is a change of its own, records ` +
       'it in its transaction.',

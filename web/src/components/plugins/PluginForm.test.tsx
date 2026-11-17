@@ -80,6 +80,7 @@ describe('draftToConfig', () => {
       ttl_seconds: '60',
       cacheable_methods: ['GET'],
       cacheable_status_codes: ['200', '404'],
+      // Removed by Edge (issue #727): a stale draft key is never sent.
       cache_key_include_query: true,
       vary_by_headers: 'accept-language\naccept',
     });
@@ -87,9 +88,15 @@ describe('draftToConfig', () => {
       ttl_seconds: 60,
       cacheable_methods: ['GET'],
       cacheable_status_codes: [200, 404],
-      cache_key_include_query: true,
       vary_by_headers: ['accept-language', 'accept'],
     });
+  });
+
+  it('never sends ip_restriction mode, even for a config saved with one (issue #727)', () => {
+    const spec = descriptor('ip_restriction');
+    expect(spec.fields.map((field) => field.key)).toEqual(['allow', 'deny']);
+    const saved = { allow: ['203.0.113.0/24'], mode: 'deny_first' };
+    expect(draftToConfig(spec, draftFor(spec, saved))).toEqual({ allow: ['203.0.113.0/24'] });
   });
 
   it('omits an optional field the provider cleared rather than sending it empty', () => {
@@ -117,7 +124,6 @@ describe('draftToConfig', () => {
     const config = draftToConfig(descriptor('ip_restriction'), {
       allow: '203.0.113.0/24\n\n  198.51.100.7  \n',
       deny: '',
-      mode: 'allow_first',
     });
     expect(config.allow).toEqual(['203.0.113.0/24', '198.51.100.7']);
     expect(config).not.toHaveProperty('deny');
@@ -231,7 +237,6 @@ describe('validateDraft', () => {
     const errors = validateDraft(descriptor('ip_restriction'), {
       allow: '',
       deny: '',
-      mode: 'allow_first',
     });
     expect(errors[FORM_ERROR_KEY]).toBe(RESTRICT_NOBODY);
     expect(errors.allow).toBeUndefined();

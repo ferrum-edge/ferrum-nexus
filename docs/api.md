@@ -2804,6 +2804,12 @@ default list), a content type with `*` anywhere but a whole subtype (`text/*`
 is accepted), and an `ip_restriction` prefix length that is not canonical
 decimal (`/08`).
 
+Keys Edge has removed are refused with `400 VALIDATION_FAILED` like any other
+unknown key: `ip_restriction` `mode` (it never changed whether a request was
+admitted) and the retired `response_caching` `cache_key_include_query` and
+`cache_key_include_consumer`. A row saved with one before they were removed
+is written to the gateway without it (issue #727).
+
 Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
 `request_size_limiting`, `response_size_limiting`, `compression`,
 `correlation_id` (and the retired `response_caching`) — refuse a trigger with
@@ -2820,7 +2826,7 @@ _provider_, owner or admin → `{ "plugin": ApiPlugin }`. Creates or replaces.
 ```json
 {
   "enabled": true,
-  "config": { "allow": ["203.0.113.0/24"], "mode": "allow_first" },
+  "config": { "allow": ["203.0.113.0/24"], "deny": ["203.0.113.7"] },
   "trigger": { "methods": ["POST"], "path_prefix": "/nexus/billing/invoices" }
 }
 ```

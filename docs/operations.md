@@ -1099,6 +1099,32 @@ Nexus `v0.5.2` is qualified against Edge v0.9.15 only and has not been tested
 against v0.9.20, so upgrade Nexus promptly after Edge. **Rolling back** Edge to
 v0.9.17 is not qualified for the release that pins v0.9.20.
 
+### Palette keys the next Edge release removes
+
+Edge after v0.9.20 refuses `ip_restriction` `mode` and the retired
+`response_caching` `cache_key_include_query` and `cache_key_include_consumer` as
+unknown keys (Edge issue #7114). None of them changed what the gateway did, but
+earlier Nexus releases wrote `mode` on **every** `ip_restriction` saved from the
+portal. `ip_restriction` is fail-closed, so on that Edge release one such
+enabled config makes an Admin API write `400`, a reload fail, and a
+database-mode gateway refuse to start.
+
+This release stops writing them (a save that carries one is
+`400 VALIDATION_FAILED`, and every rebuild drops them from stored rows), and at
+its first start it rewrites every palette config in `FERRUM_NAMESPACE` that
+still carries one: the gateway config the row owns (by recorded id, keeping
+operator fields such as `priority_override`) and the row itself. Each rewrite
+is an `api.plugin_set` audit row with `retired_keys` and no actor; the run ends
+with one `api.plugin_keys_stripped` row. A run that cannot rewrite a row (the
+gateway is unreachable, say) logs it at `warn`, records no completion row, and
+runs again at the next start.
+
+**Before upgrading Edge past v0.9.20**, run this release (or a later one)
+against the v0.9.20 gateway until `api.plugin_keys_stripped` is in the audit
+log. An `ip_restriction` or `response_caching` config an operator wrote by hand
+is not the portal's to change: remove those keys from it yourself, as the Edge
+upgrade guide says.
+
 ### Email
 
 All optional. SMTP can also be configured in **Admin → Settings**, and stored

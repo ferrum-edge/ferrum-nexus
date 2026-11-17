@@ -74,18 +74,22 @@
  * and `spec_expose` with a route — and neither changes the machinery below.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   findProviderPlugin,
   isFirstClassPlugin,
   FIRST_CLASS_PLUGIN_FIELDS,
   MAX_PAGE_SIZE,
+  RETIRED_PLUGIN_CONFIG_KEYS,
+  withoutRetiredConfigKeys,
   type ApiPlugin,
   type ApiPluginTrigger,
   type ProviderPluginDescriptor,
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { AuditAction, type AuditService } from '../audit/service.js';
+import { AuditAction, SYSTEM_ACTOR, type AuditActor, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { ApiPluginRecord, NexusStore, UserRecord } from '../db/store.js';
 import {
@@ -94,7 +98,7 @@ import {
   paletteGatewaySettings,
   palettePriority,
 } from '../ferrum-admin/palette.js';
-import type { FerrumAdminClient } from '../ferrum-admin/index.js';
+import { DEFAULT_ADMIN_SUBJECT, type FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgePluginConfig } from '../ferrum-admin/types.js';
 import { conflict, notFound, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
@@ -131,6 +135,17 @@ export interface ApiPluginsService {
    * `key_auth` would read like the gateway does not have it.
    */
   descriptorFor(pluginName: string): ProviderPluginDescriptor;
+  /**
+   * Rewrite one palette row, and the gateway config it owns, without the keys
+   * Edge has removed (`RETIRED_PLUGIN_CONFIG_KEYS`, issue #727).
+   *
+   * The system's own change, made by the one-off startup pass in
+   * `retired-keys.ts`: no actor and no ownership check. Only the config the
+   * row owns is written, under the same locks and undo stack as a provider's
+   * save; a config the row does not own (or a missing proxy) leaves only the
+   * row to rewrite. Resolves to the keys removed, `[]` when there were none.
+   */
+  stripRetiredConfigKeys(apiId: Uuid, pluginName: string): Promise<string[]>;
 }
 
 /** Dependencies of {@link createApiPluginsService}. */
@@ -247,7 +262,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
    * put back and nothing to record.
    */
   async function unwind(input: {
-    actor: UserRecord;
+    actor: AuditActor;
     target: { apiId: Uuid; proxyId: string };
     operation: 'set' | 'remove';
     pluginName: string;
@@ -555,6 +570,94 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
           throw error;
         }
       });
+    },
+
+    async stripRetiredConfigKeys(apiId, pluginName) {
+      const retired = RETIRED_PLUGIN_CONFIG_KEYS[pluginName];
+      if (!retired) return [];
+      const api = await store.apis.findById(apiId);
+      if (!api) return [];
+      const proxyId = api.ferrum_proxy_id;
+      const rewrite = async (): Promise<string[]> => {
+        const row = await store.apiPlugins.find(apiId, pluginName);
+        if (!row) return [];
+        const removed = retired.filter((key) => Object.hasOwn(row.config, key));
+        if (removed.length === 0) return [];
+        const stripped = withoutRetiredConfigKeys(pluginName, row.config);
+        const existing = proxyId
+          ? ownedConfig(row, await binder.listByProxy(proxyId), pluginName)
+          : undefined;
+        const undo: (() => Promise<void>)[] = [];
+        try {
+          if (proxyId && existing) {
+            // The row's own settings, unchanged but for the removed keys; the
+            // binder carries the operator's fields (`priority_override`) over.
+            await binder.reconcileOptionalPluginLocked(
+              proxyId,
+              existing,
+              pluginName,
+              paletteGatewaySettings(pluginName, stripped, config.edge.rateLimit),
+              DEFAULT_ADMIN_SUBJECT,
+              undo,
+              {
+                enabled: row.enabled,
+                trigger: edgeTriggerFor(row.trigger),
+                priorityOverride: palettePriority(pluginName),
+              },
+            );
+          }
+          await store.transaction(async (tx) => {
+            // A provider save since the read above owns the row now.
+            const current = await tx.apiPlugins.find(apiId, pluginName);
+            if (!current || !isDeepStrictEqual(current.config, row.config)) {
+              throw conflict('The palette plugin changed while its removed keys were stripped');
+            }
+            await tx.apiPlugins.upsert({
+              api_id: apiId,
+              plugin_name: pluginName,
+              enabled: row.enabled,
+              config: stripped,
+              trigger: row.trigger,
+              ferrum_plugin_config_id: row.ferrum_plugin_config_id,
+            });
+            await audit.forStore(tx).record(
+              SYSTEM_ACTOR,
+              AuditAction.API_PLUGIN_SET,
+              { type: 'api', id: apiId },
+              {
+                plugin_name: pluginName,
+                enabled: row.enabled,
+                config_keys: Object.keys(stripped).sort(),
+                trigger: row.trigger,
+                replaced: true,
+                plugin_config_id: existing?.id ?? null,
+                retired_keys: removed,
+              },
+            );
+          });
+          return removed;
+        } catch (error) {
+          if (proxyId) {
+            await unwind({
+              actor: SYSTEM_ACTOR,
+              target: { apiId, proxyId },
+              operation: 'set',
+              pluginName,
+              pluginConfigId: existing?.id ?? null,
+              undo,
+              error,
+              ip: null,
+            });
+          }
+          throw error;
+        }
+      };
+      if (!proxyId) return rewrite();
+      // The lock order a provider's save takes: palette composition, then the
+      // canonical proxy lease, so the two cannot interleave.
+      return edge.serializePerKey(`proxy-palette:${proxyId}`, () =>
+        binder.withProxy(proxyId, rewrite),
+      );
     },
   };
 }

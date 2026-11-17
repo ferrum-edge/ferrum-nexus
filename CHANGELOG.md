@@ -193,6 +193,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   The e2e package's unused `test`, `test:sso` and `test:browser` scripts are
   gone too; run the suite with `./e2e/run.sh`.
 
+- **`ip_restriction` has no evaluation order any more** (#727). The palette
+  offered `mode` ("Evaluation order") and the form wrote it on every save, but it
+  never changed whether a request was admitted, Edge v0.9.20 deprecates it, and
+  the next Edge release refuses it (and the retired `response_caching`
+  `cache_key_include_query` / `cache_key_include_consumer`) as an unknown key,
+  which for a fail-closed plugin stops a database-mode gateway from starting. A
+  palette save that carries one of these keys is now `400 VALIDATION_FAILED`
+  (breaking for an API client that sent `mode`: drop it), every rebuild writes
+  stored rows without them, and the first start of this release rewrites every
+  palette config Nexus wrote with one, on the gateway and in the store, then
+  records `api.plugin_keys_stripped`. Let that run finish against Edge v0.9.20
+  before upgrading Edge past it; see
+  [Palette keys the next Edge release removes](docs/operations.md#palette-keys-the-next-edge-release-removes).
+
 - **One contracts `PIN`, checked against the vendored tree** (#728).
   `contracts/ferrum-contracts/SERVICE-MANIFEST-PIN` is merged into `PIN`, which
   now uses the ferrum-contracts `docs/consumer-pins.md` format (`tag <tag>`,

@@ -57,7 +57,7 @@ const API: Api = {
 const SAVED: ApiPlugin = {
   plugin_name: 'ip_restriction',
   enabled: false,
-  config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+  config: { allow: ['203.0.113.0/24'] },
   trigger: null,
   created_at: '2026-01-02T00:00:00.000Z',
   updated_at: '2026-01-02T00:00:00.000Z',

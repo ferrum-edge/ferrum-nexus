@@ -692,21 +692,14 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         kind: 'string_list',
         key: 'deny',
         label: 'Denied addresses',
-        help: 'Always wins over the allow list, whatever the evaluation order.',
+        help: 'Always wins over the allow list.',
         max_entries: 128,
         item_pattern: IP_OR_CIDR_PATTERN,
         item_max_length: 64,
       },
-      {
-        kind: 'enum',
-        key: 'mode',
-        label: 'Evaluation order',
-        options: [
-          { value: 'allow_first', label: 'Allow list first' },
-          { value: 'deny_first', label: 'Deny list first' },
-        ],
-        default: 'allow_first',
-      },
+      // No `mode`: it never changed whether a request was admitted, Edge
+      // v0.9.20 deprecates it, and the next Edge release refuses it as an
+      // unknown key (issue #727). See `RETIRED_PLUGIN_CONFIG_KEYS`.
     ],
   },
 
@@ -1008,15 +1001,6 @@ export const RETIRED_RESPONSE_CACHING: ProviderPluginDescriptor = {
       default: [200, 301, 404],
     },
     {
-      kind: 'boolean',
-      key: 'cache_key_include_query',
-      label: 'Separate cache entries per query string',
-      help:
-        'The query string is always part of the key; changing this only rotates the keyspace, ' +
-        'so a cached response is never replayed across different queries either way.',
-      default: true,
-    },
-    {
       kind: 'string_list',
       key: 'vary_by_headers',
       label: 'Also vary by these request headers',
@@ -1027,6 +1011,31 @@ export const RETIRED_RESPONSE_CACHING: ProviderPluginDescriptor = {
     },
   ],
 };
+
+/**
+ * Palette config keys Edge has removed, by plugin name (issue #727).
+ *
+ * Edge v0.9.20 still accepts them but they decide nothing; the next Edge
+ * release refuses them as unknown keys, and an enabled fail-closed config that
+ * carries one stops a database-mode gateway from starting. The palette no
+ * longer offers them, the server refuses them in a new save, every replay of
+ * a stored row drops them, and a one-off startup pass rewrites the configs
+ * Nexus wrote before this release (`server/src/plugins/retired-keys.ts`).
+ */
+export const RETIRED_PLUGIN_CONFIG_KEYS: Readonly<Record<string, readonly string[]>> = {
+  ip_restriction: ['mode'],
+  response_caching: ['cache_key_include_query', 'cache_key_include_consumer'],
+};
+
+/** `config` without the keys {@link RETIRED_PLUGIN_CONFIG_KEYS} lists for `pluginName`. */
+export function withoutRetiredConfigKeys(
+  pluginName: string,
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  const retired = RETIRED_PLUGIN_CONFIG_KEYS[pluginName];
+  if (!retired || !retired.some((key) => Object.hasOwn(config, key))) return config;
+  return Object.fromEntries(Object.entries(config).filter(([key]) => !retired.includes(key)));
+}
 
 /** Descriptor for an offered or retired plugin, or `undefined` for an unknown name. */
 export function findProviderPlugin(name: string): ProviderPluginDescriptor | undefined {

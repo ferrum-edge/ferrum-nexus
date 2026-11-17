@@ -99,6 +99,7 @@ import {
 } from './middleware/error-handler.js';
 import { responseCachingHook } from './middleware/session-cookies.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
+import { stripRetiredPaletteKeys } from './plugins/retired-keys.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createApiViewersService, type ApiViewersService } from './publishing/viewers.js';
 import { createApplicationsService, type ApplicationsService } from './applications/service.js';
@@ -268,6 +269,13 @@ export interface BuildServerDeps {
    * `services.reconciliation.scan()` themselves, so no pass ever runs mid-assert.
    */
   startReconciliationWorker?: boolean;
+  /**
+   * Run the one-off rewrite of palette configs that carry a key Edge removed
+   * (`plugins/retired-keys.ts`, issue #727). Same default as
+   * {@link BuildServerDeps.startOutboxWorker}: tests call
+   * `stripRetiredPaletteKeys` themselves.
+   */
+  startRetiredKeysPass?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
   /**
@@ -1101,6 +1109,31 @@ export async function buildServer(
     accessJobs.start();
   }
   if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
+  if (deps.startRetiredKeysPass ?? config.env !== 'test') {
+    // Once per database, while the gateway still accepts them: rewrite the
+    // palette configs an earlier release wrote with a key the next Edge
+    // release refuses (issue #727). In the background; a run that meets a
+    // failure records nothing and the next start tries again.
+    void stripRetiredPaletteKeys({
+      store: deps.store,
+      audit,
+      apiPlugins,
+      locks,
+      namespace: config.edge.namespace,
+      log: warn,
+    })
+      .then((result) => {
+        if (!result.alreadyRecorded) {
+          app.log.info(result, 'Stripped removed keys from palette plugin configs');
+        }
+      })
+      .catch((error: unknown) => {
+        app.log.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Could not strip removed palette config keys; the next start tries again',
+        );
+      });
+  }
   if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 
   return app;
