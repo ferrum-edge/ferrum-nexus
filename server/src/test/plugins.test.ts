@@ -30,6 +30,7 @@ import { stripRetiredPaletteKeys } from '../plugins/retired-keys.js';
 import {
   aclGroupsProblem,
   mockCacheStorageAllowed,
+  mockDeduplicationCompositionError,
   mockPaletteCompositionError,
 } from './mock-ferrum-edge.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -369,6 +370,42 @@ describe('provider plugin palette', () => {
         mockPaletteCompositionError([{ ...compressor, enabled: false }, deduplicator]),
         null,
       );
+    });
+
+    // Issue #730: Edge's `DYNAMIC_RESPONSE_PRESENTATION_PLUGINS` rule.
+    it('models the native refusal of deduplication beside an active mcp_gateway', () => {
+      const deduplicator = { plugin_name: 'request_deduplication' };
+      const mcp = { plugin_name: 'mcp_gateway', config: {} };
+      assert.ok(mockDeduplicationCompositionError([deduplicator, mcp]));
+      assert.ok(mockPaletteCompositionError([deduplicator, mcp]));
+      assert.equal(
+        mockDeduplicationCompositionError([{ ...deduplicator, enabled: false }, mcp]),
+        null,
+      );
+      assert.equal(
+        mockDeduplicationCompositionError([deduplicator, { ...mcp, enabled: false }]),
+        null,
+      );
+      assert.equal(
+        mockDeduplicationCompositionError([deduplicator, { ...mcp, config: { enabled: false } }]),
+        null,
+      );
+    });
+
+    it('refuses deduplication beside an operator mcp_gateway before any write (issue #730)', async () => {
+      seedOperatorConfig('mcp_gateway', 'operator-mcp', { mode: 'aggregate_router' });
+      const before = harness.edge.requests.length;
+      const response = await setPlugin('request_deduplication', { config: {} });
+      assert.equal(response.statusCode, 400, response.body);
+      assert.match(errorCode(response.body), VALIDATION_FAILED_CODE);
+      assert.equal(
+        harness.edge.requests.slice(before).some((request) => request.method !== 'GET'),
+        false,
+      );
+      assert.equal(configsNamed('request_deduplication').length, 0);
+      // Stored switched off, it runs nothing, which Edge composes with anything.
+      const off = await setPlugin('request_deduplication', { enabled: false, config: {} });
+      assert.equal(off.statusCode, 200, off.body);
     });
 
     // Issue #729: Edge's `MAX_ACL_GROUPS_PER_CONSUMER`.

@@ -93,6 +93,7 @@ import { AuditAction, SYSTEM_ACTOR, type AuditActor, type AuditService } from '.
 import type { NexusConfig } from '../config/index.js';
 import type { ApiPluginRecord, NexusStore, UserRecord } from '../db/store.js';
 import {
+  activeMcpGateway,
   edgeTriggerFor,
   incompatiblePaletteSibling,
   paletteGatewaySettings,
@@ -251,6 +252,25 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
   }
 
   /**
+   * Refuse to switch `request_deduplication` on where Edge would refuse it
+   * beside the API's `mcp_gateway` (issue #730): an API with AI agents on, or
+   * a proxy already running an MCP gateway. Called under the proxy lease,
+   * before any gateway write, so the provider gets a reason to act on instead
+   * of a gateway `400` and a rollback.
+   */
+  async function assertDeduplicationComposes(target: { apiId: Uuid; proxyId: string }) {
+    const api = await store.apis.findById(target.apiId);
+    const gateway = activeMcpGateway(await binder.listByProxy(target.proxyId));
+    if (!api?.agents && !gateway) return;
+    throw validationFailed(
+      'Request deduplication cannot run on an API with AI agents: the gateway replays a ' +
+        'stored response without the MCP gateway rewriting it, so it refuses the pair. Turn ' +
+        'off AI agents for this API first',
+      { plugin_name: 'request_deduplication', conflicting_plugin: 'mcp_gateway', field: 'agents' },
+    );
+  }
+
+  /**
    * Replay a failed palette write's undo stack, newest first, and record what
    * that achieved.
    *
@@ -388,6 +408,11 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
         // removes it. Without it a MongoDB deletion committing between the
         // parent read and the upsert left an orphan row (#563).
         return binder.withProxy(target.proxyId, async () => {
+          if (pluginName === 'request_deduplication' && input.enabled) {
+            // Under the canonical proxy lease an agents change also holds, so
+            // neither side can turn on between this check and the write.
+            await assertDeduplicationComposes(target);
+          }
           try {
             const written = await binder.reconcileOptionalPluginLocked(
               target.proxyId,

@@ -240,6 +240,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   skipped and recorded as `access.mcp_enroll_skip`. The test gateway enforces the
   cap.
 
+- **Request deduplication and AI agents are refused together up front** (#730).
+  Edge refuses `request_deduplication` beside an active `mcp_gateway`, which
+  every agent API runs. Switching deduplication on for an agent API, or turning
+  agents on (including a `docs_only` to `routes` conversion) while any enabled
+  deduplication config is on the proxy, failed at the gateway after Nexus had
+  enrolled grantees with the MCP-all group, or after a conversion had taken the
+  live proxy down and had to restore it. Both are now `400 VALIDATION_FAILED`
+  before any gateway or consumer write, and the test gateway enforces Edge's
+  composition rule on plugin, proxy and `/api-specs` writes.
+
 - **The production image keeps dependencies npm installs inside a workspace.** The
   runtime stage copied only the root `node_modules`, so a lock that placed a server
   dependency in `server/node_modules` (as Dependabot's npm 10 update of better-sqlite3

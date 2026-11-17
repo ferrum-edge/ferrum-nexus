@@ -264,6 +264,7 @@ import {
   type FerrumAdminClient,
 } from '../ferrum-admin/index.js';
 import {
+  activeDeduplication,
   edgeTriggerFor,
   paletteGatewaySettings,
   palettePriority,
@@ -3619,6 +3620,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             'The gateway proxy changed while this update was waiting; reload and retry',
           );
         }
+        // Before the undo stack and every gateway or consumer write: grantee
+        // enrollment, a conversion's proxy removal and the agent build itself
+        // all come after this (issue #730).
+        if (nextAgents && (agentsMoved || enforcementMoved) && proxyId) {
+          assertAgentsCompose(plugins);
+        }
 
         // ── Which first-class configs are the portal's to change ──────────
         //
@@ -6325,6 +6332,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
+   * Refuse an agent deployment onto a proxy running `request_deduplication`,
+   * which Edge refuses beside the deployment's `mcp_gateway` (issue #730).
+   * `VALIDATION_FAILED` naming the config, instead of a gateway `400` after
+   * grantees were enrolled or a conversion took the live proxy down.
+   */
+  function assertAgentsCompose(onProxy: EdgePluginConfig[]): void {
+    const deduplication = activeDeduplication(onProxy);
+    if (!deduplication) return;
+    throw validationFailed(
+      'AI agents cannot be enabled while request deduplication runs on this API: the gateway ' +
+        'replays a stored response without the MCP gateway rewriting it, so it refuses the ' +
+        'pair. Turn off request deduplication first (or ask the gateway operator to, if they ' +
+        'added it)',
+      {
+        field: 'agents',
+        conflicting_plugin: 'request_deduplication',
+        plugin_config_id: deduplication.id,
+      },
+    );
+  }
+
+  /**
    * Whether a change from `previous` to `next` exposes tools to all-tools
    * grantees that may not hold the MCP-all group yet: agents turned on, or a
    * retained phase-1 selection (tools without exposure ids) given its ids.
@@ -6355,9 +6384,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const spec = await edge.apiSpecs.findByProxy(String(proxy.id));
       return preserveRouteValidator(routesSpecDocument(document, { proxy }), live, spec?.id);
     }
-    if (enroll) await enrollAllToolGrantees(api.id, subject);
     const proxyId = String(proxy.id);
     const live = await edge.pluginConfigs.listByProxy(proxyId);
+    // Read before enrolling: a build Edge will refuse must not first put the
+    // MCP-all group on grantees' consumers (issue #730).
+    assertAgentsCompose(live);
+    if (enroll) await enrollAllToolGrantees(api.id, subject);
     const spec = await edge.apiSpecs.findByProxy(proxyId);
     return routesSpecDocument(document, {
       proxy,

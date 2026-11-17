@@ -1295,6 +1295,73 @@ describe('agent publishing and Nexus authorization', () => {
     );
   });
 
+  // Issue #730: Edge refuses request_deduplication beside an active mcp_gateway.
+  it('refuses request_deduplication on an API with AI agents before any gateway write', async () => {
+    const { api } = await publish();
+    const before = harness.edge.requests.length;
+    const refused = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/plugins/request_deduplication`,
+      payload: { config: {} },
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+    assert.deepEqual(writesSince(before), []);
+    assert.equal(await harness.store.apiPlugins.find(api.id, 'request_deduplication'), null);
+  });
+
+  it('refuses to enable agents while request_deduplication runs, before enrolling anyone', async () => {
+    const { api } = await publish({ agents: null });
+    const grantee = await harness.registerUser({ role: 'client' });
+    const grant = await approveFor(grantee, api.id);
+    const deduplication = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/plugins/request_deduplication`,
+      payload: { config: {} },
+    });
+    assert.equal(deduplication.statusCode, 200, deduplication.body);
+    const groupsBefore = groupsOf(grantee);
+    const before = harness.edge.requests.length;
+
+    const refused = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { agents: AGENTS },
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+    assert.deepEqual(writesSince(before), []);
+    assert.deepEqual(groupsOf(grantee), groupsBefore);
+    assert.equal(await countAudit('access.mcp_enroll', grant.id), 0);
+    assert.equal((await harness.store.apis.findById(api.id))?.agents, null);
+  });
+
+  it('refuses a docs_only conversion that enables agents beside deduplication, proxy untouched', async () => {
+    const { api } = await publish({ agents: null, spec_enforcement: 'docs_only' });
+    const proxyId = api.ferrum_proxy_id;
+    assert.ok(proxyId);
+    const deduplication = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/plugins/request_deduplication`,
+      payload: { config: {} },
+    });
+    assert.equal(deduplication.statusCode, 200, deduplication.body);
+    const before = harness.edge.requests.length;
+
+    const refused = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { spec_enforcement: 'routes', agents: AGENTS },
+    });
+    assert.equal(refused.statusCode, 400, refused.body);
+    assert.equal(errorCode(refused.body), 'VALIDATION_FAILED');
+    assert.deepEqual(writesSince(before), []);
+    const current = await harness.store.apis.findById(api.id);
+    assert.equal(current?.spec_enforcement, 'docs_only');
+    assert.equal(current?.gateway_state, 'deployed');
+    assert.ok(harness.edge.proxies.get(`nexus/${proxyId}`));
+  });
+
   it('carries explicit subsets across spec revisions and prunes only removed tools', async () => {
     const remove = {
       path: '/items/{id}',

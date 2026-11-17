@@ -31,6 +31,31 @@ export function incompatiblePaletteSibling(
 }
 
 /**
+ * An enabled `request_deduplication` config on the proxy, or `undefined`.
+ *
+ * Edge refuses `request_deduplication` beside an active `mcp_gateway` on one
+ * proxy (`DYNAMIC_RESPONSE_PRESENTATION_PLUGINS`): a replay skips the MCP
+ * gateway's response rewrite, which follows live upstream state. An AI-agents
+ * API carries that `mcp_gateway`, so the two are refused here, both ways,
+ * before any gateway write (issue #730). Any enabled config counts, an
+ * operator's included: Edge judges the proxy, not who wrote the config.
+ */
+export function activeDeduplication(onProxy: EdgePluginConfig[]): EdgePluginConfig | undefined {
+  return onProxy.find((plugin) => plugin.plugin_name === 'request_deduplication' && plugin.enabled);
+}
+
+/**
+ * An `mcp_gateway` config on the proxy whose hooks run, or `undefined`: outer
+ * `enabled` on and its own `config.enabled` not `false`, as Edge decides.
+ */
+export function activeMcpGateway(onProxy: EdgePluginConfig[]): EdgePluginConfig | undefined {
+  return onProxy.find(
+    (plugin) =>
+      plugin.plugin_name === 'mcp_gateway' && plugin.enabled && plugin.config?.enabled !== false,
+  );
+}
+
+/**
  * Compile the portal's trigger into the predicate tree Edge expects.
  *
  * A node sets **exactly one** of `all`/`any`/`not`/`match`, and a `match` leaf

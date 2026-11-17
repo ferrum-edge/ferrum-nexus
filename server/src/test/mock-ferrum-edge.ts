@@ -274,8 +274,30 @@ export function aclGroupsProblem(groups: unknown): string | null {
   return `acl_groups must not have more than ${EDGE_MAX_ACL_GROUPS} entries (got ${groups.length})`;
 }
 
+/**
+ * Edge's `request_deduplication::validate_composition`: an enabled
+ * deduplicator beside an `mcp_gateway` whose hooks run (outer `enabled` on,
+ * inner `config.enabled` not `false`) is refused on one proxy.
+ */
+export function mockDeduplicationCompositionError(
+  plugins: Record<string, unknown>[],
+): string | null {
+  const active = plugins.filter((plugin) => plugin.enabled !== false);
+  const deduplicating = active.some((plugin) => plugin.plugin_name === 'request_deduplication');
+  const mcp = active.some(
+    (plugin) =>
+      plugin.plugin_name === 'mcp_gateway' &&
+      (plugin.config as Record<string, unknown> | null | undefined)?.enabled !== false,
+  );
+  return deduplicating && mcp
+    ? 'request_deduplication cannot be composed with `mcp_gateway` on this proxy'
+    : null;
+}
+
 /** Model the compression/deduplication composition rule, including equal priorities. */
 export function mockPaletteCompositionError(plugins: Record<string, unknown>[]): string | null {
+  const dynamic = mockDeduplicationCompositionError(plugins);
+  if (dynamic) return dynamic;
   const active = plugins.filter((plugin) => plugin.enabled !== false);
   const compressors = active.filter((plugin) => plugin.plugin_name === 'compression');
   const deduplicators = active.filter((plugin) => plugin.plugin_name === 'request_deduplication');
@@ -3120,6 +3142,31 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   /**
+   * Edge's `/api-specs` composition refusal (`422`, `resource_type:
+   * plugin_composition`) for the plugins a spec write would leave on its
+   * proxy: the embedded ones plus every config the spec does not own.
+   */
+  function specCompositionProblem(
+    namespace: string,
+    proxyId: string,
+    specId: string | null,
+    embedded: Record<string, unknown>[],
+  ): Record<string, unknown> | null {
+    const survivors = [...pluginConfigs.values()].filter(
+      (config) =>
+        config.namespace === namespace &&
+        config.proxy_id === proxyId &&
+        (specId === null || config.api_spec_id !== specId),
+    );
+    const problem = mockDeduplicationCompositionError([...embedded, ...survivors]);
+    if (!problem) return null;
+    return {
+      error: 'Spec validation failed',
+      failures: [{ resource_type: 'plugin_composition', errors: [problem] }],
+    };
+  }
+
+  /**
    * Insert (or re-insert) the proxy a spec owns and regenerate its plugins.
    *
    * Hand-owned plugin configs and their associations are untouched by a
@@ -3310,6 +3357,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         return fail(res, 409, `A spec already exists for proxy '${proxyId}'`);
       }
 
+      const composition = specCompositionProblem(namespace, proxyId, null, checked.plugins);
+      if (composition) return send(res, 422, composition);
+
       const spec: StoredApiSpec = {
         id: randomUUID(),
         namespace,
@@ -3378,6 +3428,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           ],
         });
       }
+      const composition = specCompositionProblem(
+        namespace,
+        existing.proxy_id,
+        existing.id,
+        checked.plugins,
+      );
+      if (composition) return send(res, 422, composition);
       const proxy = proxies.get(key(namespace, existing.proxy_id));
       existing.document = document;
       existing.spec_version = typeof document.openapi === 'string' ? document.openapi : '3.1.0';
