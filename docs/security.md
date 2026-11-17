@@ -2380,7 +2380,7 @@ Before going live:
 `POST /api/service-manifests/preview` requires a provider-or-higher session, CSRF,
 and the configured namespace in both the request and manifest (the contract's default
 namespace is `ferrum`). The immutable published shared v1 schema and complete shared fixture
-set are pinned separately in `contracts/ferrum-contracts/SERVICE-MANIFEST-PIN`.
+set are pinned in `contracts/ferrum-contracts/PIN` with the other vendored contracts.
 Strict validation rejects nulls where types prohibit them, unknown keys, unsupported
 schema versions/protocols, noncanonical paths and invalid references. Intake is bounded
 to 32 KiB, 8 levels, 1,024 nodes, 32 array entries and 2,048-character strings, with

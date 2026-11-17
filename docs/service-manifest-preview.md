@@ -8,10 +8,9 @@ v1 contract is published in `contracts-edge-0.9.20`, commit
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/39da322083044c2e92617209e62983c92387f0ad).
 The manifest schema and fixtures are byte-identical to `contracts-edge-0.9.12`; the
 shared `fixtures/invalid-expectations.json` changes only in other contracts' entries.
-[`SERVICE-MANIFEST-PIN`](../contracts/ferrum-contracts/SERVICE-MANIFEST-PIN) records
-SHA-256 for the schema, every shared manifest fixture and shared expectations.
-The separate Edge vocabulary [`PIN`](../contracts/ferrum-contracts/PIN) adopts
-the same publication. The copied `x-contract` metadata records the implemented shared
+The vendored [`PIN`](../contracts/ferrum-contracts/PIN) records SHA-256 for the
+schema, every shared manifest fixture and the shared expectations, with every other
+vendored contract file of the same publication. The copied `x-contract` metadata records the implemented shared
 status. The response reports `contract_status: "implemented"` and the exact adopted
 canonical commit without implying production apply.
 

@@ -6,7 +6,8 @@ import { validatedManifest } from '../service-manifest/service.js';
 import { manifestValidator } from '../service-manifest/schema.js';
 import { buildTestApp } from './helpers.js';
 
-const CHECKSUM_LINE = /^sha256: ([a-f0-9]{64})  (.+)$/;
+const CHECKSUM_LINE = /^([a-f0-9]{64})  (.+)$/;
+const MANIFEST_FILE = /service-manifest\/|^fixtures\/invalid-expectations\.json$/;
 
 const root = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
 function fixture(path: string): unknown {
@@ -14,11 +15,14 @@ function fixture(path: string): unknown {
 }
 
 describe('published immutable service-manifest consumer', () => {
+  // The manifest files are rows of the one vendored `PIN` (ferrum-contracts
+  // `docs/consumer-pins.md`), selected by path. `shared/src/ferrum-contracts.test.ts`
+  // parses that file strictly and checks it against the whole vendored tree.
   it('verifies the exact commit, schema, shared fixtures and invalid-expectation integrity pins', () => {
-    const pin = readFileSync(new URL('SERVICE-MANIFEST-PIN', root), 'utf8');
+    const pin = readFileSync(new URL('PIN', root), 'utf8');
     assert.deepEqual(pin.split('\n').slice(0, 2), [
-      'tag: contracts-edge-0.9.20',
-      'commit: 39da322083044c2e92617209e62983c92387f0ad',
+      'tag contracts-edge-0.9.20',
+      'commit 39da322083044c2e92617209e62983c92387f0ad',
     ]);
     const schema = fixture('schemas/service-manifest/v1.schema.json') as {
       'x-contract': { status: string; provenance: { commit: string; availability?: string }[] };
@@ -29,8 +33,15 @@ describe('published immutable service-manifest consumer', () => {
       '81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e',
     );
     assert.equal(schema['x-contract'].provenance[0]?.availability, 'unreleased');
-    for (const line of pin.split('\n').filter((entry) => entry.startsWith('sha256: '))) {
-      const [, digest, path] = CHECKSUM_LINE.exec(line) ?? [];
+    const manifestRows = pin
+      .split('\n')
+      .map((line) => CHECKSUM_LINE.exec(line))
+      .filter((match): match is RegExpExecArray => match !== null)
+      .filter(([, , path]) => MANIFEST_FILE.test(path ?? ''));
+    // The schema, the shared invalid expectations, and 3 valid and 9 invalid
+    // fixtures, as the separate pin listed them before it was merged.
+    assert.equal(manifestRows.length, 14);
+    for (const [, digest, path] of manifestRows) {
       assert.ok(path);
       assert.equal(
         createHash('sha256')
@@ -43,7 +54,7 @@ describe('published immutable service-manifest consumer', () => {
 
   it('accepts every shared valid fixture and rejects every shared invalid fixture', () => {
     const expectations = fixture('fixtures/invalid-expectations.json') as Record<string, unknown>;
-    const pin = readFileSync(new URL('SERVICE-MANIFEST-PIN', root), 'utf8');
+    const pin = readFileSync(new URL('PIN', root), 'utf8');
     for (const kind of ['valid', 'invalid']) {
       const base = `fixtures/service-manifest/${kind}/`;
       for (const name of readdirSync(new URL(base, root))) {

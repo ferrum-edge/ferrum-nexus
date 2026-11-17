@@ -193,6 +193,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   The e2e package's unused `test`, `test:sso` and `test:browser` scripts are
   gone too; run the suite with `./e2e/run.sh`.
 
+- **One contracts `PIN`, checked against the vendored tree** (#728).
+  `contracts/ferrum-contracts/SERVICE-MANIFEST-PIN` is merged into `PIN`, which
+  now uses the ferrum-contracts `docs/consumer-pins.md` format (`tag <tag>`,
+  `commit <sha>`, then `<sha256>  <path>` rows sorted by path). The `shared`
+  contract test parses it strictly and fails when a vendored file has no row, a
+  row names no file, or the tree holds a symbolic link, instead of comparing the
+  rows with a hard-coded list. The vendored directory is marked `-text` in
+  `.gitattributes` so no checkout rewrites its bytes.
+
 ### Removed
 
 - `NEXUS_ALLOW_UNATTESTED_EDGE_EGRESS` and the `unattested-edge-opt-in` egress
