@@ -243,6 +243,60 @@ describe('credential deletes conditioned on the consumer tag', () => {
       assert.equal(await statusOf(only.credential.id), 'revoked');
     });
 
+    for (const type of ['keyauth', 'jwt'] as const) {
+      it(`${gateway}: a ${type} rotation whose replacement another writer removed keeps the previous credential`, async () => {
+        harness.edge.setCredentialIfMatch(mode);
+        const user = await client();
+        const only = await issue(user, type);
+        const consumerId = only.credential.ferrum_consumer_id;
+        const field = type === 'keyauth' ? 'key' : 'secret';
+        const material = (entry: Record<string, unknown>): unknown => entry[field];
+        const previous = type === 'keyauth' ? only.secret.key : only.secret.jwt_secret;
+
+        // Below the cap the replacement is appended first. Another writer
+        // removes it before Nexus reads the consumer again, so retiring the
+        // previous credential would leave the identity holding a dead secret
+        // (review sol F1, dsf F1 on #739).
+        const consumers = harness.edgeClient.consumers;
+        const addCredential = consumers.addCredential.bind(consumers);
+        consumers.addCredential = async (id, credentialType, entry, subject, ifMatch) => {
+          consumers.addCredential = addCredential;
+          const written = await addCredential(id, credentialType, entry, subject, ifMatch);
+          const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
+          assert.ok(stored);
+          const appended = (entry as unknown as Record<string, unknown>)[field];
+          stored.credentials[type] = (stored.credentials[type] ?? []).filter(
+            (candidate) => material(candidate) !== appended,
+          );
+          return written;
+        };
+        restore = () => {
+          consumers.addCredential = addCredential;
+        };
+
+        const refused = await rotate(user, only.credential.id);
+        assert.equal(refused.statusCode, 409, refused.body);
+        assert.equal(errorOf(refused.body).code, 'CONFLICT');
+        assert.ok(!('secret' in JSON.parse(refused.body)), 'no dead secret was handed out');
+
+        const stored = harness.edge.consumers.get(`nexus/${consumerId}`);
+        assert.deepEqual(
+          (stored?.credentials[type] ?? []).map(material),
+          [previous],
+          'the working credential was not deleted',
+        );
+        assert.equal(await statusOf(only.credential.id), 'active');
+        const rows = await harness.store.credentials.list({ user_id: user.user.id });
+        assert.equal(rows.total, 1, 'the replacement that is gone left no row behind');
+        // The withdrawn retirement is on the record (review dsf F2 on #739).
+        const rollback = (await harness.auditRows('credential.revoke_rollback')).filter(
+          (row) => row.target_id === only.credential.id,
+        );
+        assert.equal(rollback.length, 1);
+        assert.equal(rollback[0]?.details.operation, 'rotate');
+      });
+    }
+
     it(`${gateway}: an append Edge refused after another writer filled the cap takes nothing back`, async () => {
       harness.edge.setCredentialIfMatch(mode);
       const user = await client();

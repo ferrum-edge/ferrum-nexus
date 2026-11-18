@@ -21,6 +21,7 @@
  *   itself appended during the operation (a take-back) — never another
  *   writer's key, never another of the portal's keys;
  * - Nexus never empties the `keyauth` type;
+ * - a rotation that succeeds hands back a replacement that is on the gateway;
  * - no row is `revoked` while its entry is on the gateway;
  * - once a quiet attempt has run, every row matches the gateway: live exactly
  *   when its entry is there, and every entry Nexus appended has a live row.
@@ -50,6 +51,7 @@ const CHANGES = [
   'replace-sibling',
   'replace-target',
   'remove-target',
+  'remove-replacement',
 ] as const;
 type Change = (typeof CHANGES)[number];
 
@@ -201,6 +203,17 @@ describe('credential recovery under another writer at every step', () => {
           ? keys.filter((key) => key !== scenario.target)
           : [...keys, fresh()];
         break;
+      case 'remove-replacement': {
+        // A key the portal appended during this scenario — a rotation's
+        // replacement — removed before Nexus reads the consumer again
+        // (review sol F1, dsf F1 on #739).
+        const minted = keys.find(
+          (key) =>
+            key !== scenario.target && key !== scenario.sibling && !scenario.foreign.has(key),
+        );
+        next = minted ? keys.filter((key) => key !== minted) : [...keys, fresh()];
+        break;
+      }
     }
     setKeys(scenario.consumerId, next);
     scenario.made += 1;
@@ -418,7 +431,9 @@ describe('credential recovery under another writer at every step', () => {
     const replacements: string[] = [];
     const record = (response: { statusCode: number; json: <T>() => T }): void => {
       if (operation !== 'revoke' && response.statusCode === 200) {
-        replacements.push(String(response.json<RotateCredentialResponse>().secret.key));
+        const key = String(response.json<RotateCredentialResponse>().secret.key);
+        assert.ok(keysOn(scenario.consumerId).includes(key), `${label}: a dead secret`);
+        replacements.push(key);
       }
     };
     try {

@@ -338,9 +338,13 @@ function assertRotatedByOwner(user: UserRecord, credential: CredentialRecord): v
 }
 
 /**
- * Raised when a `basicauth` rotation's read after its append is not the
- * decision read plus that one entry: something outside the portal changed the
- * consumer, so the index of the entry being retired cannot be trusted.
+ * Raised when a rotation's read after its append does not show what the
+ * append left: something outside the portal changed the consumer. For
+ * `basicauth` the read is not the decision read plus that one entry, so the
+ * index of the entry being retired cannot be trusted; for `keyauth` and `jwt`
+ * the replacement is not uniquely on the gateway, so retiring the previous
+ * entry would leave the identity holding a dead secret (review sol F1 on
+ * #739).
  */
 const CONSUMER_CHANGED_DURING_ROTATION =
   'The gateway consumer changed while this credential was being rotated, so the previous credential was not removed; select the credential again and retry';
@@ -366,18 +370,6 @@ function isAppendedOnto(before: EdgeConsumer, after: EdgeConsumer, type: Credent
     isDeepStrictEqual(afterEntries.slice(0, beforeEntries.length), beforeEntries)
   );
 }
-
-/**
- * Raised when a `basicauth` mirror and its gateway positions disagree in a way
- * that cannot be read unambiguously.
- *
- * What is left is either a consumer edited outside Nexus, or drift compounded
- * past the point where a single reading exists. The message names the fix
- * because the operator holding the 502 is the one who has to apply it; the
- * full procedure is `operations.md` §12, "The credential mirror".
- */
-const RECONCILE_MESSAGE =
-  'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
 
 /**
  * Raised when a `keyauth` or `jwt` credential cannot be identified on the
@@ -1203,28 +1195,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    *
    * Edge keeps `basicauth` only hashed and omits it from every read, so for
    * that type the mirror is the only word on where an entry sits: the index
-   * is the target's place among the pair's live rows. Every other type is
-   * located by its material instead ({@link readIdentities}), never by a
-   * position counted off the portal's rows. `edgeLength` is the count the
-   * mirror is checked against.
+   * is the target's place among the pair's live rows. No read can check that
+   * place against the gateway: an entry added there by hand moves every index
+   * after it undetected, which only clearing the type repairs (`operations.md`
+   * §12). Every other type is located by its material instead
+   * ({@link readIdentities}), never by a position counted off the portal's
+   * rows.
    */
   function resolveCredentialIndex(
     rows: CredentialRecord[],
     target: CredentialRecord,
-    edgeLength: number,
-  ): number | 'whole-type' | 'not-live' {
+  ): number | 'not-live' {
     const index = rows.findIndex((row) => row.id === target.id);
     // The target no longer occupies a slot — a concurrent rotate or revoke of
     // the same row won the queue. That is *never* permission to delete the
     // whole credential type: everything still live belongs to someone else's
     // successful operation.
     if (index === -1) return 'not-live';
-    if (rows.length !== edgeLength) {
-      // The mirror drifted (a hand-edited consumer). Removing the entire type
-      // is safe only when this is the last credential Nexus knows about.
-      if (rows.length === 1) return 'whole-type';
-      throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: edgeLength });
-    }
     // A target without an ordinal sits in the leading block of legacy rows.
     // Alone there, it is index 0 whatever else is live; with company, its
     // position within that block is unknowable and acting on `index` would be
@@ -1304,8 +1291,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       return 'whole-type';
     }
     assertPositionsConfirmed(rows, target.ferrum_consumer_id, target.credential_type);
-    // No read shows `basicauth`, so the mirror's own count is the length.
-    return resolveCredentialIndex(rows, target, rows.length);
+    return resolveCredentialIndex(rows, target);
   }
 
   /**
@@ -3068,16 +3054,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // outcome on the pair has taken away. Revoking the pair's last
           // active credential still clears it ({@link revokePosition}).
           assertPositionsConfirmed(live, consumerId, type);
-          const resolved = resolveCredentialIndex(live, current, length);
+          const resolved = resolveCredentialIndex(live, current);
           if (resolved === 'not-live') {
             throw conflict('This credential has already been revoked');
-          }
-          if (resolved === 'whole-type') {
-            // Degrading to `DELETE /credentials/{type}` is only ever right for
-            // a revoke, where removing everything is the point. In a rotation
-            // it would delete the entry appended moments earlier and hand the
-            // user a show-once secret that authenticates nothing.
-            throw edgeError(RECONCILE_MESSAGE, { expected: live.length, actual: length });
           }
           position = resolved;
         } else {
@@ -3267,6 +3246,18 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               if (!fresh) {
                 throw edgeError('The gateway consumer for this credential no longer exists');
               }
+              // The replacement must be there, exactly once, in the read the
+              // delete would be conditioned on: if another writer removed it,
+              // retiring the previous entry would leave the identity with no
+              // working credential and hand the caller a dead secret (review
+              // sol F1, dsf F1 on #739). Refused, the compensation below
+              // takes the replacement back and keeps the previous one.
+              if (locateEntry(fresh, created.credential.fingerprint).kind !== 'present') {
+                throw conflict(CONSUMER_CHANGED_DURING_ROTATION, {
+                  consumer_id: consumerId,
+                  credential_type: type,
+                });
+              }
               const located = locateEntry(fresh, current.fingerprint);
               if (located.kind === 'ambiguous') {
                 throw conflict(UNLOCATED_CREDENTIAL_MESSAGE, {
@@ -3301,18 +3292,22 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               await store.credentials.delete(created.credential.id).catch(() => undefined);
             }
             // The previous entry's row follows its material in a fresh read,
-            // and nothing else: present, the retirement is withdrawn; gone,
-            // the row is settled `revoked`; unknown, it stays `retiring` for
-            // the next read. `basicauth` stays `retiring`: no read shows it.
+            // and nothing else: present, the retirement is withdrawn and
+            // audited as `credential.revoke_rollback` (review dsf F2 on #739);
+            // gone, the row is settled `revoked`; unknown, it stays `retiring`
+            // for the next read. `basicauth` stays `retiring`: no read shows
+            // it.
             let previousEntry: 'present' | 'absent' | 'unknown' = 'unknown';
             if (type !== 'basicauth') {
               previousEntry = await probeEntry(consumerId, type, current.fingerprint, user.id);
               if (previousEntry === 'present') {
-                await store
-                  .transaction((tx) =>
-                    tx.credentials.updateIfStatus(current.id, 'retiring', { status: 'active' }),
-                  )
-                  .catch(() => null);
+                await withdrawRetirement({
+                  credential: current,
+                  operation: 'rotate',
+                  actor,
+                  cause: error,
+                  ip,
+                });
               } else if (previousEntry === 'absent') {
                 await settleAbsentRow({ credential: current, status: 'retiring', actor, ip }).catch(
                   () => false,
