@@ -14,10 +14,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Edge's Main Latest Image workflow moves only to a `main` commit whose CI passed. It verifies the
   digest's keyless Cosign signature against that workflow, reads the Edge commit from the signed
   image's revision label, and runs `./e2e/run.sh` with `FERRUM_EDGE_IMAGE` set to that digest. A
-  failure opens or updates one issue labelled `edge-main-drift`, and a clean run closes it. The
+  failing suite, or a check that could not run, opens or updates the one issue labelled
+  `edge-main-drift` whose body carries the workflow's marker; only a clean run closes it. The
   issue also names ferrum-contracts' `main_branch_delta` commit and whether it covers the checked
   commit. Only that job holds `issues: write`, with the repository's own `GITHUB_TOKEN`. A pull
   request that changes the workflow runs the suite without touching the issue.
+
+- The acceptance suite saves every palette plugin through the portal with every key it offers,
+  checks the gateway stores each key, replays the stored rows and removes them. The case fails
+  when the palette gains a plugin or key it does not set. Run against Edge `main`, it would have
+  flagged the `ip_restriction.mode` key the palette wrote before #731 (#727).
 
 - Grantees can give up access they no longer need
   (`POST /api/grants/:id/relinquish`, **Give up access** on an API's Access

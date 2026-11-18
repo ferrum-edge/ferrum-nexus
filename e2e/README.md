@@ -75,10 +75,13 @@ weekly and on `workflow_dispatch`, and it is never a required check or a qualifi
   revision label, which must be on `main`'s history.
 - It runs `./e2e/run.sh` with `FERRUM_EDGE_IMAGE` exported as that digest, the override described
   above.
-- A failure opens or updates one issue labelled `edge-main-drift`, and the next clean run closes
-  it. The issue names the Edge commit, how far `main` has moved past it, and the commit of
-  ferrum-contracts' `main_branch_delta`, with whether that record covers the checked commit. Only
-  the issue job holds `issues: write`, with the repository's own `GITHUB_TOKEN`.
+- A failing suite, or a check that could not run at all (an unresolvable or unsigned image, a failed
+  install, a run that stopped early), opens or updates one issue labelled `edge-main-drift`, and
+  only the next clean run closes it. The workflow edits or closes only an issue whose body starts
+  with its `<!-- edge-main-drift -->` marker. The issue names the Edge commit, how far `main` has
+  moved past it, and the commit of ferrum-contracts' `main_branch_delta`, with whether that record
+  covers the checked commit. Only the issue job holds `issues: write`, with the repository's own
+  `GITHUB_TOKEN`.
 
 ## What each suite asserts
 
@@ -90,6 +93,9 @@ weekly and on `workflow_dispatch`, and it is never a required check or a qualifi
   security scheme the catalog document declares (header name and `Basic`/`Bearer` prefix) is
   served too.
 - `routes` enforcement refuses an undeclared path; `docs_only` forwards it.
+- Every palette plugin saves through the portal with every key it offers, lands on the gateway,
+  replays from the stored row (switched off) and is removed. The case fails when the palette gains
+  a plugin or key the test does not set, so a key the gateway no longer accepts is written here.
 - Revocation removes access while the credential still authenticates (the gateway answers `403`,
   not `401`).
 - Rotation: the replacement works, and the retired credential stops working.
