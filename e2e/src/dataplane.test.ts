@@ -21,6 +21,8 @@ import { request as httpRequest } from 'node:http';
 import { after, before, describe, it } from 'node:test';
 import { promisify } from 'node:util';
 
+import { PROVIDER_PLUGINS } from '../../shared/src/plugins.js';
+
 import {
   authHeadersFor,
   grantAccess,
@@ -581,6 +583,134 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const undeclared = await callGateway(`${api.listen_path}/anything`, { headers });
     assert.equal(undeclared.status, 200);
     assert.ok(reachedUpstream(undeclared));
+  });
+
+  /* ── The provider plugin palette, written to a real gateway ──────────── */
+
+  /**
+   * One config per palette plugin that sets every key its descriptor offers.
+   * A key the gateway no longer accepts is then refused here, against the
+   * Edge this suite runs: the pinned release in CI, and Edge `main` in the
+   * Edge main drift workflow (ferrum-contracts#76). Before #731 the palette
+   * still wrote `ip_restriction.mode`, which Edge main refuses (#727).
+   */
+  const PALETTE_CONFIGS: Readonly<Record<string, Record<string, unknown>>> = {
+    security_headers: {
+      content_type_options: true,
+      frame_options: 'DENY',
+      referrer_policy: 'no-referrer',
+      hsts: false,
+      content_security_policy: "default-src 'none'",
+      permissions_policy: 'geolocation=()',
+    },
+    request_size_limiting: { max_bytes: 1_048_576 },
+    response_size_limiting: { max_bytes: 8_388_608 },
+    ip_restriction: { allow: ['192.0.2.0/24', '2001:db8::1'], deny: ['192.0.2.7'] },
+    bot_detection: {
+      blocked_patterns: ['e2e-scraper'],
+      allow_list: ['e2e-partner-sdk'],
+      allow_missing_user_agent: true,
+      custom_response_code: 403,
+    },
+    correlation_id: { header_name: 'x-e2e-correlation-id', echo_downstream: true },
+    compression: {
+      algorithms: ['gzip', 'br'],
+      min_content_length: 256,
+      content_types: ['application/json'],
+    },
+    request_deduplication: {
+      header_name: 'Idempotency-Key',
+      ttl_seconds: 300,
+      applicable_methods: ['POST', 'PUT'],
+      enforce_required: false,
+    },
+    request_termination: { status_code: 503, message: 'Service unavailable' },
+  };
+
+  it('saves every palette key into the gateway and replays the stored rows', async () => {
+    // The table covers the palette exactly, each config every descriptor key.
+    assert.deepEqual(
+      Object.keys(PALETTE_CONFIGS).sort(),
+      PROVIDER_PLUGINS.map((plugin) => plugin.name).sort(),
+    );
+    for (const plugin of PROVIDER_PLUGINS) {
+      assert.deepEqual(
+        Object.keys(PALETTE_CONFIGS[plugin.name] ?? {}).sort(),
+        plugin.fields.map((field) => field.key).sort(),
+        `${plugin.name}: the acceptance config must set every palette key`,
+      );
+    }
+
+    const api = await publishApi(provider, {
+      name: `E2E palette ${RUN}`,
+      slug: `e2e-palette-${RUN}`,
+      authPlugin: 'key_auth',
+    });
+    const stored = await portal<{ api: { ferrum_proxy_id: string } }>(
+      'GET',
+      `/api/apis/${api.id}`,
+      { session: provider },
+    );
+    const proxyId = stored.api.ferrum_proxy_id;
+
+    type GatewayConfig = { enabled: boolean; config: Record<string, unknown> };
+    type StoredPlugins = { plugins: { plugin_name: string; config: Record<string, unknown> }[] };
+    async function gatewayConfigs(): Promise<Map<string, GatewayConfig>> {
+      const query = `proxy_id=${encodeURIComponent(proxyId)}&limit=100`;
+      const response = await gatewayAdmin('GET', `/plugins/config?${query}`);
+      assert.equal(response.status, 200, await response.clone().text());
+      const body = (await response.json()) as {
+        data: ({ plugin_name: string } & GatewayConfig)[];
+      };
+      return new Map(body.data.map((entry) => [entry.plugin_name, entry]));
+    }
+
+    for (const [name, config] of Object.entries(PALETTE_CONFIGS)) {
+      // A save the gateway refuses comes back as a portal error, not 200.
+      await portal('PUT', `/api/apis/${api.id}/plugins/${name}`, {
+        session: provider,
+        body: { enabled: true, config },
+      });
+    }
+    let live = await gatewayConfigs();
+    for (const [name, config] of Object.entries(PALETTE_CONFIGS)) {
+      const entry = live.get(name);
+      assert.ok(entry, `${name} is not on the gateway`);
+      assert.equal(entry.enabled, true, name);
+      // Edge may normalize a value (a header name's case); the key must stay.
+      for (const key of Object.keys(config)) {
+        assert.ok(
+          Object.hasOwn(entry.config, key),
+          `${name}.${key} is missing from the gateway's config`,
+        );
+      }
+    }
+
+    // Replay the stored rows: switching each plugin off rewrites it from what
+    // Nexus stored, which is how a retained config reaches a newer gateway.
+    for (const name of Object.keys(PALETTE_CONFIGS)) {
+      const listed = await portal<StoredPlugins>('GET', `/api/apis/${api.id}/plugins`, {
+        session: provider,
+      });
+      const row = listed.plugins.find((plugin) => plugin.plugin_name === name);
+      assert.ok(row, `${name} is not stored by Nexus`);
+      await portal('PUT', `/api/apis/${api.id}/plugins/${name}`, {
+        session: provider,
+        body: { enabled: false, config: row.config },
+      });
+    }
+    live = await gatewayConfigs();
+    for (const name of Object.keys(PALETTE_CONFIGS)) {
+      assert.equal(live.get(name)?.enabled, false, `${name} was not replayed as disabled`);
+    }
+
+    for (const name of Object.keys(PALETTE_CONFIGS)) {
+      await portal('DELETE', `/api/apis/${api.id}/plugins/${name}`, { session: provider });
+    }
+    live = await gatewayConfigs();
+    for (const name of Object.keys(PALETTE_CONFIGS)) {
+      assert.equal(live.has(name), false, `${name} is still on the gateway`);
+    }
   });
 
   /* ── Agent tools, through the same consumer authorization ────────────── */
