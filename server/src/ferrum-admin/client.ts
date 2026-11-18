@@ -122,6 +122,7 @@ const CONSUMER_VERIFICATION_SUFFIX = /\/consumers\/[^/]+\/verification$/;
 const SCOPED_RESOURCE_PATH = /^\/(consumers|proxies|plugins\/config)(?:\/|$)/;
 const CONSUMERS_PATH = /^\/consumers(?:\/|$)/;
 const CONSUMER_VERIFICATION_PATH = /^\/consumers\/[^/]+\/verification$/;
+const CONSUMER_CREDENTIALS_PATH = /^\/consumers\/[^/]+\/credentials\/[^/]+(?:\/[^/]+)?$/;
 const API_SPEC_PATH = /^\/api-specs(?:\/[^/]+)?$/;
 const PAGE_CURSOR = /^[0-9]+:[0-9]+(?![\s\S])/;
 
@@ -291,6 +292,15 @@ export interface FerrumAdminClient {
      * caller that acts on the consumer being gone (issue #535).
      */
     get(id: string, options?: { confirmedAbsence?: boolean }): Promise<EdgeConsumer | null>;
+    /**
+     * {@link get} with the Consumer's strong `ETag` from the same read: the
+     * `If-Match` for a credential change decided from it. A `200` without a
+     * strong tag (Edge's cached fallback) throws rather than answering.
+     */
+    getTagged(
+      id: string,
+      options?: { confirmedAbsence?: boolean },
+    ): Promise<{ consumer: EdgeConsumer; etag: string } | null>;
     /** Credential-bearing snapshot. Keep it transient and inside the server boundary. */
     verification(
       id: string,
@@ -331,22 +341,41 @@ export interface FerrumAdminClient {
       ifMatch?: string,
     ): Promise<EdgeConsumer>;
     delete(id: string, subject?: string): Promise<void>;
-    /** Append one credential entry (rotation step 1). */
+    /**
+     * Append one credential entry (rotation step 1). With `ifMatch` (a
+     * {@link getTagged} tag), only onto the Consumer that read returned.
+     */
     addCredential(
       id: string,
       type: EdgeCredentialType,
       entry: EdgeCredentialEntry,
       subject?: string,
+      ifMatch?: string,
     ): Promise<EdgeConsumer>;
-    /** Remove one entry by 0-based index (rotation step 3); the array re-indexes. */
+    /**
+     * Remove one entry by 0-based index (rotation step 3); the array re-indexes.
+     *
+     * `ifMatch` is required: the {@link getTagged} tag of the read the index was
+     * chosen from. A Consumer changed since then is refused with nothing
+     * deleted ({@link consumerPreconditionFailed}); never resend it.
+     */
     deleteCredentialAt(
       id: string,
       type: EdgeCredentialType,
       index: number,
-      subject?: string,
+      subject: string | undefined,
+      ifMatch: string,
     ): Promise<EdgeConsumer>;
-    /** Remove a whole credential type. Idempotent for the built-in types. */
-    deleteCredentialType(id: string, type: EdgeCredentialType, subject?: string): Promise<void>;
+    /**
+     * Remove a whole credential type. Idempotent for the built-in types. With
+     * `ifMatch`, only while the Consumer is still the one that read returned.
+     */
+    deleteCredentialType(
+      id: string,
+      type: EdgeCredentialType,
+      subject?: string,
+      ifMatch?: string,
+    ): Promise<void>;
   };
 
   readonly proxies: {
@@ -609,6 +638,49 @@ function isStrongRowTag(value: unknown): value is string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The start of the `400` that Ferrum Edge releases before ferrum-edge#7393
+ * (v0.9.20, the pinned release, included) answer to `If-Match` on a consumer
+ * credential route. Their router refuses the header before dispatch, so
+ * nothing was written.
+ */
+const IF_MATCH_UNSUPPORTED = 'If-Match is only supported on';
+
+/** Edge's router refusal of `If-Match` on a route that does not evaluate it. */
+function isIfMatchUnsupportedRefusal(parsed: unknown): boolean {
+  return (
+    isRecord(parsed) &&
+    typeof parsed.error === 'string' &&
+    parsed.error.startsWith(IF_MATCH_UNSUPPORTED)
+  );
+}
+
+/** Credential writes an Edge without the credential precondition refused for their `If-Match`. */
+const IF_MATCH_UNSUPPORTED_ERRORS = new WeakSet<object>();
+
+/** A refused credential write (`/consumers/{id}/credentials/...`). */
+const CONSUMER_CHANGED_MESSAGE =
+  'The gateway consumer changed after it was read, so nothing was changed; select the credential again and retry';
+
+/** A refused write of the consumer itself (`PUT /consumers/{id}`). */
+const CONSUMER_ROW_CHANGED_MESSAGE = 'The gateway consumer changed; read it again before retrying';
+
+/**
+ * Whether a consumer write was refused because the Consumer changed after the
+ * read its `If-Match` came from: Edge's `412`, or, on an Edge that does not
+ * evaluate `If-Match` on credential routes, a re-read whose tag no longer
+ * matched. Either way nothing was written. The caller reads again and decides
+ * again; it never resends the same write.
+ */
+export function consumerPreconditionFailed(error: unknown): boolean {
+  return (
+    error instanceof NexusError &&
+    error.code === 'CONFLICT' &&
+    isRecord(error.details) &&
+    error.details.kind === 'precondition_failed'
+  );
 }
 
 function isString(value: unknown): value is string {
@@ -1588,6 +1660,21 @@ export function createFerrumAdminClient(
     } catch {
       // Only error-status classification may inspect an absent JSON body.
     }
+    if (
+      statusCode === 400 &&
+      options.ifMatch !== undefined &&
+      CONSUMER_CREDENTIALS_PATH.test(path) &&
+      isIfMatchUnsupportedRefusal(parsed)
+    ) {
+      // Not logged as a failure: the conditional write falls back to a
+      // verified re-read (see `conditionalCredentialWrite`).
+      const refusal = edgeError('The gateway does not evaluate If-Match on this route', {
+        status: statusCode,
+        kind: 'if_match_unsupported',
+      });
+      IF_MATCH_UNSUPPORTED_ERRORS.add(refusal);
+      throw refusal;
+    }
     if (statusCode >= 400 && !contract.statuses.includes(statusCode)) {
       const quiet = options.quiet === true || (options.quiet ?? []).includes(statusCode);
       throw classify(statusCode, parsed, method, path, options.deployment, quiet);
@@ -1767,7 +1854,10 @@ export function createFerrumAdminClient(
       });
     }
     if (credentialWrite && status === 412) {
-      return conflict('The gateway consumer changed; read it again before retrying', {
+      const message = CONSUMER_CREDENTIALS_PATH.test(path)
+        ? CONSUMER_CHANGED_MESSAGE
+        : CONSUMER_ROW_CHANGED_MESSAGE;
+      return conflict(message, {
         status,
         kind: 'precondition_failed',
       });
@@ -1975,6 +2065,90 @@ export function createFerrumAdminClient(
       throw edgeError('The gateway returned an empty response where one was expected');
     }
     return result;
+  }
+
+  /**
+   * `GET /consumers/{id}` with the strong row tag Edge issued for that read.
+   *
+   * Edge issues the tag only for a read from its store, never for its cached
+   * fallback, so a read without one cannot pin a credential change and is
+   * refused here, before anything is decided from it.
+   */
+  async function readTaggedConsumer(
+    id: string,
+    confirmedAbsence: boolean,
+  ): Promise<{ consumer: EdgeConsumer; etag: string } | null> {
+    let etag: string | undefined;
+    const consumer = await call<EdgeConsumer>('GET', `/consumers/${encodeURIComponent(id)}`, {
+      allow404: true,
+      ...(confirmedAbsence ? { absentError: CONSUMER_NOT_FOUND } : {}),
+      responseHeaders: (headers) => {
+        if (typeof headers.etag === 'string') etag = headers.etag;
+      },
+    });
+    if (!consumer) return null;
+    if (!isStrongRowTag(etag)) {
+      throw edgeError(
+        'The gateway issued no consumer tag for this read, so no credential change can be ' +
+          'decided from it',
+        { kind: 'consumer_tag_missing' },
+      );
+    }
+    return { consumer, etag };
+  }
+
+  /** Whether the "fell back to a re-read" warning was logged by this client. */
+  let ifMatchFallbackLogged = false;
+
+  /**
+   * A consumer credential write conditioned on the Consumer `ETag` of the read
+   * the caller decided it from (ferrum-edge#7393).
+   *
+   * Credential entries have no id, and reads redact them, so an index (or a
+   * decision to empty a type) names the right entries only in the array that
+   * read returned. Edge with ferrum-edge#7393 compares `If-Match` with the
+   * Consumer's own tag under its admission lease and answers `412` if anything
+   * about the Consumer changed; {@link classify} turns that into a
+   * `precondition_failed` `CONFLICT` ({@link consumerPreconditionFailed}).
+   * Nothing is resent: the caller reads again and decides again.
+   *
+   * Edge v0.9.20, the pinned release, refuses `If-Match` on these routes with a
+   * `400` from its router, before acting. That answer falls back to a verified
+   * re-read: the Consumer is read again, the write is refused with the same
+   * `CONFLICT` unless that read carries the caller's tag (or the Consumer is
+   * gone), and only then is the write sent without `If-Match`. That narrows
+   * the race from "since the caller's read" to the moment between the re-read
+   * and the write; only the Edge precondition closes it.
+   */
+  async function conditionalCredentialWrite<T>(
+    consumerId: string,
+    ifMatch: string,
+    send: (ifMatch: string | undefined) => Promise<T>,
+  ): Promise<T> {
+    if (!isStrongRowTag(ifMatch)) {
+      throw edgeError(
+        'A credential change needs the strong consumer tag of the read it was decided from',
+        { kind: 'consumer_tag_missing' },
+      );
+    }
+    try {
+      return await send(ifMatch);
+    } catch (error) {
+      if (!(error instanceof Error) || !IF_MATCH_UNSUPPORTED_ERRORS.has(error)) throw error;
+    }
+    if (!ifMatchFallbackLogged) {
+      ifMatchFallbackLogged = true;
+      logger.warn(
+        { path: '/consumers/{id}/credentials' },
+        'Ferrum Edge does not evaluate If-Match on consumer credential writes ' +
+          '(ferrum-edge#7393); re-reading the consumer to verify its tag instead',
+      );
+    }
+    const current = await readTaggedConsumer(consumerId, true);
+    if (current === null || current.etag !== ifMatch) {
+      throw conflict(CONSUMER_CHANGED_MESSAGE, { kind: 'precondition_failed' });
+    }
+    return send(undefined);
   }
 
   /**
@@ -2350,6 +2524,10 @@ export function createFerrumAdminClient(
         });
       },
 
+      async getTagged(id, options): Promise<{ consumer: EdgeConsumer; etag: string } | null> {
+        return readTaggedConsumer(id, options?.confirmedAbsence === true);
+      },
+
       async verification(
         id,
         subject,
@@ -2475,24 +2653,26 @@ export function createFerrumAdminClient(
         type: EdgeCredentialType,
         entry: EdgeCredentialEntry,
         subject?: string,
+        ifMatch?: string,
       ): Promise<EdgeConsumer> {
-        return callRequired<EdgeConsumer>(
-          'POST',
-          `/consumers/${encodeURIComponent(id)}/credentials/${type}`,
-          { body: entry, subject },
-        );
+        const path = `/consumers/${encodeURIComponent(id)}/credentials/${type}`;
+        const send = (tag: string | undefined): Promise<EdgeConsumer> =>
+          callRequired<EdgeConsumer>('POST', path, { body: entry, subject, ifMatch: tag });
+        return ifMatch === undefined
+          ? send(undefined)
+          : conditionalCredentialWrite(id, ifMatch, send);
       },
 
       async deleteCredentialAt(
         id: string,
         type: EdgeCredentialType,
         index: number,
-        subject?: string,
+        subject: string | undefined,
+        ifMatch: string,
       ): Promise<EdgeConsumer> {
-        return callRequired<EdgeConsumer>(
-          'DELETE',
-          `/consumers/${encodeURIComponent(id)}/credentials/${type}/${index}`,
-          { subject },
+        const path = `/consumers/${encodeURIComponent(id)}/credentials/${type}/${index}`;
+        return conditionalCredentialWrite(id, ifMatch, (tag) =>
+          callRequired<EdgeConsumer>('DELETE', path, { subject, ifMatch: tag }),
         );
       },
 
@@ -2500,10 +2680,14 @@ export function createFerrumAdminClient(
         id: string,
         type: EdgeCredentialType,
         subject?: string,
+        ifMatch?: string,
       ): Promise<void> {
-        await call('DELETE', `/consumers/${encodeURIComponent(id)}/credentials/${type}`, {
-          subject,
-        });
+        const path = `/consumers/${encodeURIComponent(id)}/credentials/${type}`;
+        const send = async (tag: string | undefined): Promise<void> => {
+          await call('DELETE', path, { subject, ifMatch: tag });
+        };
+        if (ifMatch === undefined) await send(undefined);
+        else await conditionalCredentialWrite(id, ifMatch, send);
       },
     },
 

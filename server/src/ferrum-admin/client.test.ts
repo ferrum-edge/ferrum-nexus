@@ -18,6 +18,7 @@ import {
 } from '../test/mock-ferrum-edge.js';
 import {
   CONSUMER_SCAN_LIMIT,
+  consumerPreconditionFailed,
   createFerrumAdminClient,
   createKeyedSerializer,
   type FerrumAdminClient,
@@ -42,6 +43,7 @@ const NON_EXISTENT_PLUGIN_CONFIG = /non-existent plugin_config/;
 const SCOPE_GLOBAL = /scope 'global'/;
 const TARGETED_PROXY_ASSOC = /targeted to proxy 'assoc-a'/;
 const MORE_THAN_ONCE = /more than once/;
+const SELECT_THE_CREDENTIAL = /select the credential/;
 
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
 
@@ -559,9 +561,204 @@ describe('ferrum admin client', () => {
       (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
     );
 
-    const finalized = await client.consumers.deleteCredentialAt('rot-1', 'keyauth', 0);
+    const read = await client.consumers.getTagged('rot-1');
+    assert.ok(read);
+    const finalized = await client.consumers.deleteCredentialAt(
+      'rot-1',
+      'keyauth',
+      0,
+      undefined,
+      read.etag,
+    );
     assert.equal(finalized.credentials.keyauth?.length, 1);
     assert.equal(edge.consumers.get('nexus/rot-1')?.credentials.keyauth?.[0]?.key, 'new-key');
+  });
+
+  describe('credential writes conditioned on the consumer tag (ferrum-edge#7393)', () => {
+    /** Two keys on one consumer, and the tagged read a positional change is decided from. */
+    async function twoKeys(id: string): Promise<string> {
+      await client.consumers.create({
+        id,
+        username: `nexus-user-${id}`,
+        credentials: { keyauth: [{ key: `${id}-first` }, { key: `${id}-second` }] },
+      });
+      const read = await client.consumers.getTagged(id);
+      assert.ok(read);
+      return read.etag;
+    }
+
+    /** Another writer puts a key in front, so index 1 now names the first key. */
+    function prependForeignKey(id: string): void {
+      const stored = edge.consumers.get(`nexus/${id}`);
+      assert.ok(stored);
+      stored.credentials.keyauth = [{ key: 'foreign-key' }, ...(stored.credentials.keyauth ?? [])];
+      stored.updated_at = new Date(Date.now() + 1_000).toISOString();
+    }
+
+    function keysOf(id: string): unknown[] {
+      const entries = edge.consumers.get(`nexus/${id}`)?.credentials.keyauth ?? [];
+      return entries.map((entry) => entry.key);
+    }
+
+    function deletesTo(id: string) {
+      return edge.callsTo('DELETE', `/consumers/${id}/credentials/keyauth/1`);
+    }
+
+    it('getTagged returns the read and its strong consumer tag', async () => {
+      const etag = await twoKeys('tagged');
+      const read = await client.consumers.getTagged('tagged');
+      assert.equal(read?.etag, etag);
+      assert.equal(read?.consumer.credentials.keyauth?.length, 2);
+      assert.equal(await client.consumers.getTagged('missing'), null);
+    });
+
+    for (const mode of ['evaluate', 'unsupported'] as const) {
+      const gateway = mode === 'evaluate' ? 'Edge with #7393' : 'Edge v0.9.20';
+
+      it(`${gateway}: deletes the selected entry while the consumer is unchanged`, async () => {
+        edge.setCredentialIfMatch(mode);
+        const etag = await twoKeys(`fresh-${mode}`);
+        await client.consumers.deleteCredentialAt(`fresh-${mode}`, 'keyauth', 1, undefined, etag);
+        assert.deepEqual(keysOf(`fresh-${mode}`), [`fresh-${mode}-first`]);
+
+        const sent = deletesTo(`fresh-${mode}`);
+        assert.equal(sent[0]?.ifMatch, etag, 'the read’s tag rides on the delete');
+        if (mode === 'evaluate') {
+          assert.equal(sent.length, 1);
+        } else {
+          // Refused for its header, then re-read and sent without it.
+          assert.equal(sent.length, 2);
+          assert.equal(sent[1]?.ifMatch, undefined);
+          assert.equal(edge.callsTo('GET', `/consumers/fresh-${mode}`).length, 2);
+        }
+      });
+
+      it(`${gateway}: refuses a stale index without deleting or resending`, async () => {
+        edge.setCredentialIfMatch(mode);
+        const id = `stale-${mode}`;
+        const etag = await twoKeys(id);
+        prependForeignKey(id);
+
+        await assert.rejects(
+          () => client.consumers.deleteCredentialAt(id, 'keyauth', 1, undefined, etag),
+          (error: unknown) => {
+            assert.ok(isNexusError(error));
+            assert.equal(error.code, 'CONFLICT');
+            assert.ok(consumerPreconditionFailed(error));
+            return true;
+          },
+        );
+        assert.deepEqual(
+          keysOf(id),
+          ['foreign-key', `${id}-first`, `${id}-second`],
+          'nothing was deleted, least of all the key that moved into index 1',
+        );
+        assert.equal(deletesTo(id).length, 1, 'the refused delete is never resent');
+      });
+
+      it(`${gateway}: conditions appends and whole-type deletes the same way`, async () => {
+        edge.setCredentialIfMatch(mode);
+        const id = `type-${mode}`;
+        const etag = await twoKeys(id);
+        prependForeignKey(id);
+
+        const refused = (error: unknown): boolean => consumerPreconditionFailed(error);
+        const entry = { secret: 'jwt-secret' };
+        await assert.rejects(
+          () => client.consumers.addCredential(id, 'jwt', entry, undefined, etag),
+          refused,
+        );
+        await assert.rejects(
+          () => client.consumers.deleteCredentialType(id, 'keyauth', undefined, etag),
+          refused,
+        );
+        assert.equal(keysOf(id).length, 3);
+        assert.equal(edge.consumers.get(`nexus/${id}`)?.credentials.jwt, undefined);
+
+        const fresh = await client.consumers.getTagged(id);
+        assert.ok(fresh);
+        await client.consumers.deleteCredentialType(id, 'keyauth', undefined, fresh.etag);
+        assert.deepEqual(keysOf(id), []);
+      });
+    }
+
+    it('Edge v0.9.20: refuses when the consumer is gone by the re-read', async () => {
+      edge.setCredentialIfMatch('unsupported');
+      const etag = await twoKeys('vanished');
+      edge.consumers.delete('nexus/vanished');
+      await assert.rejects(
+        () => client.consumers.deleteCredentialAt('vanished', 'keyauth', 1, undefined, etag),
+        (error: unknown) => consumerPreconditionFailed(error),
+      );
+      assert.equal(deletesTo('vanished').length, 1);
+    });
+
+    it('treats any other 400 as a refusal, not a missing capability', async () => {
+      const etag = await twoKeys('other-400');
+      edge.queueFailure(400, { error: 'Invalid credential index' }, '/credentials/', 'DELETE');
+      await assert.rejects(
+        () => client.consumers.deleteCredentialAt('other-400', 'keyauth', 1, undefined, etag),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'EDGE_ERROR');
+          assert.equal(consumerPreconditionFailed(error), false);
+          return true;
+        },
+      );
+      assert.equal(deletesTo('other-400').length, 1, 'no fallback was attempted');
+      assert.equal(keysOf('other-400').length, 2);
+    });
+
+    it('refuses a consumer read that carries no strong tag', async () => {
+      await twoKeys('cached');
+      // Edge's cached fallback after a failed store read issues no tag.
+      edge.setConsumerTagIssued(false);
+      const plain = await client.consumers.get('cached');
+      assert.equal(plain?.id, 'cached', 'a plain read still works');
+      await assert.rejects(
+        () => client.consumers.getTagged('cached'),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'EDGE_ERROR');
+          assert.deepEqual(error.details, { kind: 'consumer_tag_missing' });
+          return true;
+        },
+      );
+    });
+
+    it('names the consumer, not a credential, when a whole-consumer write is refused', async () => {
+      await twoKeys('row-412');
+      const snapshot = await client.consumers.verification('row-412');
+      assert.ok(snapshot);
+      prependForeignKey('row-412');
+      await assert.rejects(
+        client.consumers.replace(
+          'row-412',
+          { username: 'nexus-user-row-412', credentials: snapshot.consumer.credentials },
+          undefined,
+          snapshot.etag,
+        ),
+        (error: unknown) => {
+          assert.ok(consumerPreconditionFailed(error));
+          assert.ok(isNexusError(error));
+          assert.doesNotMatch(error.message, SELECT_THE_CREDENTIAL);
+          return true;
+        },
+      );
+    });
+
+    it('refuses a missing or unusable tag before sending anything', async () => {
+      await twoKeys('untagged');
+      const offset = edge.requests.length;
+      for (const tag of ['', 'W/"weak"', '*', '"a", "b"']) {
+        await assert.rejects(
+          () => client.consumers.deleteCredentialAt('untagged', 'keyauth', 1, undefined, tag),
+          (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+        );
+      }
+      assert.equal(edge.requests.length, offset, 'refused before dispatch');
+      assert.equal(keysOf('untagged').length, 2);
+    });
   });
 
   it('creates a proxy and attaches proxy-scoped plugin configs', async () => {

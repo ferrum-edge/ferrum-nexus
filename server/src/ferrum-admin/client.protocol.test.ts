@@ -624,12 +624,12 @@ describe('Edge response contracts over HTTP sockets', () => {
     }
     Object.assign(reply, { status: 204, body: '' });
     await assert.rejects(
-      () => client.consumers.deleteCredentialAt('consumer-1', 'keyauth', 0),
+      () => client.consumers.deleteCredentialAt('consumer-1', 'keyauth', 0, undefined, '"tag-1"'),
       protocolFailure,
     );
     Object.assign(reply, { status: 200, body: JSON.stringify(consumer) });
     assert.deepEqual(
-      await client.consumers.deleteCredentialAt('consumer-1', 'keyauth', 0),
+      await client.consumers.deleteCredentialAt('consumer-1', 'keyauth', 0, undefined, '"tag-1"'),
       consumer,
     );
     // Already gone is a completed delete, but only on Edge's own answer.
