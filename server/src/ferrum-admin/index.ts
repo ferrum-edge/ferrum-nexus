@@ -19,6 +19,7 @@ export {
   consumerPreconditionFailed,
   createFerrumAdminClient,
   createKeyedSerializer,
+  credentialWriteNotApplied,
   deploymentNotDispatched,
   silentEdgeLogger,
   LEASE_POLL_MS,

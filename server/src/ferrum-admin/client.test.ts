@@ -21,6 +21,7 @@ import {
   consumerPreconditionFailed,
   createFerrumAdminClient,
   createKeyedSerializer,
+  credentialWriteNotApplied,
   type FerrumAdminClient,
 } from './client.js';
 import { createAdminTokenMinter, type AdminTokenMinter } from './jwt.js';
@@ -753,11 +754,44 @@ describe('ferrum admin client', () => {
       for (const tag of ['', 'W/"weak"', '*', '"a", "b"']) {
         await assert.rejects(
           () => client.consumers.deleteCredentialAt('untagged', 'keyauth', 1, undefined, tag),
-          (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+          (error: unknown) =>
+            isNexusError(error) && error.code === 'EDGE_ERROR' && credentialWriteNotApplied(error),
         );
       }
       assert.equal(edge.requests.length, offset, 'refused before dispatch');
       assert.equal(keysOf('untagged').length, 2);
+    });
+
+    it('Edge v0.9.20: a re-read that cannot verify the tag is a definite non-write', async () => {
+      edge.setCredentialIfMatch('unsupported');
+      const etag = await twoKeys('unverified');
+      // The re-read after the router's refusal comes back without a tag, so
+      // the unconditional delete is never sent (issue #737).
+      edge.setConsumerTagIssued(false);
+      await assert.rejects(
+        () => client.consumers.deleteCredentialAt('unverified', 'keyauth', 1, undefined, etag),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(consumerPreconditionFailed(error), false);
+          assert.ok(credentialWriteNotApplied(error), 'nothing was written');
+          return true;
+        },
+      );
+      assert.equal(deletesTo('unverified').length, 1, 'only the refused conditional delete');
+      assert.equal(keysOf('unverified').length, 2);
+    });
+
+    it('keeps a write whose acknowledgement was lost an unknown outcome', async () => {
+      const etag = await twoKeys('lost-ack');
+      edge.queueLostAck(503, { error: 'timeout' }, '/credentials/', 'DELETE');
+      await assert.rejects(
+        () => client.consumers.deleteCredentialAt('lost-ack', 'keyauth', 1, undefined, etag),
+        (error: unknown) => {
+          assert.equal(credentialWriteNotApplied(error), false);
+          return true;
+        },
+      );
+      assert.deepEqual(keysOf('lost-ack'), ['lost-ack-first'], 'it applied after all');
     });
   });
 
