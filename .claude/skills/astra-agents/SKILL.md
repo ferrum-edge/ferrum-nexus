@@ -1,9 +1,9 @@
 ---
 name: astra-agents
-description: Dispatch and orchestrate GPT-6 Astra CLI subagents (low|medium|high|xhigh|max|ultra effort) for Ferrum Nexus issue, PR, review-feedback, CI-repair, and shepherding work. Use when the user asks Claude to delegate to GPT-6 Astra workers. Do not use when you are a dispatched worker or for ordinary single-agent edits.
+description: Dispatch and orchestrate GPT-6.2 Astra CLI subagents (low|medium|high|xhigh|max|ultra effort) for Ferrum Nexus issue, PR, review-feedback, CI-repair, and shepherding work. Use when the user asks Claude to delegate to GPT-6.2 Astra workers. Do not use when you are a dispatched worker or for ordinary single-agent edits.
 ---
 
-# GPT-6 Astra agents
+# GPT-6.2 Astra agents
 
 Act as the orchestrator. Read and follow the shared workflow in
 [the canonical skill](../../../.agents/skills/astra-agents/SKILL.md), interpreting its Codex
