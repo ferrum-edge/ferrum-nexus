@@ -3454,66 +3454,79 @@ its next attempt. Do not edit the table by hand.
 
 ## 12. The credential mirror
 
-Edge credential entries have **no id**, and reads redact the secret. Nexus
-identifies an entry by position: `POST` appends, and
+Edge credential entries have **no id**: `POST` appends, and
 `DELETE /consumers/{id}/credentials/{type}/{i}` removes by 0-based index. Nexus
-writes one `credential_metadata` row per append, with an **`edge_ordinal`**
-that increases per consumer and type, assigned under the same per-consumer lock
-as the Edge append. The non-revoked rows for a `(consumer, type)` pair, ordered
-by ordinal, **mirror** the Edge array; a row's position is its index.
+writes one `credential_metadata` row per append, with the fingerprint of the
+secret and an **`edge_ordinal`** that increases per consumer and type, assigned
+under the same per-consumer lock as the Edge append. The non-revoked rows for a
+`(consumer, type)` pair **mirror** the Edge array.
 
-Every destructive call checks the mirror against the live array length, read in
-the same critical section.
+Nexus does not own that array. An operator, Foundry or automation can append,
+remove or reorder entries at any time, outside the portal's lock, so a position
+counted off the portal's rows can name somebody else's key while every length
+still agrees.
 
-Each credential delete decided from a read (revoke, rotation, the take-back of
-an appended entry) also sends the consumer `ETag` of that read
-(`GET /consumers/{id}`) as `If-Match` (ferrum-edge#7393), because the lease
-keeps out only the portal's own writers: an entry another writer adds or removes
-between the read and the delete would move the index onto a different
-credential. Edge with ferrum-edge#7393 refuses a changed consumer with `412`,
-which reaches the caller as `409 CONFLICT` with nothing deleted and is never
-retried. Edge v0.9.20 (the pinned release) refuses `If-Match` on these routes
-with a `400` (`If-Match is only supported on …`) before acting; Nexus then
-re-reads the consumer and deletes without the header only if the tag is
-unchanged, and otherwise answers the same `409`. A rotation below the cap takes
-a fresh read after its own append, since Edge returns no tag with a write, and
-deletes the previous entry only when that read is the decision read plus the
-appended entry; otherwise it deletes nothing and reports the rotation as
-incomplete. The account teardown and the admin reconcile delete whole types
-whatever they hold, decide nothing from a read, and stay unconditional.
+**`keyauth` and `jwt` are located by their secret, never by a position.** Every
+delete of one (revoke, rotation, a retry, the take-back of an appended entry):
 
-### The `retiring` status: a retirement recorded before it is attempted
+1. reads the consumer **credential-complete** inside the consumer's lock
+   (`GET /consumers/{id}/verification`, which Edge audits);
+2. finds the target by the fingerprint of its secret, which must match exactly
+   one entry, with every entry's secret visible;
+3. deletes at **that read's** index, with that read's consumer `ETag` as
+   `If-Match` (ferrum-edge#7393).
+
+Several matching entries or an unreadable consumer refuse the operation with
+nothing sent (`409 CONFLICT`, "cannot be identified on the gateway by its
+value", or the read's own error). A target the read does not hold is already
+gone: a revoke completes without a delete (`credential.revoke` with
+`evidence: "entry_absent"`), and a rotation answers `409` ("no longer on the
+gateway") and marks the row revoked.
+
+Edge with ferrum-edge#7393 refuses a consumer that changed after the read with
+`412`, which reaches the caller as `409 CONFLICT` with nothing deleted and is
+never resent. Edge v0.9.20 (the pinned release) refuses `If-Match` on these
+routes with a `400` (`If-Match is only supported on …`) before acting; Nexus
+then re-reads the consumer and deletes without the header only if the tag is
+unchanged, and otherwise answers the same `409`. **Remaining window on
+v0.9.20:** a change another writer makes between that re-read and the
+unconditional delete is not detected; only Edge's own precondition closes it.
+
+`basicauth` is the exception: Edge keeps only its hash, so no read can identify
+an entry. It keeps the positional rules in
+[the `basicauth` section](#basicauth-an-unconfirmed-outcome-blocks-positions).
+The account teardown and the admin reconcile delete whole types whatever they
+hold, decide nothing from a read, and stay unconditional.
+
+### A row changes state only on evidence
 
 Before deleting an entry, Nexus moves its row to **`retiring`**, and after Edge
 confirms, to `revoked`. `retiring` still counts as a live slot. It means "the
 gateway entry behind this row may already be gone".
 
-Without it, a delete that Edge applied but never acknowledged would leave the
-mirror one row longer than the array forever, and every later rotate and revoke
-of that type would be refused as drift.
+For `keyauth` and `jwt`, a credential-complete read decides every row, and no
+array length is ever taken as proof:
 
-When the next rotate, revoke or issue on the same pair finds **the mirror
-exactly one row longer than the array and exactly one live row `retiring`**, it
-settles that row to `revoked`, writes a `credential.settle` audit row, and
-continues.
+- **Every rotate, revoke and issue** first settles each live row of the pair
+  whose secret the read does not hold — a delete Edge applied whose
+  acknowledgement was lost, or an entry another writer removed — to `revoked`,
+  with a `credential.settle` audit row (`evidence: "entry_absent"`,
+  `previous_status`) in the same transaction. A row whose entry is there, or
+  that cannot be identified, is left as it is.
+- **A delete that fails** is followed by a fresh read. A `412` (or a failure
+  before the delete was sent) proves only that Nexus's delete did not run:
+  another writer changed the consumer, perhaps by removing that very entry.
+  So: entry still there, the row goes back to `active`
+  (`credential.revoke_rollback`); entry gone, it is settled `revoked`
+  (`credential.settle`); the read fails, it stays `retiring` and the next
+  operation decides it. A retry locates the entry afresh, so a moved entry is
+  never deleted by its old position.
 
-### Two kinds of `retiring` row, and how to tell them apart
+A `retiring` `keyauth` or `jwt` row therefore needs no action: it is still
+revocable, and the next rotate, revoke or issue on the pair settles it.
 
-1. **The entry is gone; only the acknowledgement was lost.** The mirror is one
-   row longer than the array. The next operation on the pair settles it; do
-   nothing.
-2. **The delete failed and the entry is still live.** Lengths **agree**, so it
-   never settles by itself. Positions still resolve and the credential can still
-   be revoked. **Retry the revoke (or rotate).**
-
-When a delete reports failure, Nexus re-reads the array; if the length is
-unchanged it knows the delete did not apply and puts the row back to `active`.
-Shape 2 only remains when that could not be proved (the array could not be read,
-its length changed for another reason, or the restore itself failed).
-
-`basicauth` is never settled automatically: Edge omits it from reads, so its
-array length is unknown and neither shape can be told apart. See the next
-section.
+`basicauth` is never settled automatically: Edge omits it from reads. See the
+next section.
 
 ### `basicauth`: an unconfirmed outcome blocks positions
 
@@ -3617,19 +3630,27 @@ If that limit is reached:
 
 ### What a drifted consumer looks like
 
-Drift that a single pending retirement does not explain (a consumer edited
-outside Nexus, or two rows retiring at once) makes rotate and revoke return
-`502 EDGE_ERROR`:
+A `keyauth` or `jwt` consumer edited outside Nexus is not drift to Nexus: entries
+another writer added are left alone, rows whose entries were removed are settled
+on the next operation, and every delete still lands on its own entry. What
+refuses is a credential that cannot be identified by its secret — the same
+secret on two entries — with `409 CONFLICT`:
+
+> This credential cannot be identified on the gateway by its value, so nothing
+> was changed. An administrator must reconcile this consumer …
+
+with `details: { consumer_id, credential_type }`. Remove the duplicated entry on
+the gateway by hand, or [reconcile](#reconciling-one) the type.
+
+A `basicauth` mirror that disagrees with the gateway makes rotate and revoke
+return `502 EDGE_ERROR`:
 
 > The gateway credential list does not match the portal. An administrator must
 > reconcile this consumer …
 
-with `details: { expected, actual }` (live portal rows, Edge array length).
-Exception: with a single live row, a revoke deletes the whole credential type,
-which is what the revoke wanted anyway.
-
-This refusal is deliberate: acting on a stale index deletes someone else's key.
-Look for pending retirements:
+with `details: { expected, actual }`. Exception: with a single live row, a
+revoke deletes the whole credential type, which is what the revoke wanted
+anyway. Look for pending retirements:
 
 ```sql
 SELECT ferrum_consumer_id, credential_type, COUNT(*) AS retiring
@@ -3638,28 +3659,27 @@ SELECT ferrum_consumer_id, credential_type, COUNT(*) AS retiring
   GROUP BY ferrum_consumer_id, credential_type;
 ```
 
-For one such row, compare the pair's live-row count with the array in
-`GET /consumers/{id}`: one longer settles by itself (shape 1); equal means retry
-the operation (shape 2). More than one row, or none while lengths still differ,
-needs [reconciliation](#reconciling-one). A `retiring` `basicauth` row has no
-array to compare against; see
+A `retiring` `keyauth` or `jwt` row settles itself on the next operation on the
+pair. A `retiring` `basicauth` row has no array to compare against; see
 [the `basicauth` section](#basicauth-an-unconfirmed-outcome-blocks-positions).
 
 ### What an unresolved credential position looks like
 
-A row with `edge_ordinal = NULL` has an unknown position. A single such row is
-treated as index 0; two or more make rotate and revoke of those rows return
+A row with `edge_ordinal = NULL` has an unknown position. That matters only for
+`basicauth`, which is placed by position: a single such row is treated as
+index 0; two or more make rotate and revoke of those rows return
 `409 CONFLICT`:
 
 > The gateway position of this credential cannot be determined …
 
 with `details: { consumer_id, credential_type, unresolved_credentials }`. New
-credentials on the same consumer are unaffected. To find them:
+credentials on the same consumer are unaffected, and `keyauth` and `jwt` rows
+are located by their secret whatever their ordinal. To find them:
 
 ```sql
 SELECT ferrum_consumer_id, credential_type, COUNT(*) AS unresolved
   FROM credential_metadata
-  WHERE edge_ordinal IS NULL AND status <> 'revoked'
+  WHERE edge_ordinal IS NULL AND status <> 'revoked' AND credential_type = 'basicauth'
   GROUP BY ferrum_consumer_id, credential_type
   HAVING COUNT(*) > 1;
 ```
@@ -3699,17 +3719,19 @@ recovered.
 - **At the cap**, the old entry is deleted before the new one is appended. If
   the append fails, the error says the previous credential was removed and a
   new one must be issued; everything else stays revocable.
-- **Below the cap**, the new entry is appended first. If deleting the old one
-  fails, Nexus removes the new entry and returns the original error. Both
-  outcomes write `credential.append_rollback`. If the new entry cannot be
-  removed, the error message says which case applies:
+- **Below the cap**, the new entry is appended first, and the old one is then
+  located again by its secret and deleted. If that delete fails, Nexus removes
+  the new entry (found by its secret too) and returns the original error. Both
+  outcomes write `credential.append_rollback`. If the new entry is not removed,
+  the error message says which case applies:
 
   > The gateway did not acknowledge removing the previous credential and no longer
   > holds it; the replacement created in its place is live but its secret was
   > never delivered — revoke the credential named here and issue a new one
 
-  The delete applied; the `retiring` row is shape 1 and settles itself. Do
-  **not** reconcile.
+  The old entry is gone (the delete applied and its acknowledgement was lost,
+  or another writer removed it), so its row is already settled and the new
+  entry is kept as the identity's credential. Do **not** reconcile.
 
   > The previous credential could not be removed from the gateway and the
   > replacement created for it could not be taken back; the portal holds a live
