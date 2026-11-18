@@ -3642,15 +3642,14 @@ secret on two entries — with `409 CONFLICT`:
 with `details: { consumer_id, credential_type }`. Remove the duplicated entry on
 the gateway by hand, or [reconcile](#reconciling-one) the type.
 
-A `basicauth` mirror that disagrees with the gateway makes rotate and revoke
-return `502 EDGE_ERROR`:
-
-> The gateway credential list does not match the portal. An administrator must
-> reconcile this consumer …
-
-with `details: { expected, actual }`. Exception: with a single live row, a
-revoke deletes the whole credential type, which is what the revoke wanted
-anyway. Look for pending retirements:
+A `basicauth` consumer edited outside Nexus cannot be detected at all: Edge
+never shows `basicauth`, so its positions rest on the portal's rows alone, and
+a password added there by hand moves every index after it. A revoke of one of
+several `basicauth` credentials would then delete a different password. After
+anyone edits a consumer's HTTP Basic credentials outside Nexus, clear the type
+(`DELETE /api/credentials/:id?clear_type=true`, or
+[reconcile](#reconciling-one)) and issue new ones. Look for pending
+retirements:
 
 ```sql
 SELECT ferrum_consumer_id, credential_type, COUNT(*) AS retiring

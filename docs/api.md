@@ -3360,9 +3360,7 @@ longer on the gateway; a secret on more than one gateway entry; for
 `basicauth`, an unconfirmed change on the same identity; or
 `details.reason: "account_recovery_pending"` while a password reset's
 revocation is pending, see [`POST /api/credentials`](#post-apicredentials)),
-`429 RATE_LIMITED`, `502 EDGE_ERROR` (including, for `basicauth`, a gateway
-credential list that no longer matches the portal's, which is refused rather
-than guessed at).
+`429 RATE_LIMITED`, `502 EDGE_ERROR`.
 
 ### `DELETE /api/credentials/:id`
 

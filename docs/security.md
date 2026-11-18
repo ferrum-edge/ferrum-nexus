@@ -1382,10 +1382,11 @@ delete is the one window left, closed by ferrum-edge#7393.
   portal's rows alone (ordered by `edge_ordinal`, a per-consumer append counter
   assigned under the consumer lock), and an entry those rows do not account for
   would make a revoke delete a different password while the revoked one kept
-  working. If the portal and gateway disagree, the operation is refused with
-  `EDGE_ERROR` rather than guessing (a `revoke` of the only live credential
-  removes the whole type instead), and two live rows with an unknown position
-  (`edge_ordinal = NULL`) are `409 CONFLICT` until an admin reconciles. A
+  working. No read can detect such an entry, so after anyone edits a
+  consumer's HTTP Basic credentials outside Nexus the type must be cleared
+  (`clear_type=true` or an admin reconcile). Two live rows with an unknown
+  position (`edge_ordinal = NULL`) are `409 CONFLICT` until an admin
+  reconciles. A
   `basicauth` row is written (as `retiring`) before its append and activated
   only once Edge acknowledges it, and is never deleted by index to undo one.
   While any `basicauth` row of an identity is `retiring` — an append or delete

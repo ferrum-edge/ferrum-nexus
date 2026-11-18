@@ -297,8 +297,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the type; rows that predate the append ordinal are no longer ambiguous for
   these types. On a namespace too large for Edge's consumer verification
   (`507`), revoking or rotating them fails closed until an administrator
-  reconciles. `basicauth`, which Edge keeps only hashed, keeps its positional
-  rules and refusals. The client now marks failures raised before a
+  reconciles. A rotation below the cap retires the previous entry only when the
+  same read still holds its replacement exactly once; otherwise it takes the
+  replacement back and keeps the previous credential (`409`), and a withdrawn
+  retirement there is audited as `credential.revoke_rollback`. `basicauth`,
+  which Edge keeps only hashed, keeps its positional rules and refusals; the
+  documentation no longer claims a `502` for a `basicauth` mirror that
+  disagrees with the gateway, which no read can detect (clear the type after
+  editing HTTP Basic credentials outside Nexus). The client now marks failures raised before a
   conditional credential write was sent (an unusable tag, or a v0.9.20
   re-read that cannot verify it) as definite non-writes
   (`credentialWriteNotApplied`).
