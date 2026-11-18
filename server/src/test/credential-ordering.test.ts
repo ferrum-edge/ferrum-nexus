@@ -16,8 +16,10 @@
  * either of the two credentials removes exactly the targeted secret from the
  * mock gateway, for every credential type, at the cap and through a failed
  * rotation. The second half covers rows that predate the ordinal: a lone one
- * is still addressable, two sharing a type are refused until an administrator
- * reconciles the consumer, and the account recovers afterwards.
+ * is still addressable; two sharing `basicauth`, which no read shows, are
+ * refused until an administrator reconciles the consumer, and the account
+ * recovers afterwards; two sharing `keyauth` or `jwt` are told apart by their
+ * material in a credential-complete read (issue #737).
  */
 
 import assert from 'node:assert/strict';
@@ -313,7 +315,34 @@ describe('credential positions follow the append ordinal', () => {
       });
     }
 
-    for (const type of TYPES) {
+    for (const type of ['keyauth', 'jwt'] as const) {
+      it(`${type}: two legacy rows are told apart by their material`, async () => {
+        const user = await client();
+        const first = await issueShaped(user, type, { edge_ordinal: null, created_at: STAMP });
+        const second = await issueShaped(user, type, { edge_ordinal: null, created_at: STAMP });
+        assert.equal(first.credential.edge_ordinal, null);
+
+        // Nothing on the mirror says which entry is which, but the
+        // credential-complete read does, so neither is a guess. At the cap,
+        // the rotation deletes its own entry first.
+        const rotated = await rotate(user, second.credential.id);
+        assert.equal(rotated.statusCode, 200, rotated.body);
+        const body = rotated.json<RotateCredentialResponse>();
+        assert.deepEqual(liveMaterial(user.user.id, type), [
+          materialOf(first.secret),
+          materialOf(body.secret),
+        ]);
+
+        const revoked = await revoke(user, first.credential.id);
+        assert.equal(revoked.statusCode, 200, revoked.body);
+        assert.deepEqual(liveMaterial(user.user.id, type), [materialOf(body.secret)]);
+        assert.equal(await statusOf(first.credential.id), 'revoked');
+        assert.equal(await statusOf(second.credential.id), 'revoked');
+        assert.equal(await statusOf(body.credential.id), 'active');
+      });
+    }
+
+    for (const type of ['basicauth'] as const) {
       it(`${type}: two legacy rows are refused until an admin reconciles them`, async () => {
         const user = await client();
         const first = await issueShaped(user, type, { edge_ordinal: null, created_at: STAMP });

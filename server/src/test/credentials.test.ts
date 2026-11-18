@@ -16,7 +16,7 @@ import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 const HMAC_PASSWORD_HASH = /^hmac_sha256:[0-9a-f]{64}$/;
 const REVOKE_ROTATE = /revoke or rotate/;
-const RECONCILE_CONSUMER = /reconcile this consumer/;
+const NO_LONGER_ON_GATEWAY = /no longer on the gateway/;
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -314,7 +314,7 @@ describe('gateway credentials', () => {
     assert.ok(!keys.includes(second.secret.key), 'the rotated credential is gone');
   });
 
-  it('refuses to rotate when the gateway array has drifted from the portal', async () => {
+  it('refuses to rotate a credential the gateway no longer holds, and settles it', async () => {
     const drifted = await harness.registerUser({
       email: 'cred-drift@example.test',
       role: 'client',
@@ -322,9 +322,8 @@ describe('gateway credentials', () => {
     const original = await issue(drifted, 'keyauth', 'Production');
 
     // An operator emptied the type by hand: one live Nexus row, zero live
-    // entries. The index no longer resolves, and the whole-type fallback would
-    // delete the entry the rotation had just appended — handing back a
-    // show-once secret that authenticates nothing.
+    // entries. The credential-complete read proves its entry gone, so there
+    // is nothing to rotate, and nothing is appended (issue #737).
     const consumer = consumerOf(drifted.user.id);
     assert.ok(consumer);
     delete consumer.credentials.keyauth;
@@ -334,29 +333,30 @@ describe('gateway credentials', () => {
       url: `/api/credentials/${original.credential.id}/rotate`,
       payload: {},
     });
-    assert.equal(response.statusCode, 502, response.body);
-    assert.equal(errorCode(response.body), 'EDGE_ERROR');
-    assert.match(JSON.parse(response.body).error.message, RECONCILE_CONSUMER);
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(errorCode(response.body), 'CONFLICT');
+    assert.match(JSON.parse(response.body).error.message, NO_LONGER_ON_GATEWAY);
 
     // Nothing was created: no second row, no appended entry, no secret.
     assert.equal(consumerOf(drifted.user.id)?.credentials.keyauth, undefined);
     const rows = await harness.store.credentials.list({ user_id: drifted.user.id });
     assert.equal(rows.total, 1, 'the refused rotation left no extra row behind');
     assert.equal(rows.items[0]?.id, original.credential.id);
-    assert.equal(rows.items[0]?.status, 'active', 'and did not revoke the original either');
     assert.ok(!('secret' in JSON.parse(response.body)));
+    // The row follows the evidence: its entry is gone, so it is revoked, and
+    // the settlement is audited.
+    assert.equal(rows.items[0]?.status, 'revoked');
+    const settled = (await harness.auditRows('credential.settle')).find(
+      (row) => row.target_id === original.credential.id,
+    );
+    assert.equal(settled?.details.evidence, 'entry_absent');
 
-    // Revoking the same drifted credential still works: deleting the whole
-    // type is exactly what a revoke asked for.
+    // A revoke of it is the no-op it should be.
     const revoked = await harness.authed(drifted, {
       method: 'DELETE',
       url: `/api/credentials/${original.credential.id}`,
     });
     assert.equal(revoked.statusCode, 200, revoked.body);
-    assert.equal(
-      (await harness.store.credentials.findById(original.credential.id))?.status,
-      'revoked',
-    );
   });
 
   it('lets exactly one of two raced rotations of the same credential win', async () => {
