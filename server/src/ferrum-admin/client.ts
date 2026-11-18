@@ -660,8 +660,12 @@ function isIfMatchUnsupportedRefusal(parsed: unknown): boolean {
 /** Credential writes an Edge without the credential precondition refused for their `If-Match`. */
 const IF_MATCH_UNSUPPORTED_ERRORS = new WeakSet<object>();
 
+/** A refused credential write (`/consumers/{id}/credentials/...`). */
 const CONSUMER_CHANGED_MESSAGE =
   'The gateway consumer changed after it was read, so nothing was changed; select the credential again and retry';
+
+/** A refused write of the consumer itself (`PUT /consumers/{id}`). */
+const CONSUMER_ROW_CHANGED_MESSAGE = 'The gateway consumer changed; read it again before retrying';
 
 /**
  * Whether a consumer write was refused because the Consumer changed after the
@@ -1850,7 +1854,10 @@ export function createFerrumAdminClient(
       });
     }
     if (credentialWrite && status === 412) {
-      return conflict(CONSUMER_CHANGED_MESSAGE, {
+      const message = CONSUMER_CREDENTIALS_PATH.test(path)
+        ? CONSUMER_CHANGED_MESSAGE
+        : CONSUMER_ROW_CHANGED_MESSAGE;
+      return conflict(message, {
         status,
         kind: 'precondition_failed',
       });

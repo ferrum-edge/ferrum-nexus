@@ -49,6 +49,7 @@ describe('credential deletes conditioned on the consumer tag', () => {
     restore?.();
     restore = null;
     harness.edge.setCredentialIfMatch('evaluate');
+    harness.edge.setConsumerTagIssued(true);
     harness.edge.clearInjections();
   });
 
@@ -124,6 +125,10 @@ describe('credential deletes conditioned on the consumer tag', () => {
     });
   }
 
+  async function statusOf(credentialId: string): Promise<string | undefined> {
+    return (await harness.store.credentials.findById(credentialId))?.status;
+  }
+
   function credentialDeletes(consumerId: string) {
     return harness.edge.callsTo('DELETE', `/consumers/${consumerId}/credentials/keyauth`);
   }
@@ -180,4 +185,58 @@ describe('credential deletes conditioned on the consumer tag', () => {
       }
     });
   }
+
+  for (const mode of ['evaluate', 'unsupported'] as const) {
+    const gateway = mode === 'evaluate' ? 'Edge with #7393' : 'Edge v0.9.20';
+
+    it(`${gateway}: a rotation deletes nothing when its post-append read moved`, async () => {
+      harness.edge.setCredentialIfMatch(mode);
+      const user = await client();
+      const only = await issue(user);
+      const consumerId = only.credential.ferrum_consumer_id;
+
+      // Below the cap the replacement is appended first. Another writer then
+      // puts a key in front, so the index the decision read gave the
+      // previous key (0) now names the foreign one, and a fresh tag would
+      // authorize deleting it (review sol F1 on #736).
+      const consumers = harness.edgeClient.consumers;
+      const addCredential = consumers.addCredential.bind(consumers);
+      consumers.addCredential = async (...args) => {
+        consumers.addCredential = addCredential;
+        const written = await addCredential(...args);
+        prependForeignKey(consumerId);
+        return written;
+      };
+      restore = () => {
+        consumers.addCredential = addCredential;
+      };
+
+      const failed = await rotate(user, only.credential.id);
+      assert.notEqual(failed.statusCode, 200, failed.body);
+      assert.ok(!('secret' in JSON.parse(failed.body)), 'no secret was handed out');
+
+      const labels = labelled(consumerId, { foreign: FOREIGN_KEY, only });
+      assert.ok(labels.includes('foreign'), 'the foreign key survived');
+      assert.ok(labels.includes('only'), 'the previous key was not deleted');
+      assert.equal(credentialDeletes(consumerId).length, 0, 'nothing was deleted');
+      assert.notEqual(await statusOf(only.credential.id), 'revoked');
+    });
+  }
+
+  it('refuses a revoke decided from a read without a strong tag', async () => {
+    const user = await client();
+    const first = await issue(user);
+    const second = await issue(user);
+    const consumerId = first.credential.ferrum_consumer_id;
+
+    // Edge's cached fallback after a failed store read issues no tag.
+    harness.edge.setConsumerTagIssued(false);
+    const refused = await revoke(user, first.credential.id);
+    assert.equal(refused.statusCode, 502, refused.body);
+    assert.equal(errorOf(refused.body).code, 'EDGE_ERROR');
+
+    assert.equal(credentialDeletes(consumerId).length, 0, 'nothing was deleted');
+    assert.deepEqual(labelled(consumerId, { first, second }), ['first', 'second']);
+    assert.equal(await statusOf(first.credential.id), 'active');
+  });
 });

@@ -239,7 +239,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   automation) added or removed between Nexus's read and its
   `DELETE .../{type}/{index}` moved the index onto a different credential.
   Nexus now sends the consumer `ETag` of that read as `If-Match` on every
-  credential delete. A changed consumer is refused with `409 CONFLICT`
+  credential delete it decides from a read (revoke, rotation, and the
+  take-back of an appended entry). The account teardown and the admin
+  reconcile empty a credential type whatever it holds, decide nothing from a
+  read, and stay unconditional. A changed consumer is refused with `409 CONFLICT`
   (nothing is deleted, nothing is retried): select the credential again and
   repeat. Edge v0.9.20, the pinned release, refuses `If-Match` on these routes
   before acting; Nexus then re-reads the consumer and deletes without the

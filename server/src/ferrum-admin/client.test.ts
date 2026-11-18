@@ -43,6 +43,7 @@ const NON_EXISTENT_PLUGIN_CONFIG = /non-existent plugin_config/;
 const SCOPE_GLOBAL = /scope 'global'/;
 const TARGETED_PROXY_ASSOC = /targeted to proxy 'assoc-a'/;
 const MORE_THAN_ONCE = /more than once/;
+const SELECT_THE_CREDENTIAL = /select the credential/;
 
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
 
@@ -706,6 +707,44 @@ describe('ferrum admin client', () => {
       );
       assert.equal(deletesTo('other-400').length, 1, 'no fallback was attempted');
       assert.equal(keysOf('other-400').length, 2);
+    });
+
+    it('refuses a consumer read that carries no strong tag', async () => {
+      await twoKeys('cached');
+      // Edge's cached fallback after a failed store read issues no tag.
+      edge.setConsumerTagIssued(false);
+      const plain = await client.consumers.get('cached');
+      assert.equal(plain?.id, 'cached', 'a plain read still works');
+      await assert.rejects(
+        () => client.consumers.getTagged('cached'),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'EDGE_ERROR');
+          assert.deepEqual(error.details, { kind: 'consumer_tag_missing' });
+          return true;
+        },
+      );
+    });
+
+    it('names the consumer, not a credential, when a whole-consumer write is refused', async () => {
+      await twoKeys('row-412');
+      const snapshot = await client.consumers.verification('row-412');
+      assert.ok(snapshot);
+      prependForeignKey('row-412');
+      await assert.rejects(
+        client.consumers.replace(
+          'row-412',
+          { username: 'nexus-user-row-412', credentials: snapshot.consumer.credentials },
+          undefined,
+          snapshot.etag,
+        ),
+        (error: unknown) => {
+          assert.ok(consumerPreconditionFailed(error));
+          assert.ok(isNexusError(error));
+          assert.doesNotMatch(error.message, SELECT_THE_CREDENTIAL);
+          return true;
+        },
+      );
     });
 
     it('refuses a missing or unusable tag before sending anything', async () => {

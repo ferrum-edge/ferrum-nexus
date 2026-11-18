@@ -382,6 +382,12 @@ export interface MockFerrumEdge {
    */
   setCredentialIfMatch(mode: 'evaluate' | 'unsupported'): void;
   /**
+   * Whether `GET /consumers/{id}` carries the consumer's `ETag`. `false` models
+   * Edge answering from its cached snapshot after a failed store read, which
+   * issues no tag. `reset()` restores `true`.
+   */
+  setConsumerTagIssued(issued: boolean): void;
+  /**
    * The `deployment-v1-` token Edge v0.9.12 would have issued for the namespace's
    * current state (its `deployment_snapshot.v1` MAC domain). Well-formed, but
    * Edge v0.9.13 refuses it with `412`.
@@ -2015,6 +2021,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   let egressPolicyDate: string | null | undefined;
   let deploymentSnapshotTooLarge = false;
   let credentialIfMatch: 'evaluate' | 'unsupported' = 'evaluate';
+  let consumerTagIssued = true;
   /**
    * Responses whose acknowledgement is being dropped, keyed by the response
    * object the handler will eventually write to.
@@ -2507,7 +2514,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     if (credentialsSegment === undefined) {
       if (method === 'GET') {
         if (!stored) return fail(res, 404, 'Consumer not found');
-        res.setHeader('etag', tag!);
+        if (consumerTagIssued) res.setHeader('etag', tag!);
         return send(res, 200, project(stored));
       }
       if (method === 'PUT') {
@@ -4340,6 +4347,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     setCredentialIfMatch(mode): void {
       credentialIfMatch = mode;
     },
+    setConsumerTagIssued(issued): void {
+      consumerTagIssued = issued;
+    },
     previousReleaseDeploymentTag(namespace): string {
       const current = deploymentSnapshot(namespace);
       return deploymentTag('deployment_snapshot.v1', namespace, current.evidence);
@@ -4373,6 +4383,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       egressPolicyDate = undefined;
       deploymentSnapshotTooLarge = false;
       credentialIfMatch = 'evaluate';
+      consumerTagIssued = true;
       consumers.clear();
       proxies.clear();
       upstreams.clear();

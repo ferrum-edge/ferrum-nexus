@@ -196,6 +196,8 @@
  * are ordered by the consumer lease they both need, not by the row itself.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   MAX_PAGE_SIZE,
   TEST_CONSUMER_USERNAME_PREFIX,
@@ -353,6 +355,36 @@ function assertRotatedByOwner(user: UserRecord, credential: CredentialRecord): v
  * operator holding the 502 is the one who has to apply it; the full procedure
  * is `operations.md` §12, "The credential mirror".
  */
+/**
+ * Raised when a rotation's read after its append is not the decision read
+ * plus that one entry: something outside the portal changed the consumer, so
+ * the index of the entry being retired cannot be trusted.
+ */
+const CONSUMER_CHANGED_DURING_ROTATION =
+  'The gateway consumer changed while this credential was being rotated, so the previous credential was not removed; select the credential again and retry';
+
+/**
+ * Whether `after` is `before` with exactly one entry appended to `type`, and
+ * nothing else changed in the credentials either read shows.
+ *
+ * Reads redact credential material and omit `basicauth` altogether, so a
+ * change that keeps every visible field and the length passes; anything that
+ * moves an index the reads can see does not.
+ */
+function isAppendedOnto(before: EdgeConsumer, after: EdgeConsumer, type: CredentialType): boolean {
+  const beforeEntries = before.credentials[type] ?? [];
+  const afterEntries = after.credentials[type] ?? [];
+  const beforeRest = { ...before.credentials, [type]: undefined };
+  const afterRest = { ...after.credentials, [type]: undefined };
+  if (!isDeepStrictEqual(beforeRest, afterRest)) return false;
+  // Never shown by a read, so there is nothing to compare.
+  if (type === 'basicauth') return isDeepStrictEqual(beforeEntries, afterEntries);
+  return (
+    afterEntries.length === beforeEntries.length + 1 &&
+    isDeepStrictEqual(afterEntries.slice(0, beforeEntries.length), beforeEntries)
+  );
+}
+
 const RECONCILE_MESSAGE =
   'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
 
@@ -3032,11 +3064,18 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // same way.
             await store.credentials.update(current.id, { status: 'retiring' });
             // `POST` appends, so the old entry's index is unchanged by the
-            // append. The append changed the consumer's tag, and Edge returns
-            // none with a write, so the delete is conditioned on a fresh read.
+            // append — provided nothing else changed the consumer. The append
+            // changed its tag, and Edge returns none with a write, so the
+            // delete is conditioned on a fresh read, and only when that read
+            // is exactly the decision read plus the appended entry (review
+            // sol F1 on #736). Otherwise the index may name another entry:
+            // nothing is deleted, and the failure takes the path below.
             const appended = await edge.consumers.getTagged(consumerId);
-            if (!appended) {
-              throw edgeError('The gateway consumer for this credential no longer exists');
+            if (!appended || !isAppendedOnto(consumer, appended.consumer, type)) {
+              throw conflict(CONSUMER_CHANGED_DURING_ROTATION, {
+                consumer_id: consumerId,
+                credential_type: type,
+              });
             }
             await removeAt(consumerId, type, position, user.id, appended.etag);
           } catch (error) {
