@@ -3465,6 +3465,18 @@ by ordinal, **mirror** the Edge array; a row's position is its index.
 Every destructive call checks the mirror against the live array length, read in
 the same critical section.
 
+Each credential delete also sends the consumer `ETag` of that read
+(`GET /consumers/{id}`) as `If-Match` (ferrum-edge#7393), because the lease
+keeps out only the portal's own writers: an entry another writer adds or removes
+between the read and the delete would move the index onto a different
+credential. Edge with ferrum-edge#7393 refuses a changed consumer with `412`,
+which reaches the caller as `409 CONFLICT` with nothing deleted and is never
+retried. Edge v0.9.20 (the pinned release) refuses `If-Match` on these routes
+with a `400` (`If-Match is only supported on …`) before acting; Nexus then
+re-reads the consumer and deletes without the header only if the tag is
+unchanged, and otherwise answers the same `409`. A rotation below the cap takes
+a fresh read after its own append, since Edge returns no tag with a write.
+
 ### The `retiring` status: a retirement recorded before it is attempted
 
 Before deleting an entry, Nexus moves its row to **`retiring`**, and after Edge

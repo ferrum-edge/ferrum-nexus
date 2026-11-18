@@ -366,6 +366,22 @@ export interface MockFerrumEdge {
    */
   setDeploymentSnapshotTooLarge(tooLarge: boolean): void;
   /**
+   * How the consumer credential routes (`POST`/`DELETE
+   * /consumers/{id}/credentials/{type}` and `DELETE .../{type}/{index}`) treat
+   * `If-Match`:
+   *
+   * - `'evaluate'` (the default) models ferrum-edge#7393: the tag is compared
+   *   with the Consumer's own `ETag`, and a stale one is refused with `412`
+   *   and nothing written;
+   * - `'unsupported'` models Edge v0.9.20, the pinned release: the router
+   *   refuses the header with `400` before reading the consumer or writing
+   *   anything.
+   *
+   * Omitting the header keeps either write unconditional. `reset()` restores
+   * `'evaluate'`.
+   */
+  setCredentialIfMatch(mode: 'evaluate' | 'unsupported'): void;
+  /**
    * The `deployment-v1-` token Edge v0.9.12 would have issued for the namespace's
    * current state (its `deployment_snapshot.v1` MAC domain). Well-formed, but
    * Edge v0.9.13 refuses it with `412`.
@@ -550,6 +566,11 @@ export interface MockFerrumEdge {
 }
 
 const DEFAULT_NAMESPACE = 'ferrum';
+
+/** Edge v0.9.20's `IF_MATCH_UNSUPPORTED_MESSAGE`, verbatim. */
+const EDGE_0_9_20_IF_MATCH_UNSUPPORTED =
+  'If-Match is only supported on PUT and DELETE of /proxies/{id}, /upstreams/{id}, ' +
+  '/consumers/{id}, /plugins/config/{id}, and POST /restore';
 
 /**
  * Edge v0.9.17's `ns_claim_global_route_is_allowed`: the global routes a token
@@ -1993,6 +2014,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   let egressPolicy: Record<string, unknown> | null | undefined;
   let egressPolicyDate: string | null | undefined;
   let deploymentSnapshotTooLarge = false;
+  let credentialIfMatch: 'evaluate' | 'unsupported' = 'evaluate';
   /**
    * Responses whose acknowledgement is being dropped, keyed by the response
    * object the handler will eventually write to.
@@ -2461,6 +2483,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return fail(res, 405, 'Method not allowed');
     }
 
+    // Edge v0.9.20's router refuses `If-Match` on every mutating route that
+    // does not evaluate it, before dispatch: nothing is read or written.
+    if (
+      credentialIfMatch === 'unsupported' &&
+      credentialsSegment === 'credentials' &&
+      method !== 'GET' &&
+      ifMatch !== undefined
+    ) {
+      return fail(res, 400, EDGE_0_9_20_IF_MATCH_UNSUPPORTED);
+    }
+
     const stored = consumers.get(key(namespace, id));
 
     const tag = stored ? consumerTag(stored) : undefined;
@@ -2530,6 +2563,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       )
     ) {
       return fail(res, 400, `Unknown credential type '${credentialType}'`);
+    }
+    // ferrum-edge#7393: the credential routes compare `If-Match` with the
+    // Consumer's own tag, read under the admission lease the write commits
+    // under, and refuse a stale one with nothing written.
+    if (ifMatch !== undefined && ifMatch !== '*' && ifMatch !== tag) {
+      return fail(
+        res,
+        412,
+        `Consumer '${id}' has changed since the supplied If-Match entity-tag was issued; re-read it and reapply your changes`,
+      );
     }
 
     if (indexSegment !== undefined) {
@@ -4294,6 +4337,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     setDeploymentSnapshotTooLarge(tooLarge): void {
       deploymentSnapshotTooLarge = tooLarge;
     },
+    setCredentialIfMatch(mode): void {
+      credentialIfMatch = mode;
+    },
     previousReleaseDeploymentTag(namespace): string {
       const current = deploymentSnapshot(namespace);
       return deploymentTag('deployment_snapshot.v1', namespace, current.evidence);
@@ -4326,6 +4372,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       egressPolicy = undefined;
       egressPolicyDate = undefined;
       deploymentSnapshotTooLarge = false;
+      credentialIfMatch = 'evaluate';
       consumers.clear();
       proxies.clear();
       upstreams.clear();

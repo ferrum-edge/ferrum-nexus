@@ -233,6 +233,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Credential deletes are conditioned on the read they were decided from**
+  (ferrum-edge#7393). Edge addresses credential entries only by index, and
+  reads redact them, so an entry another writer (an operator, Foundry,
+  automation) added or removed between Nexus's read and its
+  `DELETE .../{type}/{index}` moved the index onto a different credential.
+  Nexus now sends the consumer `ETag` of that read as `If-Match` on every
+  credential delete. A changed consumer is refused with `409 CONFLICT`
+  (nothing is deleted, nothing is retried): select the credential again and
+  repeat. Edge v0.9.20, the pinned release, refuses `If-Match` on these routes
+  before acting; Nexus then re-reads the consumer and deletes without the
+  header only if the tag is unchanged, so on it the remaining window is the
+  moment between that re-read and the delete. A consumer read without a strong
+  `ETag` (Edge's cached fallback) now refuses the revoke or rotation.
+
 - **Nexus honours Edge's 500-ACL-group cap per consumer** (#729). Every grant
   puts its REST group, and on an agent API the MCP-all group or one group per
   approved tool, on the identity's one consumer, and Edge refuses a consumer with

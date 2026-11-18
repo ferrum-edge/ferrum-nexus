@@ -1337,15 +1337,17 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     if (input.type === 'basicauth') {
       return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
     }
-    const live = await edge.consumers
-      .get(input.consumerId, CONFIRMED_ABSENCE)
+    // Tagged: the delete below is conditioned on exactly this read
+    // (ferrum-edge#7393).
+    const read = await edge.consumers
+      .getTagged(input.consumerId, CONFIRMED_ABSENCE)
       .catch(() => undefined);
     // A consumer that no longer exists took its credentials with it; one that
     // cannot be read is a question mark, and a question mark is not grounds
     // for a positional delete.
-    if (live === null) return { withdrawn: true, arrayAsAppended: false, arrayLength: 0 };
-    if (live === undefined) return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
-    const entries = live.credentials[input.type];
+    if (read === null) return { withdrawn: true, arrayAsAppended: false, arrayLength: 0 };
+    if (read === undefined) return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
+    const entries = read.consumer.credentials[input.type];
     const arrayLength = Array.isArray(entries) ? entries.length : 0;
     const entry = Array.isArray(entries) ? entries[input.appendIndex] : undefined;
     if (arrayLength !== input.appendIndex + 1 || entry === undefined) {
@@ -1361,12 +1363,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         input.type,
         input.appendIndex,
         input.actorId,
+        read.etag,
       );
       return { withdrawn: true, arrayAsAppended: true, arrayLength };
     } catch {
-      // DELETE has no concurrency token and its acknowledgement can be lost
-      // after Edge applies it. Re-read while the consumer lease is still held
-      // before deciding which metadata rows survive the rollback.
+      // A DELETE's acknowledgement can be lost after Edge applies it.
+      // Re-read while the consumer lease is still held before deciding which
+      // metadata rows survive the rollback.
       const after = await edge.consumers
         .get(input.consumerId, CONFIRMED_ABSENCE)
         .catch(() => undefined);
@@ -1693,7 +1696,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       const current = await store.credentials.findById(target.id);
       if (!current || !LIVE_STATUSES.has(current.status)) return false;
 
-      const consumer = await edge.consumers.get(consumerId, CONFIRMED_ABSENCE);
+      // Tagged: the delete below is conditioned on exactly this read
+      // (ferrum-edge#7393).
+      const read = await edge.consumers.getTagged(consumerId, CONFIRMED_ABSENCE);
       const live = await liveRows(consumerId, type);
       // A whole-type clear affects every row on this consumer. Check ownership
       // only after taking the same key as the delete, so a concurrent issue
@@ -1711,8 +1716,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       let placementFallback = false;
       // A consumer deleted out from under us means the entry is already gone;
       // the row still has to be marked so the UI stops offering it.
-      if (consumer) {
-        const length = edgeArrayLength(consumer.credentials, type, live.length);
+      if (read) {
+        const length = edgeArrayLength(read.consumer.credentials, type, live.length);
         // Settle a retirement Edge applied but never acknowledged before
         // resolving anything: the drift it leaves used to refuse this very
         // call, which is the one an incident response cannot do without.
@@ -1777,7 +1782,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
               );
           });
           try {
-            await removeAt(consumerId, type, position, actor.id);
+            await removeAt(consumerId, type, position, actor.id, read.etag);
           } catch (error) {
             // A delete the array proves never happened is not a lost
             // acknowledgement. Leaving the row `retiring` over an entry that
@@ -2858,8 +2863,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           }
         }
 
-        const consumer = await edge.consumers.get(consumerId);
-        if (!consumer) throw edgeError('The gateway consumer for this credential no longer exists');
+        // Tagged: the delete below is conditioned on exactly this read
+        // (ferrum-edge#7393).
+        const read = await edge.consumers.getTagged(consumerId);
+        if (!read) throw edgeError('The gateway consumer for this credential no longer exists');
+        const consumer = read.consumer;
         const live = await liveRows(consumerId, type);
         const length = edgeArrayLength(consumer.credentials, type, live.length);
         // A retirement whose delete Edge applied but never acknowledged is
@@ -2928,7 +2936,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             );
           });
           try {
-            await removeAt(consumerId, type, position, user.id);
+            await removeAt(consumerId, type, position, user.id, read.etag);
           } catch (error) {
             // A delete that provably never touched the array is not a lost
             // acknowledgement, and the row must not be left claiming it might
@@ -3023,8 +3031,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // state, reached by a different fault — and it is compensated the
             // same way.
             await store.credentials.update(current.id, { status: 'retiring' });
-            // `POST` appends, so the old entry's index is unchanged by the append.
-            await removeAt(consumerId, type, position, user.id);
+            // `POST` appends, so the old entry's index is unchanged by the
+            // append. The append changed the consumer's tag, and Edge returns
+            // none with a write, so the delete is conditioned on a fresh read.
+            const appended = await edge.consumers.getTagged(consumerId);
+            if (!appended) {
+              throw edgeError('The gateway consumer for this credential no longer exists');
+            }
+            await removeAt(consumerId, type, position, user.id, appended.etag);
           } catch (error) {
             // A rotation either hands the caller a new secret or leaves the
             // account as it found it. The replacement's plaintext is already
@@ -3731,17 +3745,24 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     });
   }
 
-  /** Delete one entry by index, or the whole type when the index is unusable. */
+  /**
+   * Delete one entry by index, or the whole type when the index is unusable.
+   *
+   * `ifMatch` is the consumer tag of the read `position` was decided from
+   * (ferrum-edge#7393): a consumer another writer changed since is refused
+   * with `409 CONFLICT` and nothing deleted, and it is never retried here.
+   */
   async function removeAt(
     consumerId: string,
     type: CredentialType,
     position: number | 'whole-type',
     subject: string,
+    ifMatch: string,
   ): Promise<void> {
     if (position === 'whole-type') {
-      await edge.consumers.deleteCredentialType(consumerId, type, subject);
+      await edge.consumers.deleteCredentialType(consumerId, type, subject, ifMatch);
       return;
     }
-    await edge.consumers.deleteCredentialAt(consumerId, type, position, subject);
+    await edge.consumers.deleteCredentialAt(consumerId, type, position, subject, ifMatch);
   }
 }
