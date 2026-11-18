@@ -267,6 +267,48 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   moment between that re-read and the delete. A consumer read without a strong
   `ETag` (Edge's cached fallback) now refuses the revoke or rotation.
 
+- **`keyauth` and `jwt` credentials are deleted by identity, never by a stored
+  index, and their rows change only on evidence** (#737). Conditioning a delete
+  on the consumer `ETag` (above) does not help when the index itself came from
+  a stale belief: after another writer replaced a sibling (`[A, B]` →
+  `[B, X]`), a refused revoke left a row that a retry resolved by position onto
+  B, or onto X while B kept working, and a take-back after a refused append
+  could delete another writer's entry at the append index. Every revoke,
+  rotation, retry and take-back of a `keyauth` or `jwt` credential now reads
+  the consumer credential-complete (`GET /consumers/{id}/verification`, which
+  Edge audits) inside the consumer lease, locates the target by the
+  fingerprint of its secret, and deletes at that read's index with that read's
+  `ETag` as `If-Match`. A secret on more than one entry, or a consumer that
+  cannot be read, is refused with nothing sent (`409 CONFLICT`). A row changes
+  state only on that evidence, never on an array length: every rotate, revoke
+  and issue settles the pair's live rows whose secret the read does not hold
+  (`credential.settle` now records `evidence: "entry_absent"` and
+  `previous_status` instead of `mirror_rows` and `gateway_entries`), and after
+  a failed delete a fresh read puts the row back to `active` (entry present),
+  settles it (entry gone) or leaves it `retiring` (unreadable). A refused
+  precondition is treated as proof only that Nexus's delete did not run. A
+  revoke whose entry is already gone completes without a delete
+  (`evidence: "entry_absent"`); a rotation of one answers `409` and marks it
+  revoked. An appended entry is taken back only after an unknown outcome, never
+  after Edge definitely refused the append, and is found by its secret; when
+  the entry a rotation was retiring is already gone, the replacement is kept.
+  Behaviour changes: a `keyauth` or `jwt` consumer edited by hand no longer
+  refuses rotate and revoke as drift, and a single live row no longer empties
+  the type; rows that predate the append ordinal are no longer ambiguous for
+  these types. On a namespace too large for Edge's consumer verification
+  (`507`), revoking or rotating them fails closed until an administrator
+  reconciles. A rotation below the cap retires the previous entry only when the
+  same read still holds its replacement exactly once; otherwise it takes the
+  replacement back and keeps the previous credential (`409`), and a withdrawn
+  retirement there is audited as `credential.revoke_rollback`. `basicauth`,
+  which Edge keeps only hashed, keeps its positional rules and refusals; the
+  documentation no longer claims a `502` for a `basicauth` mirror that
+  disagrees with the gateway, which no read can detect (clear the type after
+  editing HTTP Basic credentials outside Nexus). The client now marks failures raised before a
+  conditional credential write was sent (an unusable tag, or a v0.9.20
+  re-read that cannot verify it) as definite non-writes
+  (`credentialWriteNotApplied`).
+
 - **Nexus honours Edge's 500-ACL-group cap per consumer** (#729). Every grant
   puts its REST group, and on an agent API the MCP-all group or one group per
   approved tool, on the identity's one consumer, and Edge refuses a consumer with

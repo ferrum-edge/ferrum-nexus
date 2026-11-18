@@ -25,6 +25,7 @@ import {
   ACCOUNT_RECOVERY_BLOCKING_ATTEMPTS,
   runAccountRecovery,
 } from '../credentials/account-recovery.js';
+import { sha256Hex } from '../lib/crypto.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
 import {
   buildTestApp,
@@ -390,18 +391,20 @@ describe('password reset', () => {
       payload: { credential_type: 'keyauth' },
     });
     assert.equal(issued.statusCode, 201, issued.body);
-    const own = issued.json<IssueCredentialResponse>().credential;
+    const ownIssue = issued.json<IssueCredentialResponse>();
+    const own = ownIssue.credential;
     // A live key on this consumer the portal attributes to somebody else, and
-    // an entry added by hand, so no positional delete can be placed. Emptying
-    // the type would take the other account's key with it.
+    // a copy of the account's own key added by hand, so the key cannot be
+    // identified by its material and no single delete can be placed (issue
+    // #737). Emptying the type would take the other account's key with it.
     const foreign = await harness.store.credentials.create({
       user_id: other.user.id,
       application_id: null,
       ferrum_consumer_id: own.ferrum_consumer_id,
       credential_type: 'keyauth',
       ferrum_credential_id: `${own.ferrum_consumer_id}/credentials/keyauth`,
-      fingerprint: 'test-foreign-active-recovery-row',
-      last4: 'frgn',
+      fingerprint: sha256Hex('foreign-key'),
+      last4: '-key',
       label: null,
       status: 'active',
       rotated_from_id: null,
@@ -411,7 +414,7 @@ describe('password reset', () => {
     consumer.credentials.keyauth = [
       ...(consumer.credentials.keyauth ?? []),
       { key: 'foreign-key' },
-      { key: 'hand-added' },
+      { key: String(ownIssue.secret.key) },
     ];
 
     await trustedReset(account.user.id);
@@ -483,11 +486,14 @@ describe('password reset', () => {
       assert.equal(issued.statusCode, 201, issued.body);
       ids.push(issued.json<IssueCredentialResponse>().credential.id);
     }
-    // An entry added to the consumer by hand: the portal's rows no longer say
-    // where either key sits, so no positional delete can be placed.
+    // A copy of one of the account's keys added to the consumer by hand: that
+    // key can no longer be identified by its material, so no single delete
+    // can be placed for it (issue #737).
     const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(account.user.id));
     assert.ok(consumer);
-    consumer.credentials.keyauth = [...(consumer.credentials.keyauth ?? []), { key: 'hand-added' }];
+    const firstKey = consumer.credentials.keyauth?.[0];
+    assert.ok(firstKey);
+    consumer.credentials.keyauth = [...(consumer.credentials.keyauth ?? []), { ...firstKey }];
 
     await trustedReset(account.user.id);
 

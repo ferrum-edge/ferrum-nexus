@@ -1396,10 +1396,12 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
   ): Promise<{ attempts: number; committed: WithdrawalCommit[] }> {
     harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
     const consumers = harness.edgeClient.consumers;
-    const get = consumers.get.bind(consumers);
+    // The credential-complete read after the failed delete is the one that
+    // proves the entry still there (issue #737).
+    const verification = consumers.verification.bind(consumers);
     let stalled = false;
-    consumers.get = async (id) => {
-      const live = await get(id);
+    consumers.verification = async (id, subject) => {
+      const live = await verification(id, subject);
       if (!stalled && harness.edge.callsTo('DELETE', '/credentials/keyauth/').length > 0) {
         stalled = true;
         await takeOver(consumerId);
@@ -1408,7 +1410,7 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
       return live;
     };
     restorePatches.push(() => {
-      consumers.get = get;
+      consumers.verification = verification;
     });
     const { attempts, committed } = watchWithdrawals(credentialId);
 

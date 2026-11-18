@@ -1032,46 +1032,47 @@ Two Edge schema facts a portal could get wrong:
 
 ### 6.1 Locating an entry to delete
 
-Edge gives credential entries **no id**, and reads redact the material, so
-nothing on the wire identifies a specific entry. What is stable is _order_:
-`POST` appends, and `DELETE /{type}/{index}` removes by 0-based index (the
-array re-indexes).
+Edge gives credential entries **no id**: `POST` appends, and
+`DELETE /{type}/{index}` removes by 0-based index (the array re-indexes). Nexus
+does not own the array: an operator, Foundry or automation can append, remove
+or reorder entries at any time, outside the portal's consumer lock. A position
+counted off the portal's rows, or remembered from an earlier read, can then
+name somebody else's key while every length check still agrees.
 
-Nexus writes one `credential_metadata` row per append. Each carries
+So a `keyauth` or `jwt` entry is located by its **secret**. Each delete
+(revoke, rotation, retry, take-back) reads the consumer credential-complete
+(`GET /consumers/{id}/verification`) inside the consumer's lock, finds the one
+entry whose secret has the row's SHA-256 fingerprint, and deletes at that
+read's index with that read's consumer `ETag` as `If-Match`. A secret on more
+than one entry, hidden material or an unreadable consumer refuses with nothing
+sent; a target the read does not hold is already gone.
+
+Rows change state only on that evidence. Every destructive call marks its row
+`retiring` **before** the gateway `DELETE` and `revoked` after, so a delete
+whose acknowledgement was lost leaves an intent record. Each rotate, revoke or
+issue then settles every live row whose secret the read does not hold
+(`credential.settle`, `evidence: "entry_absent"`). A failed delete is decided by
+a fresh read: entry present, the row goes back to `active`; absent, it is
+settled; unreadable, it stays `retiring`. No array length is taken as proof.
+
+`basicauth` never appears in a read, and Edge keeps only its hash, so no read
+can identify one of its entries. For that type the mirror is the only record of
+positions: one `credential_metadata` row per append, each carrying
 **`edge_ordinal`**, a strictly increasing counter per `(consumer, type)`
-assigned as `MAX + 1` in the insert statement, inside the same per-consumer
-lock as the Edge append. So ordinal order _is_ append order, and the
-non-revoked rows for a pair, ordered by ordinal, mirror the Edge array. A row's
-position in that list is its index.
+assigned as `MAX + 1` inside the same per-consumer lock as the Edge append, so
+the non-revoked rows ordered by ordinal mirror the array and a row's rank is its
+index. A row with `edge_ordinal = NULL` sorts first; two or more such rows make
+the target **ambiguous**, refused with `409 CONFLICT` until an admin runs
+`POST /api/admin/credentials/reconcile` (§6.3).
 
-A row with an unknown gateway position has `edge_ordinal = NULL`. Such rows sort
-before every row with an ordinal, but not among themselves. A lone such row is
-still index 0; two or more make the target **ambiguous**, refused with
-`409 CONFLICT` until an admin runs `POST /api/admin/credentials/reconcile`
-(§6.3).
-
-`resolveCredentialIndex` computes the position and checks it against the live
-array length read inside the same lock. On a mismatch (someone hand-edited the
-consumer), a revoke with only one live row deletes the whole credential type;
-anything else is **refused** rather than risk deleting someone else's key.
-
-One mismatch is Nexus's own and is settled instead. Every destructive call
-marks its row `retiring` **before** the gateway `DELETE` and `revoked` after, so
-a delete whose acknowledgement was lost leaves an intent record. When the
-mirror is exactly one row longer than the array and exactly one live row is
-`retiring`, the next rotate, revoke or issue settles it (`credential.settle`).
-Every other shape is refused.
-
-`basicauth` never appears in a read, so the length check cannot apply and the
-mirror is the only record of its positions. It is kept provable instead: a
-`basicauth` row is written as `retiring` before its append and activated only
-once Edge acknowledges it, so no entry reaches the gateway without a row. A
-`retiring` `basicauth` row means an outcome the gateway never confirmed, and
-while one exists, issuing, rotating and revoking any other `basicauth`
-credential of that consumer is refused with `409 CONFLICT`. A revoke with no
-other `active` row of the type deletes the whole type instead of an index, and
-settles the `retiring` rows with it; an explicit `clear_type=true` revoke does
-the same while active rows remain. See
+That mirror is kept provable instead: a `basicauth` row is written as
+`retiring` before its append and activated only once Edge acknowledges it, so
+no entry reaches the gateway without a row. A `retiring` `basicauth` row means
+an outcome the gateway never confirmed, and while one exists, issuing, rotating
+and revoking any other `basicauth` credential of that consumer is refused with
+`409 CONFLICT`. A revoke with no other `active` row of the type deletes the
+whole type instead of an index, and settles the `retiring` rows with it; an
+explicit `clear_type=true` revoke does the same while active rows remain. See
 [`security.md` §5](security.md#5-show-once-credentials) and
 [`operations.md` §12](operations.md#12-the-credential-mirror).
 
@@ -1084,22 +1085,22 @@ POST /api/credentials/:id/rotate
   │
   └─ serializePerKey(consumer):
        re-read the row; owner checked again
-       GET /consumers/{id}                      fresh view, same lock
-       rows      = live credential_metadata rows for (consumer, type), by edge_ordinal
-       position  = index of the target
+       GET /consumers/{id}/verification         credential-complete, same lock
+       settle rows whose secret the read lacks
+       position  = index of the target's secret in that read
        appendFirst = (edge array length < FERRUM_MAX_CREDENTIALS_PER_TYPE)
 
        if appendFirst:                          the normal path
          POST   /consumers/{id}/credentials/{type}   -> new secret, returned once
          old row -> 'retiring'
-         DELETE /consumers/{id}/credentials/{type}/{position}
-              (the append does not move the old entry's index)
-              on failure: withdraw the append, restore the old row if the
-              array proves the delete never applied, report the error
+         GET /consumers/{id}/verification       locate the old secret again
+         DELETE /consumers/{id}/credentials/{type}/{its index}  If-Match: that read
+              on failure: take the new entry back by its secret, decide the
+              old row from a fresh read, report the error
        else:                                    already at the cap
          old row -> 'retiring'
-         DELETE /consumers/{id}/credentials/{type}/{position}
-              on failure: restore the old row if the delete never applied
+         DELETE /consumers/{id}/credentials/{type}/{position}  If-Match: the read
+              on failure: decide the old row from a fresh read
          old row -> 'revoked'
          POST   /consumers/{id}/credentials/{type}   -> new secret, returned once
 
@@ -1126,7 +1127,8 @@ anything else is `403 FORBIDDEN` before Edge is touched. It writes a
 `credential.reconcile` audit row and notifies each affected owner.
 
 This is the only repair that needs no per-entry identity, so it is the answer to
-both a drifted array and ambiguous rows. Owners then issue fresh credentials,
+a drifted or ambiguous `basicauth` mirror, and to a `keyauth` or `jwt` secret
+that appears on more than one entry. Owners then issue fresh credentials,
 which carry ordinals. Operational detail:
 [`operations.md` §12](operations.md#12-the-credential-mirror).
 

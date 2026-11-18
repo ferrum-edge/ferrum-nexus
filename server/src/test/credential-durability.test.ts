@@ -24,12 +24,10 @@
  *   now comes from the gateway, and the delete is only issued against an array
  *   that still looks the way the append left it.
  *
- * The negatives matter as much as the repairs: genuine out-of-band drift must
- * still refuse, because acting on a stale index is how somebody else's live
- * key dies. And a `retiring` row is only ever allowed to outlive its call when
- * the entry behind it *might* be gone: where the array proves the delete never
- * applied, the intent is withdrawn, because a `retiring` row over a live entry
- * is what would make a later settlement pick the wrong row.
+ * Every repair here is decided by a credential-complete read that finds each
+ * entry by its material (issue #737), never by an array length or a position:
+ * an entry another writer removed settles its row, one that is still there
+ * keeps it, and a delete only ever lands on the entry it was meant for.
  */
 
 import assert from 'node:assert/strict';
@@ -44,7 +42,6 @@ import {
 
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
-const RECONCILE_CONSUMER = /reconcile this consumer/;
 const RECONCILE_STEER = /reconcile/;
 const NO_LONGER_HOLDS = /no longer holds it/;
 const COULD_NOT_TAKEN_BACK = /could not be taken back/;
@@ -181,9 +178,11 @@ describe('credential durability across a lost gateway write', () => {
     const lost = await revoke(user, first.credential.id);
     assert.equal(lost.statusCode, 502, lost.body);
 
-    // The drift the report is about: two live rows against one Edge entry.
+    // The drift the report is about would be two live rows against one Edge
+    // entry. A credential-complete read proves the entry gone, so the row is
+    // settled at once rather than left for the next call.
     assert.deepEqual(liveKeys(user.user.id), [String(second.secret.key)]);
-    assert.equal(await statusOf(first.credential.id), 'retiring', 'the intent is durable');
+    assert.equal(await statusOf(first.credential.id), 'revoked', 'settled on evidence');
 
     // The invariant: the survivor is still revocable. It used to be 502.
     const survivor = await revoke(user, second.credential.id);
@@ -195,8 +194,8 @@ describe('credential durability across a lost gateway write', () => {
     const settled = await rowsFor('credential.settle', consumerId);
     assert.equal(settled.length, 1, 'the settlement is audited');
     assert.equal(settled[0]?.target_id, first.credential.id);
-    assert.equal(settled[0]?.details.gateway_entries, 1);
-    assert.equal(settled[0]?.details.mirror_rows, 2);
+    assert.equal(settled[0]?.details.evidence, 'entry_absent');
+    assert.equal(settled[0]?.details.previous_status, 'retiring');
   });
 
   it('settles a rotation whose row update failed after a confirmed delete', async () => {
@@ -251,7 +250,8 @@ describe('credential durability across a lost gateway write', () => {
     const lost = await rotate(user, first.credential.id);
     assert.equal(lost.statusCode, 502, lost.body);
     assert.ok(!('secret' in JSON.parse(lost.body)), 'no secret was handed out');
-    assert.equal(await statusOf(first.credential.id), 'retiring');
+    // The entry is gone, which a credential-complete read proves: settled.
+    assert.equal(await statusOf(first.credential.id), 'revoked');
     assert.deepEqual(liveKeys(user.user.id), [String(second.secret.key)]);
 
     // Rotating the survivor now works instead of returning 502 for ever.
@@ -326,29 +326,32 @@ describe('credential durability across a lost gateway write', () => {
     assert.deepEqual(liveKeys(user.user.id), [String(second.secret.key), String(body.secret.key)]);
   });
 
-  it('still refuses drift that no pending retirement explains', async () => {
+  it('settles a row whose entry was removed by hand, and rotates the other', async () => {
     const user = await client();
     const first = await issue(user, 'first');
     const second = await issue(user, 'second');
+    const consumerId = first.credential.ferrum_consumer_id;
 
-    // An operator deleted an entry by hand. Both rows are `active`, so there
-    // is no reading of this that says which entry is which.
+    // An operator deleted an entry by hand. Both rows are `active`; a length
+    // could not say which entry went, but the material can.
     const username = consumerUsernameForUser(user.user.id);
     const entries = harness.edge.consumerByUsername(username)?.credentials.keyauth;
     assert.ok(entries);
     entries.splice(0, 1);
 
     const rotated = await rotate(user, second.credential.id);
-    assert.equal(rotated.statusCode, 502, rotated.body);
-    assert.match(errorOf(rotated.body).message, RECONCILE_CONSUMER);
-    const revoked = await revoke(user, second.credential.id);
-    assert.equal(revoked.statusCode, 502, revoked.body);
-    assert.match(errorOf(revoked.body).message, RECONCILE_CONSUMER);
-    assert.equal(await statusOf(first.credential.id), 'active');
-    assert.equal(await statusOf(second.credential.id), 'active');
+    assert.equal(rotated.statusCode, 200, rotated.body);
+    const body = rotated.json<RotateCredentialResponse>();
+    assert.deepEqual(liveKeys(user.user.id), [String(body.secret.key)]);
+    assert.equal(await statusOf(first.credential.id), 'revoked', 'its entry was gone');
+    assert.equal(await statusOf(second.credential.id), 'revoked');
+    const settled = await rowsFor('credential.settle', consumerId);
+    assert.equal(settled.length, 1);
+    assert.equal(settled[0]?.target_id, first.credential.id);
+    assert.equal(settled[0]?.details.previous_status, 'active');
   });
 
-  it('refuses drift that two pending retirements could equally explain', async () => {
+  it('tells two pending retirements apart by material, not by a count', async () => {
     const user = await client();
     const first = await issue(user, 'first');
     const second = await issue(user, 'second');
@@ -360,14 +363,13 @@ describe('credential durability across a lost gateway write', () => {
     assert.ok(entries);
     entries.splice(0, 1);
 
-    // One row too many, but two candidates for it: settling either would put
-    // every remaining position out by one.
+    // One row too many and two candidates for it: a length cannot choose, so
+    // the read decides each row by its own entry.
     const revoked = await revoke(user, second.credential.id);
-    assert.equal(revoked.statusCode, 502, revoked.body);
-    assert.match(errorOf(revoked.body).message, RECONCILE_CONSUMER);
-    assert.equal(await statusOf(first.credential.id), 'retiring');
-    assert.equal(await statusOf(second.credential.id), 'retiring');
-    assert.equal(liveKeys(user.user.id).length, 1, 'nothing was deleted');
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.equal(await statusOf(first.credential.id), 'revoked');
+    assert.equal(await statusOf(second.credential.id), 'revoked');
+    assert.deepEqual(liveKeys(user.user.id), []);
   });
 
   /* ── #132 — a failed delete does not strand its replacement ───────────── */
@@ -486,13 +488,15 @@ describe('credential durability across a lost gateway write', () => {
     assert.ok(typeof stranded === 'string', 'the error names the credential to revoke');
     assert.equal(details?.retired_credential_id, original.credential.id);
 
-    assert.equal(await statusOf(original.credential.id), 'retiring');
-    assert.equal(liveKeys(user.user.id).length, 1, 'one entry against two live rows');
-
-    // The next call settles the drift rather than refusing it, and everything
-    // left behind is ordinary self-service.
-    const fresh = await issue(user, 'after the lost acknowledgement');
+    // The previous entry is proved gone, so its row is settled at once, and
+    // the replacement is the one entry left, with its own row.
     assert.equal(await statusOf(original.credential.id), 'revoked');
+    assert.equal(await statusOf(stranded), 'active');
+    assert.equal(liveKeys(user.user.id).length, 1, 'the replacement');
+    assert.equal((await rowsFor('credential.settle', consumerId)).length, 1);
+
+    // Everything left behind is ordinary self-service.
+    const fresh = await issue(user, 'after the lost acknowledgement');
     assert.equal((await rowsFor('credential.settle', consumerId)).length, 1);
     assert.equal(liveKeys(user.user.id).length, 2);
     assert.equal((await revoke(user, stranded)).statusCode, 200);
@@ -610,17 +614,15 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(await statusOf(stranded), 'retiring');
   });
 
-  it('deletes nothing when the array moved under an in-flight append', async () => {
+  it('takes back only its own append when the array moved under it', async () => {
     const user = await client();
     const original = await issue(user, 'mine');
     const consumerId = original.credential.ferrum_consumer_id;
     const foreign = 'nxs_out_of_band_entry_written_by_an_operator';
 
-    // Edge redacts credential material on every read, so the fingerprint the
-    // append computed can never be matched against the array; what can be
-    // checked is that the array is still one entry longer than the length the
-    // index came from. Here an operator prepends an entry while the append is
-    // in flight, and index 1 stops meaning "the entry we just wrote".
+    // An operator prepends an entry while the append is in flight, so index 1
+    // stops meaning "the entry we just wrote". The take-back finds its entry
+    // by its material in a credential-complete read instead (issue #737).
     failNextCreate(harness, () => {
       const username = consumerUsernameForUser(user.user.id);
       const entries = harness.edge.consumerByUsername(username)?.credentials.keyauth;
@@ -634,13 +636,14 @@ describe('credential durability across a lost gateway write', () => {
     });
     assert.ok(issued.statusCode >= 500, issued.body);
 
-    const keys = liveKeys(user.user.id);
-    assert.equal(keys.length, 3, 'nothing was deleted at a position that had moved');
-    assert.ok(keys.includes(foreign), 'the entry the delete would have taken is still live');
-    assert.ok(keys.includes(String(original.secret.key)));
+    assert.deepEqual(
+      liveKeys(user.user.id),
+      [foreign, String(original.secret.key)],
+      'the orphan went; the entry now at its old index stayed',
+    );
     const rollback = await rowsFor('credential.append_rollback', consumerId);
     assert.equal(rollback.length, 1);
-    assert.equal(rollback[0]?.details.withdrawn, false, 'the orphan is recorded, not guessed at');
+    assert.equal(rollback[0]?.details.withdrawn, true);
   });
 
   it('takes back an append whose own acknowledgement was lost', async () => {

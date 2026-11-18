@@ -3330,12 +3330,19 @@ optional; defaults to the previous label.
   delete, with a `credential.revoke_start` audit row) and settles at
   `revoked`. After a successful rotation `previous.status` is always
   `revoked`.
+- `keyauth` and `jwt` entries are located by their secret in a
+  credential-complete read of the consumer, and every delete is conditioned on
+  that read, so another writer changing the consumer at the same time makes the
+  rotation fail with `409 CONFLICT` rather than delete the wrong key; repeat it.
+  A credential whose entry is no longer on the gateway is marked `revoked` and
+  answers `409 CONFLICT`.
 - If the delete fails below the cap, the appended replacement is removed again
   and the original error returned. If that also fails, `details` carries
   `stranded_credential_id` and `retired_credential_id`, and the message says
-  whether the gateway still holds both (revoke the named one yourself) or
-  neither could be confirmed (an administrator must reconcile — see
-  [`operations.md`](operations.md#12-the-credential-mirror)).
+  whether the previous credential is gone (revoke the named replacement and
+  issue a new one), the gateway still holds both (revoke the named one
+  yourself), or neither could be confirmed (an administrator must reconcile —
+  see [`operations.md`](operations.md#12-the-credential-mirror)).
 - **Only the credential's owner can rotate it, whatever their role.** The
   replacement stays on the same consumer with the same grants, so its secret
   acts as that account or application; returning it to anyone else would let
@@ -3348,11 +3355,12 @@ optional; defaults to the previous label.
 Errors: `403 FORBIDDEN` (someone else's credential, including for an
 administrator), `403 USER_DISABLED` (the owner is disabled), `409 CONFLICT`
 (already revoked; the credential's application is disabled, though revoking
-stays allowed; for `basicauth`, an unconfirmed change on the same identity; or
+stays allowed; the consumer changed during the rotation; the credential is no
+longer on the gateway; a secret on more than one gateway entry; for
+`basicauth`, an unconfirmed change on the same identity; or
 `details.reason: "account_recovery_pending"` while a password reset's
 revocation is pending, see [`POST /api/credentials`](#post-apicredentials)),
-`429 RATE_LIMITED`, `502 EDGE_ERROR` (including a gateway credential list that
-no longer matches the portal's, which is refused rather than guessed at).
+`429 RATE_LIMITED`, `502 EDGE_ERROR`.
 
 ### `DELETE /api/credentials/:id`
 
@@ -3361,11 +3369,18 @@ marks the row `revoked`. This is how an administrator takes away another
 account's or application's credential; unlike rotation, it returns no secret. Idempotent: an already-revoked credential succeeds
 without a gateway call.
 
+A `keyauth` or `jwt` entry is located by its secret in a credential-complete
+read of the consumer, and the delete is conditioned on that read: if another
+writer changes the consumer in between, the request answers `409 CONFLICT`
+with nothing deleted, and can be repeated. An entry that is already gone is
+revoked without a delete (`evidence: "entry_absent"` on `credential.revoke`).
+
 The row moves to `retiring` (with `credential.revoke_start`) before the gateway
 delete and to `revoked` (with `credential.revoke`) after. If the last step
-fails, repeating the request completes it. If the gateway proves the delete
-never happened, the row returns to `active` with a
-`credential.revoke_rollback` row, and the request can be repeated.
+fails, repeating the request completes it. If the delete fails, a fresh read
+decides the row: the entry still there, it returns to `active` with a
+`credential.revoke_rollback` row, and the request can be repeated; the entry
+gone, it is settled `revoked` (`credential.settle`).
 
 **`basicauth` is located by the portal's rows alone**, because Edge never lists
 it. So:
