@@ -40,6 +40,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Templates tab). Before, a saved override could only be undone by pasting the
   default back by hand. The reset is audited as `admin.template_reset` (#676).
 
+- The `antigravity-neon-agents` agent-dispatch skill (`.agents/skills/`, with a `.claude/skills/`
+  wrapper) dispatches Gemini 4 Neon (`gemini-4-neon`) workers through the standalone Google
+  Antigravity `agy` CLI. `--effort` takes `low`, `medium`, `high` or `xhigh` (default `high`);
+  there is no fast tier.
+
 ### Changed
 
 - **Pinned Ferrum Edge v0.9.20** (#706):
@@ -247,6 +252,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `accessRequests.update` (every status change goes through `updateIfStatus`),
   organization deletion from the store contract, and the Edge client's
   whole-type `consumers.replaceCredentials` (#676, #685).
+- The `composer-agents`, `deepseek-pro-agents`, `fable-5-1-agents`, `grok-agents`, `luna-agents`
+  and `opencode-laguna-agents` agent-dispatch skills, from `.agents/skills/` and
+  `.claude/skills/`, and their rows in the `CLAUDE.md` skill table.
 
 ### Fixed
 

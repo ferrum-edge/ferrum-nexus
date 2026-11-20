@@ -224,27 +224,22 @@ them. The tree mirrors [ferrum-edge](https://github.com/ferrum-edge/ferrum-edge)
 `.agents/skills`, adapted to this repository. The shared binary resolver is
 `.agents/skills/_lib/resolve-agent-bin.sh`.
 
-| Skill (directory)        | Worker model (pinned by the launcher)         | CLI            | `--effort` / `--fast`                                             |
-| ------------------------ | --------------------------------------------- | -------------- | ----------------------------------------------------------------- |
-| `astra-agents`           | `gpt-6.2-astra`                               | `codex`        | `low` to `max`, `ultra`; optional `--fast` / `--no-fast`          |
-| `sol-agents`             | `gpt-6.2-sol`                                 | `codex`        | `low` to `max`, `ultra`; optional `--fast` / `--no-fast`          |
-| `luna-agents`            | `gpt-6-luna`                                  | `codex`        | `low` to `max`; optional `--fast` / `--no-fast`                   |
-| `opus-agents`            | `claude-opus-5-5[1m]`                         | `claude`       | `low` to `max`; `--fast` on explicit request                      |
-| `fable-5-1-agents`       | `claude-fable-5-1`                            | `claude`       | `low` to `max`                                                    |
-| `grok-agents`            | `cursor-grok-4.6-<effort>`                    | `cursor-agent` | picks the SKU (default `high`; `max` clamps to `xhigh`); `--fast` |
-| `muse-agents`            | `muse-wonder-full-1.0`                        | `muse`         | `low` to `max`, `ultra` (passed through); no fast tier            |
-| `composer-agents`        | `composer-2.5`                                | `cursor-agent` | ignored; `--fast` selects `composer-2.5-fast`                     |
-| `opencode-laguna-agents` | `opencode/laguna-s-2.1-free` (default)        | `opencode`     | ignored; `--model opencode/<model>` overrides the model           |
-| `deepseek-pro-agents`    | `alibaba-token-plan/deepseek-v4.1-flash-1017` | `opencode`     | ignored                                                           |
-| `deepseek-flash-agents`  | `alibaba-token-plan/deepseek-v4.1-flash-1017` | `opencode`     | ignored                                                           |
-| `qwen-agents`            | `alibaba-token-plan/qwen3.8-max`              | `opencode`     | ignored                                                           |
+| Skill (directory)         | Worker model (pinned by the launcher)         | CLI        | `--effort` / `--fast`                                             |
+| ------------------------- | --------------------------------------------- | ---------- | ----------------------------------------------------------------- |
+| `astra-agents`            | `gpt-6.2-astra`                               | `codex`    | `low` to `max`, `ultra`; optional `--fast` / `--no-fast`          |
+| `sol-agents`              | `gpt-6.2-sol`                                 | `codex`    | `low` to `max`, `ultra`; optional `--fast` / `--no-fast`          |
+| `opus-agents`             | `claude-opus-5-5[1m]`                         | `claude`   | `low` to `max`; `--fast` on explicit request                      |
+| `muse-agents`             | `muse-wonder-full-1.0`                        | `muse`     | `low` to `max`, `ultra` (passed through); no fast tier            |
+| `antigravity-neon-agents` | `gemini-4-neon`                               | `agy`      | `low` to `xhigh` (default `high`); no `max`/`ultra`, no fast tier |
+| `deepseek-flash-agents`   | `alibaba-token-plan/deepseek-v4.1-flash-1017` | `opencode` | ignored                                                           |
+| `qwen-agents`             | `alibaba-token-plan/qwen3.8-max`              | `opencode` | ignored                                                           |
 
 `low` to `max` is `low|medium|high|xhigh|max`. "Ignored" means the launcher accepts `--effort` for
 parity with the other skills but the model has no effort tiers; the `opencode` launchers accept only
 `medium|high|xhigh|max`.
 
 **Trigger shorthand.** "astra xhigh sub agent" (and the same shape for other skills: "opus high",
-"grok medium", "muse ultra") means: use that skill as the orchestrator, dispatch a worker at that
+"neon medium", "muse ultra") means: use that skill as the orchestrator, dispatch a worker at that
 reasoning effort, and follow the skill's worktree isolation, verification, and reporting rules. Never
 substitute a different model, effort, or service tier than the one named.
 
