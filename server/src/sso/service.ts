@@ -1089,12 +1089,21 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     // takes too. A first-time link or a provisioned account writes one of the
     // provider's links, which a save that removes the provider deletes by
     // predicate; every sign-in inserts a session, which a save that cuts the
-    // provider off revokes by account. Neither save can see a row this
-    // transaction has not committed, and on a peer instance's store nothing
-    // else orders the two. With the key, the save either committed before this
-    // body's re-read, which then refuses, or waits for this commit and removes
-    // the new link and the new session with the rest. The key spans only this
-    // transaction, not the token exchange before it.
+    // provider off (removal, disable or a switch to `local_only`) revokes by
+    // account. Neither save can see a row this transaction has not committed,
+    // and on a peer instance's store nothing else orders the two. The key only
+    // orders the commits; what each side then observes depends on what the
+    // save changed:
+    // - A save that committed first is seen by this body's re-read, which
+    //   refuses only if the save changed what it checks (the provider
+    //   removed, disabled or reconfigured, the policy turned to `local_only`,
+    //   or the domain list no longer admitting the address). Any other change,
+    //   `sso_only` included, leaves the sign-in to commit.
+    // - A save that waits for this commit sees what it wrote: a removal
+    //   deletes the new link with the provider's others, and a cut-off
+    //   revokes the new session with the linked accounts' others. A switch to
+    //   `local_only` keeps the link.
+    // The key spans only this transaction, not the token exchange before it.
     //
     // Any sign-in into an existing account also takes the account's lifecycle
     // key, inside the provider's: a promotion reads the account's links and an
@@ -1416,9 +1425,15 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         );
       }
       // Every provider this save can touch — removed, disabled, reconfigured,
-      // or cut off by the policy or the domain list — is locked first, so a
-      // callback that read the old settings either commits before this save
-      // or re-reads the new ones and commits nothing (`currentSettings`).
+      // or cut off by the policy or the domain list — is locked first, which
+      // orders this save against a callback's commit. A callback that commits
+      // first is seen below: a removal deletes its new link, and a cut-off
+      // (removal, disable or a switch to `local_only`) revokes its new
+      // session. A callback that commits after re-reads these settings
+      // (`currentSettings`) and refuses only if this save changed what that
+      // re-read checks: the provider removed, disabled or reconfigured, the
+      // policy turned to `local_only`, or the domain list no longer admitting
+      // its address.
       const affected = [
         ...providersInForce(config, stored).map(({ settings }) => settings.id),
         ...next.providers.map((provider) => provider.id),
