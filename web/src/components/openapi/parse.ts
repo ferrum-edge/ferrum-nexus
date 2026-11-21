@@ -143,7 +143,7 @@ export interface ParsedSpec {
   title: string;
   version: string | null;
   description: string | null;
-  /** `openapi` / `swagger` version string, when present. */
+  /** The document's `openapi` version string. */
   specVersion: string | null;
   servers: SpecServer[];
   groups: SpecTagGroup[];
@@ -476,6 +476,32 @@ export const CATALOG_SPEC_LIMITS: SpecParseLimits = {
  */
 const YAML_SPEC_OPTIONS = { schema: 'core', merge: false, resolveKnownTags: false } as const;
 
+/**
+ * The server's OpenAPI 3.x version test (`OPENAPI_3_VERSION` in
+ * `server/src/publishing/oas.ts`), applied to the trimmed `openapi` string.
+ */
+const OPENAPI_3_VERSION = /^3\.\d+(\.\d+)?/;
+
+/**
+ * Why the server would refuse `doc`'s version fields, in its words, or null.
+ *
+ * Mirrors `parseOpenApiSpec`: a string `swagger` field is Swagger 2.0, which
+ * the portal does not accept, and `openapi` must be a non-empty 3.x version
+ * string. Checked before the document is walked, so the publish form never
+ * calls a document valid that the server is about to refuse.
+ */
+function openApiVersionProblem(doc: SpecNode): string | null {
+  if (typeof doc.swagger === 'string') {
+    return 'Swagger 2.0 documents are not supported; upload an OpenAPI 3.x document.';
+  }
+  const version = doc.openapi;
+  if (typeof version !== 'string' || version.trim() === '') {
+    return "The document is missing the 'openapi' version field.";
+  }
+  if (!OPENAPI_3_VERSION.test(version.trim())) return 'Only OpenAPI 3.x documents are supported.';
+  return null;
+}
+
 /** The last call to {@link parseSpecText}; see there. */
 let lastParse: { text: string; limits: SpecParseLimits; result: SpecParseResult } | null = null;
 
@@ -541,15 +567,17 @@ function parseSpecTextUncached(text: string, limits: SpecParseLimits): SpecParse
     };
   }
 
-  const specVersion = asString(doc.openapi) ?? asString(doc.swagger);
   const info = asRecord(doc.info);
   const paths = asRecord(doc.paths);
-  if (!paths && !specVersion) {
+  if (!paths && !asString(doc.openapi) && !asString(doc.swagger)) {
     return {
       ok: false,
       error: 'This does not look like an OpenAPI document: no `openapi`/`swagger` or `paths` key.',
     };
   }
+  const versionProblem = openApiVersionProblem(doc);
+  if (versionProblem !== null) return { ok: false, error: versionProblem };
+  const specVersion = asString(doc.openapi);
 
   const pathItems = paths ? readPathItems(doc, paths) : { items: [], unresolved: [] };
   const operations = readOperations(doc, specVersion, pathItems.items);
