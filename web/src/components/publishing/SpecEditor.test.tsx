@@ -94,6 +94,16 @@ describe('OpenAPI specification editor', () => {
     expect(screen.queryByText('Valid')).not.toBeInTheDocument();
   });
 
+  it('refuses a Swagger 2.0 document instead of calling it valid', () => {
+    render(
+      <Editor initialValue='{"swagger":"2.0","info":{"title":"Test Swagger","version":"1.0"},"paths":{}}' />,
+    );
+    expect(screen.queryByText('Valid')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Swagger 2.0 documents are not supported; upload an OpenAPI 3.x document.',
+    );
+  });
+
   it('accepts YAML and preserves the original text', () => {
     const yaml = 'openapi: 3.0.3\ninfo:\n  title: YAML API\npaths: {}\n';
     render(<Editor initialValue={yaml} />);

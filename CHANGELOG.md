@@ -258,6 +258,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- The publish and spec-revision editors no longer call a Swagger 2.0 document
+  "Valid" (#749). Their preview now refuses it, an `openapi` field that is
+  missing or not a string, and a non-3.x `openapi` version with the server's own
+  messages, so a provider learns before submitting that an OpenAPI 3.x document
+  is required. Select menus are now as wide as their trigger, wrapping long
+  options (such as **OpenAPI enforcement**) instead of stretching across the
+  sidebar.
+
 - The service-manifest preview now applies Alloy's and Ferrum Edge's refusals
   for cleartext telemetry, derived resource IDs and exported field bounds
   (#740, #734). A cleartext `gateway.otel_endpoint` must name a canonical
