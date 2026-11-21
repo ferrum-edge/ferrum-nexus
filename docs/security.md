@@ -699,7 +699,9 @@ backend:
 
 So a tightening either commits before the re-read and the sign-in is refused
 with no session, or waits until the session exists. A session issued before a
-change is not ended by a policy save; a disable ends it with the rest. A
+change is not ended by a policy save, except that a single sign-on save cutting
+off a provider ends every session of the accounts linked at it (see **Cutting a
+provider off ends its sessions**); a disable ends it with the rest. A
 sign-in that waits out one of those leases gets `409 CONFLICT` and nothing is
 issued.
 
@@ -719,40 +721,46 @@ commits nothing (`sso_disabled`) unless all of these hold at that read:
 - its settings, mappings included, are exactly those the callback started
   with. A difference at this re-read refuses the attempt; the user signs in again.
 
-The deployment-wide domain list is checked again there too. A callback that
-writes one of the provider's links (a first-time link or a provisioned account)
-and a settings save hold the same per-provider lease (`sso:provider:<id>`). A
-settings save first takes the deployment-wide `sso:settings` key and then the
-key of every provider it can affect, in sorted order, and then,
-inside its transaction, refuses with `409 CONFLICT` unless the stored settings
-are still the ones it worked that set out from. For those callbacks, on every
-backend, a save either commits before the callback's re-read, or waits for the
-callback to commit and then removes its links with the rest
+The deployment-wide domain list is checked again there too. Every callback
+that commits a sign-in — a returning sign-in, a first-time link or a
+provisioned account — and every settings save hold the same per-provider lease
+(`sso:provider:<id>`). The callback holds it only around the transaction that
+commits (and, for an existing account, the wait for that account's lifecycle
+lease inside it), not across the token exchange. A settings save first takes the
+deployment-wide `sso:settings` key and then the key of every provider it can
+affect, in sorted order, and then, inside its transaction, refuses with
+`409 CONFLICT` unless the stored settings are still the ones it worked that set
+out from. On every backend, and across instances once every instance runs a
+version whose returning sign-ins take the provider lease
+([mixed-version rollouts](operations.md#8-scaling)), a save either commits
+before the callback's re-read, which then refuses the attempt if the save
+changed what the re-read checks (the provider removed, disabled or
+reconfigured, the policy turned to `local_only`, or the domain list no longer
+admitting the address), or waits for the callback to commit and then sees what
+it wrote: a removal deletes the new link with the provider's others, and a
+cut-off (removal, disable or a switch to `local_only`) revokes the new session
+with the linked accounts' others. Any other settings change, `sso_only`
+included, neither refuses the callback nor ends its session
 ([Cross-instance locks are fenced at commit](#cross-instance-locks-are-fenced-at-commit)).
+The re-read alone would not order a returning sign-in against a save on
+another instance: the save's revocation cannot see a session that the
+callback's still-open transaction has not committed.
 
-A returning sign-in deliberately takes only its account lifecycle lease,
-without the provider lease. Its provider authorization is at the settings
-re-read. In the [supported topology](operations.md#supported-topologies), only
-one instance serves requests, and production composes its services over one
-store object. All four adapters serialize transaction bodies on that object.
-A settings save therefore either commits before the callback's re-read, which
-refuses the stale attempt, or waits until the authorized callback commits.
-This ordering does not require returning sign-ins to take a deployment-wide
-provider lease.
-
-**This is not a cross-instance commit-time cutoff for returning sign-ins.**
-Independent PostgreSQL, MySQL or replica-set MongoDB stores have independent
-transaction queues. A peer's provider disable can commit after a returning
-callback's settings re-read and before that callback commits its session.
-SQLite's `BEGIN IMMEDIATE` blocks that write ordering. Provider removal also
-deletes the existing identity that a returning callback must update: the
-conflicting writes order or abort those transactions, rather than letting the
-callback recreate a removed link. The supported single-serving-instance
-topology excludes the independent-store interleaving. A future
-multi-active-instance feature must explicitly qualify and test the returning
-callback boundary across independent stores, or add provider-level fencing
-for returning callbacks. See [the concurrency guidance](operations.md#8-scaling).
-Sessions issued before a settings change are not ended by it (see **Losing access**).
+**Cutting a provider off ends its sessions.** A settings save that removes a
+provider, disables it, or turns the login policy to `local_only` ends, in its
+own transaction, every session of every account linked at a provider it cuts
+off (#591), password sessions included: a session records neither the provider
+nor the password that opened it. `local_only` cuts off every provider that was
+in force and enabled, `NEXUS_OIDC_PROVIDERS` ones included, whose own `enabled`
+flag cannot be edited through the API; the policy change itself keeps the links
+(a provider removed in the same save loses its links as any removal does), so
+turning single sign-on back on lets them sign in again. A provider still in force cuts off the
+links at its own issuer only, not those under its id at another issuer (a
+settings row an environment provider shadows). The `admin.settings_update` entry
+records `providers_cut_off` and `sessions_revoked`, on every switch to
+`local_only` even when nothing was in force. Accounts with no link at a cut-off
+provider keep their sessions; other settings changes end no session (see
+**Losing access**).
 
 **Secrets and logs.** A settings provider's client secret:
 
@@ -789,8 +797,11 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
   so a link cannot slip between the check and promotion. Every manual privilege
   increase, including `client` → `provider` and `admin` → `super_admin`, ends
   **all** existing sessions in that transaction and records `terminated_sessions`
-  in `user.role_change`. Removing an identity alone leaves its sessions alive;
-  none of those old cookies may inherit a subsequent promotion.
+  in `user.role_change`. Removing an identity ends every session of the account
+  in its own transaction (#591), under the same lifecycle lease, and it
+  re-checks the account's role there, so an `admin` cannot remove an identity
+  of an account promoted meanwhile; none of those old cookies may inherit a
+  subsequent promotion.
 - An address a lower-trust provider provisioned first leaves its rightful,
   admin-mapped holder refused with `privileged_account`, and with no password
   to sign in and link. A `super_admin` can release the address once the account
@@ -2080,7 +2091,7 @@ Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 | `auth.sso_login`       | `user`      | A single sign-on opened a session; committed with the session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `provisioned` or `linked` when this sign-in did that too. Refused sign-ins are logged (provider and reason), not audited.                                                                                                                                                                                                                        |
 | `auth.sso_provision`   | `user`      | Just-in-time provisioning created the account. `details`: `provider_id`, `subject`, `email`, `email_verified`, `role`, `org_id`, `role_mapping`, `org_mapping` (the rules that matched). Never `super_admin`.                                                                                                                                                                                                                                                                |
 | `auth.sso_link`        | `user`      | An identity-provider subject was linked to an existing account: automatically under the proven-address rule, or explicitly from the account's own session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `explicit`, `email_verified_by_provider`.                                                                                                                                                                                                            |
-| `auth.sso_unlink`      | `user`      | An administrator removed a link (`DELETE /api/users/:id/identities/:identityId`). `details`: `identity_id`, `provider_id`, `subject`.                                                                                                                                                                                                                                                                                                                                        |
+| `auth.sso_unlink`      | `user`      | An administrator removed a link (`DELETE /api/users/:id/identities/:identityId`). `details`: `identity_id`, `provider_id`, `subject`, `terminated_sessions` (the account's sessions it ended).                                                                                                                                                                                                                                                                               |
 | `auth.sso_claims_sync` | `user`      | A sign-in's claims changed the account's role or organization, or a promotion was withheld; the actor is the system. `details`: `provider_id`, `subject`, `from_role`/`to_role` and/or `from_org_id`/`to_org_id`, `role_mapping`, `org_mapping`; for a promotion, `terminated_sessions` (every other session was ended); for a withheld one, `role_withheld`, `withheld_reason: "lower_trust_identities"` and `lower_trust_provider_ids`. Never written for a `super_admin`. |
 | `auth.sso_deprovision` | `user`      | A sign-in's claims mapped to no role and `deprovision_on_access_loss` is on: the account was disabled, its sessions ended and its gateway revocation queued, in one transaction; the actor is the system. `details`: `provider_id`, `subject`, `reason`, `role`, `terminated_sessions`, `revoked_reset_links`, `gateway_teardown: "queued"`. The revocation's outcome is `user.gateway_teardown_complete`.                                                                   |
 
@@ -2275,16 +2286,16 @@ Revoking a `retiring` credential again completes it.
 
 ### Administration
 
-| Action                      | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| --------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `admin.settings_update`     | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it), `client_secrets_changed` (provider ids only), and `providers_trust_lowered` (provider ids whose settings stopped granting admin trust).                             |
-| `settings.encryption_bound` | `settings`       | The one-time startup conversion of unbound legacy (`v1`) encrypted settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). Written once by the system; while it exists no later start converts a `v1` row, so do not delete it. `target_id` is `null`. `details`: `bound_keys`, `changed_keys` (names only); a row the key cannot open stops the start, so none is recorded.                                                                                                                               |
-| `admin.template_update`     | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                                                                                                                                                                                                 |
-| `admin.template_reset`      | `email_template` | An email template override was removed, restoring the built-in default. `target_id` is the template key. `details`: `key`.                                                                                                                                                                                                                                                                                                                                                                                     |
-| `admin.mass_email`          | `mass_email`     | A mass-email campaign was started: written, and counted against `NEXUS_MAX_MASS_EMAILS_PER_DAY`, **before** any outbox row is queued; if it cannot be written nothing is queued. One row per campaign — a retry of the same batch by the same administrator writes none, and is a retry only if its `content_sha256` matches (otherwise `409`). `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `bytes` (rendered size × recipients), `content_sha256`, `phase: "started"`. |
-| `admin.mass_email_complete` | `mass_email`     | What one attempt at a campaign queued, written best-effort after its chunked fan-out. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`, `chunks` (fan-out transactions committed), `failed` (a chunk failed; the retry with the same batch id queues the rest), and `skipped` when present (recipients whose copy the link policy refused even with the fallback name; a retry skips them again).                                                                 |
-| `admin.smtp_test`           | `settings`       | An SMTP test was about to be sent: written, and counted against the hourly budget of 10 per administrator, **before** the relay is contacted; if it cannot be written nothing is sent. `target_id` is `smtp`. `details`: `to_email`, `phase: "started"`.                                                                                                                                                                                                                                                       |
-| `admin.smtp_test_complete`  | `settings`       | The result of that SMTP test, written best-effort after the send. `target_id` is `smtp`. `details`: `to_email`, `ok`, `intent_id` (the `admin.smtp_test` row).                                                                                                                                                                                                                                                                                                                                                 |
+| Action                      | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admin.settings_update`     | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it), `client_secrets_changed` (provider ids only), `providers_trust_lowered` (provider ids whose settings stopped granting admin trust), and `providers_cut_off` with `sessions_revoked` when the save removed or disabled a provider, and on every switch to `local_only` (`[]` and `0` when no provider was in force). |
+| `settings.encryption_bound` | `settings`       | The one-time startup conversion of unbound legacy (`v1`) encrypted settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). Written once by the system; while it exists no later start converts a `v1` row, so do not delete it. `target_id` is `null`. `details`: `bound_keys`, `changed_keys` (names only); a row the key cannot open stops the start, so none is recorded.                                                                                                                                                                                                                                                                               |
+| `admin.template_update`     | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `admin.template_reset`      | `email_template` | An email template override was removed, restoring the built-in default. `target_id` is the template key. `details`: `key`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `admin.mass_email`          | `mass_email`     | A mass-email campaign was started: written, and counted against `NEXUS_MAX_MASS_EMAILS_PER_DAY`, **before** any outbox row is queued; if it cannot be written nothing is queued. One row per campaign — a retry of the same batch by the same administrator writes none, and is a retry only if its `content_sha256` matches (otherwise `409`). `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `bytes` (rendered size × recipients), `content_sha256`, `phase: "started"`.                                                                                                                                                 |
+| `admin.mass_email_complete` | `mass_email`     | What one attempt at a campaign queued, written best-effort after its chunked fan-out. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`, `chunks` (fan-out transactions committed), `failed` (a chunk failed; the retry with the same batch id queues the rest), and `skipped` when present (recipients whose copy the link policy refused even with the fallback name; a retry skips them again).                                                                                                                                                                                                                 |
+| `admin.smtp_test`           | `settings`       | An SMTP test was about to be sent: written, and counted against the hourly budget of 10 per administrator, **before** the relay is contacted; if it cannot be written nothing is sent. `target_id` is `smtp`. `details`: `to_email`, `phase: "started"`.                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `admin.smtp_test_complete`  | `settings`       | The result of that SMTP test, written best-effort after the send. `target_id` is `smtp`. `details`: `to_email`, `ok`, `intent_id` (the `admin.smtp_test` row).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 ### God mode (`super_admin` only)
 

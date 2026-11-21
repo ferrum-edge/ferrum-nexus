@@ -801,6 +801,40 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         expires_at: isoInSeconds(600),
       });
       assert.equal(await store.sessions.deleteForUser(user.id), 1);
+
+      // Set-based termination for several accounts at once, across batches:
+      // live accounts sit in the first batch, at its boundary and in the last.
+      const others = [await makeUser(), await makeUser(), await makeUser()];
+      const tokens = new Map<string, string>();
+      for (const account of [user, ...others]) {
+        const token = `many-${newId()}`;
+        tokens.set(account.id, token);
+        await store.sessions.create({
+          token_hash: token,
+          user_id: account.id,
+          csrf_token: 'csrf',
+          expires_at: isoInSeconds(600),
+        });
+      }
+      const bystander = await makeUser();
+      await store.sessions.create({
+        token_hash: `bystander-${newId()}`,
+        user_id: bystander.id,
+        csrf_token: 'csrf',
+        expires_at: isoInSeconds(600),
+      });
+      const absent = (count: number): string[] => Array.from({ length: count }, () => newId());
+      const [first, second, third] = others;
+      assert.ok(first && second && third);
+      const ids = [user.id, ...absent(498), first.id, second.id, ...absent(300), third.id];
+      assert.equal(ids.indexOf(first.id), 499, 'the last id of the first batch of 500');
+      assert.equal(ids.indexOf(second.id), 500, 'the first id of the second batch');
+      assert.equal(await store.sessions.deleteForUsers(ids), 4);
+      for (const token of tokens.values()) {
+        assert.equal(await store.sessions.findByTokenHash(token), null);
+      }
+      assert.equal(await store.sessions.deleteForUsers([]), 0);
+      assert.equal(await store.sessions.deleteForUser(bystander.id), 1);
     });
 
     /* ── apis and specs ───────────────────────────────────────────────── */
@@ -4147,6 +4181,22 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.deepEqual(await store.userIdentities.listUserIdsByProvider(`${provider}-none`), []);
       assert.equal(await store.userIdentities.delete(extraOwner.id), true);
       assert.deepEqual(await store.userIdentities.listUserIdsByProvider(provider), [other.id]);
+      // With an issuer, only the links at that issuer under the provider id.
+      const otherIssuer = await store.userIdentities.create({
+        user_id: owner.id,
+        provider_id: provider,
+        issuer: `${issuer}/other`,
+        subject: `subject-${newId()}`,
+        provisioned: false,
+      });
+      assert.deepEqual(
+        await store.userIdentities.listUserIdsByProvider(provider, `${issuer}/other`),
+        [owner.id],
+      );
+      assert.deepEqual(await store.userIdentities.listUserIdsByProvider(provider, issuer), [
+        other.id,
+      ]);
+      assert.equal(await store.userIdentities.delete(otherIssuer.id), true);
       // Removing a provider removes its links, and only its links.
       assert.equal(await store.userIdentities.deleteByProvider(provider), 1);
       assert.equal(await store.userIdentities.countByProvider(provider), 0);

@@ -875,7 +875,9 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       //
       // So a tightening either committed before the re-read and refuses this
       // sign-in with no session, or waits until the session exists; a session
-      // issued before a change is not ended by it.
+      // issued before a change is not ended by it, except that a single
+      // sign-on save cutting off a provider ends every session of the
+      // accounts linked at it, password sessions included.
       const at = nowIso();
       const { issued, breakGlass } = await rewordLeaseLost(SIGN_IN_LEASE_LOST_MESSAGE, () =>
         serializePasswordChange(record.id, () =>

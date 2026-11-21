@@ -60,10 +60,11 @@
  *
  * That transaction re-reads the provider: one removed, disabled or
  * reconfigured while the callback waited on the provider's token endpoint, or
- * a login policy turned to `local_only`, commits nothing. A first-time link or
- * a provisioned account commits under the provider's `ssoProviderLockKey`,
- * which settings saves hold too, so the re-read cannot miss a save that is
- * committing at the same moment.
+ * a login policy turned to `local_only`, commits nothing. Every sign-in —
+ * returning, first-time link or provisioned account — commits under the
+ * provider's `ssoProviderLockKey`, which settings saves hold too, so the
+ * re-read cannot miss a save that is committing at the same moment, on this
+ * instance or another.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -416,11 +417,14 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
    * single sign-on and the provider is still in force, enabled, and configured
    * exactly as the callback found it before its slow token exchange.
    *
-   * A commit that writes one of the provider's links runs under the
-   * provider's {@link ssoProviderLockKey}, which a settings save takes as well,
-   * so a removal or a disable that has committed is seen here, and one that
-   * has not yet started waits for this commit. A returning sign-in writes
-   * nothing a save reads, so this re-read alone orders it against one.
+   * Every sign-in commit runs under the provider's {@link ssoProviderLockKey},
+   * which a settings save takes as well, so a removal, a disable or a switch to
+   * `local_only` that has committed is seen here, and one that has not yet
+   * started waits for this commit and then revokes the session it issued. The
+   * re-read
+   * alone would not order a returning sign-in against a save on another
+   * instance: the save's revocation cannot see a session this transaction has
+   * not yet committed.
    */
   async function currentSettings(
     tx: NexusStore,
@@ -1081,13 +1085,25 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
 
     // Keys are taken before the transaction, never inside it.
     //
-    // A first-time link or a provisioned account writes one of the provider's
-    // links, which a settings save that removes the provider deletes by
-    // predicate. The provider's key orders the two: the save either committed
-    // before this body's re-read, or waits for this commit and removes the new
-    // link with the rest. A returning sign-in writes nothing a save reads, so
-    // the re-read alone orders it, and it does not queue every sign-in at the
-    // provider behind one key.
+    // Every sign-in commits under the provider's key, which a settings save
+    // takes too. A first-time link or a provisioned account writes one of the
+    // provider's links, which a save that removes the provider deletes by
+    // predicate; every sign-in inserts a session, which a save that cuts the
+    // provider off (removal, disable or a switch to `local_only`) revokes by
+    // account. Neither save can see a row this transaction has not committed,
+    // and on a peer instance's store nothing else orders the two. The key only
+    // orders the commits; what each side then observes depends on what the
+    // save changed:
+    // - A save that committed first is seen by this body's re-read, which
+    //   refuses only if the save changed what it checks (the provider
+    //   removed, disabled or reconfigured, the policy turned to `local_only`,
+    //   or the domain list no longer admitting the address). Any other change,
+    //   `sso_only` included, leaves the sign-in to commit.
+    // - A save that waits for this commit sees what it wrote: a removal
+    //   deletes the new link with the provider's others, and a cut-off
+    //   revokes the new session with the linked accounts' others. A switch to
+    //   `local_only` keeps the link.
+    // The key spans only this transaction, not the token exchange before it.
     //
     // Any sign-in into an existing account also takes the account's lifecycle
     // key, inside the provider's: a promotion reads the account's links and an
@@ -1096,9 +1112,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     const accountId = plan.kind === 'provision' ? null : plan.user.id;
     const underAccount =
       accountId === null ? commit : () => locks(userLifecycleLockKey(accountId), commit);
-    return plan.kind === 'returning'
-      ? underAccount()
-      : locks(ssoProviderLockKey(provider.id), underAccount);
+    return locks(ssoProviderLockKey(provider.id), underAccount);
   }
 
   async function publicConfig(): Promise<SsoPublicConfigResponse> {
@@ -1411,9 +1425,15 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
         );
       }
       // Every provider this save can touch — removed, disabled, reconfigured,
-      // or cut off by the policy or the domain list — is locked first, so a
-      // callback that read the old settings either commits before this save
-      // or re-reads the new ones and commits nothing (`currentSettings`).
+      // or cut off by the policy or the domain list — is locked first, which
+      // orders this save against a callback's commit. A callback that commits
+      // first is seen below: a removal deletes its new link, and a cut-off
+      // (removal, disable or a switch to `local_only`) revokes its new
+      // session. A callback that commits after re-reads these settings
+      // (`currentSettings`) and refuses only if this save changed what that
+      // re-read checks: the provider removed, disabled or reconfigured, the
+      // policy turned to `local_only`, or the domain list no longer admitting
+      // its address.
       const affected = [
         ...providersInForce(config, stored).map(({ settings }) => settings.id),
         ...next.providers.map((provider) => provider.id),
@@ -1465,11 +1485,21 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               const envIds = new Set(config.sso.providers.map((provider) => provider.settings.id));
               const linksRemoved: Record<string, number> = {};
               // Sessions established through a provider this save cuts
-              // off — removed, or disabled in place — end with it (#591):
-              // collect their accounts before the links move, then revoke
-              // in this transaction.
-              const cutOff = new Set<string>();
-              for (const id of removed) if (!envIds.has(id)) cutOff.add(id);
+              // off — removed, disabled in place, or shut out by a login
+              // policy turned to `local_only` — end with it (#591): collect
+              // their accounts before the links move, then revoke in this
+              // transaction. The policy cut-off reaches environment
+              // providers too, whose own `enabled` flag cannot be edited here.
+              //
+              // Each entry maps a provider id to the issuer whose links it
+              // cuts off, or to `null` for every link under the id: a removal
+              // deletes them all. A provider still in force cuts off only its
+              // own issuer's links; one under the same id at another issuer
+              // (a settings row an environment provider shadows) never signed
+              // anybody in through it.
+              const cutOff = new Map<string, string | null>();
+              for (const id of removed) if (!envIds.has(id)) cutOff.set(id, null);
+              const policyCutOff = stored.policy !== 'local_only' && next.policy === 'local_only';
               const nextEnabled = new Map(
                 providersInForce(config, next).map(({ settings }) => [
                   settings.id,
@@ -1477,24 +1507,24 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
                 ]),
               );
               for (const { settings } of providersInForce(config, stored)) {
-                if (settings.enabled && nextEnabled.get(settings.id) === false) {
-                  cutOff.add(settings.id);
+                if (!settings.enabled || cutOff.has(settings.id)) continue;
+                if (policyCutOff || nextEnabled.get(settings.id) === false) {
+                  cutOff.set(settings.id, settings.issuer);
                 }
               }
               const cutOffUsers = new Set<Uuid>();
-              for (const id of cutOff) {
-                for (const userId of await tx.userIdentities.listUserIdsByProvider(id)) {
-                  cutOffUsers.add(userId);
-                }
+              for (const [id, issuer] of cutOff) {
+                const linked = await tx.userIdentities.listUserIdsByProvider(
+                  id,
+                  ...(issuer === null ? [] : [issuer]),
+                );
+                for (const userId of linked) cutOffUsers.add(userId);
               }
               for (const id of removed) {
                 if (envIds.has(id)) continue;
                 linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
               }
-              let sessionsRevoked = 0;
-              for (const userId of cutOffUsers) {
-                sessionsRevoked += await tx.sessions.deleteForUser(userId);
-              }
+              const sessionsRevoked = await tx.sessions.deleteForUsers([...cutOffUsers]);
               const nextProviders = new Map(
                 providersInForce(config, next).map(
                   ({ settings }): [string, SsoProviderSettings] => [settings.id, settings],
@@ -1524,8 +1554,11 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
                   providers_added: added,
                   providers_removed: removed,
                   links_removed: linksRemoved,
-                  ...(cutOff.size > 0
-                    ? { providers_cut_off: [...cutOff].sort(), sessions_revoked: sessionsRevoked }
+                  ...(cutOff.size > 0 || policyCutOff
+                    ? {
+                        providers_cut_off: [...cutOff.keys()].sort(),
+                        sessions_revoked: sessionsRevoked,
+                      }
                     : {}),
                   client_secrets_changed: [...secretWrites.keys()],
                   ...(providersTrustLowered.length > 0
@@ -1563,32 +1596,46 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
     },
 
     async unlinkIdentity(actor, userId, identityId, ip): Promise<void> {
+      const refuseAdministrator = (target: UserRecord): void => {
+        if (roleAtLeast(target.role, 'admin') && !roleAtLeast(actor.role, 'super_admin')) {
+          throw forbidden("Only a super admin can unlink an administrator's identity");
+        }
+      };
       const target = await store.users.findById(userId);
       if (!target) throw notFound('User', userId);
-      if (roleAtLeast(target.role, 'admin') && !roleAtLeast(actor.role, 'super_admin')) {
-        throw forbidden("Only a super admin can unlink an administrator's identity");
-      }
-      await store.transaction(async (tx) => {
-        const identity = await tx.userIdentities.findById(identityId);
-        if (!identity || identity.user_id !== userId) throw notFound('Identity', identityId);
-        if (!(await tx.userIdentities.delete(identity.id))) throw notFound('Identity', identityId);
-        // Sessions established through this identity must not outlive the
-        // link that authenticated them (#591): unlinking signs the account
-        // out everywhere, in the same transaction, like a password change.
-        const terminatedSessions = await tx.sessions.deleteForUser(userId);
-        await audit.forStore(tx).record(
-          { id: actor.id, role: actor.role },
-          AuditAction.AUTH_SSO_UNLINK,
-          { type: 'user', id: userId },
-          {
-            identity_id: identity.id,
-            provider_id: identity.provider_id,
-            subject: identity.subject,
-            terminated_sessions: terminatedSessions,
-          },
-          ip,
-        );
-      });
+      refuseAdministrator(target);
+      // A role change commits under the account's lifecycle key. Held here
+      // too, with the role re-read inside the transaction, a promotion to
+      // `admin` that landed after the read above is seen, and one that has
+      // not started waits for the unlink.
+      await locks(userLifecycleLockKey(userId), () =>
+        store.transaction(async (tx) => {
+          const current = await tx.users.findById(userId);
+          if (!current) throw notFound('User', userId);
+          refuseAdministrator(current);
+          const identity = await tx.userIdentities.findById(identityId);
+          if (!identity || identity.user_id !== userId) throw notFound('Identity', identityId);
+          if (!(await tx.userIdentities.delete(identity.id))) {
+            throw notFound('Identity', identityId);
+          }
+          // Sessions established through this identity must not outlive the
+          // link that authenticated them (#591): unlinking signs the account
+          // out everywhere, in the same transaction, like a password change.
+          const terminatedSessions = await tx.sessions.deleteForUser(userId);
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.AUTH_SSO_UNLINK,
+            { type: 'user', id: userId },
+            {
+              identity_id: identity.id,
+              provider_id: identity.provider_id,
+              subject: identity.subject,
+              terminated_sessions: terminatedSessions,
+            },
+            ip,
+          );
+        }),
+      );
     },
   };
 }

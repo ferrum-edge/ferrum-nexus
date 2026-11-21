@@ -163,22 +163,24 @@ export function accountRecoveryLockKey(userId: string): string {
 }
 
 /**
- * The per-provider **single sign-on** key: every OIDC callback that writes one
- * of the provider's links (a first-time link, a provisioned account), every
+ * The per-provider **single sign-on** key: every OIDC callback that commits a
+ * sign-in (returning, a first-time link, a provisioned account), every
  * deprovisioning, and every save of the single sign-on settings are taken
  * under it.
  *
  * A callback reads the provider before it spends seconds on the provider's
  * token endpoint, so it re-reads the provider inside the transaction that
- * commits. For a new link that re-read alone is a check-then-write across two
- * rows a removal also writes — the settings row and the provider's links — and
- * under READ COMMITTED a removal committing between the two would still lose
- * to a stale link. Holding this key across both the callback's transaction and
- * the settings save orders them: whichever commits second sees the other.
+ * commits. That re-read alone is a check-then-write across rows a save also
+ * writes — the settings row, the provider's links, the linked accounts'
+ * sessions — and under READ COMMITTED a save committing between the two would
+ * still lose to a stale link, or revoke sessions without the one the callback
+ * is about to insert. Holding this key across both the callback's transaction
+ * and the settings save orders them: whichever commits second sees the other.
  *
- * A returning sign-in does not take it. It writes nothing a save reads, so its
- * re-read orders it on its own, and taking the key would queue every sign-in
- * at the provider, deployment-wide, behind one lease.
+ * A callback holds it only around its commit transaction, never across the
+ * token exchange. For an existing account that includes waiting for the
+ * account's {@link userLifecycleLockKey}, taken inside it: sign-ins at one
+ * provider queue behind each other for one transaction plus that wait.
  *
  * Per provider rather than portal-wide, so sign-ins at different providers
  * never wait for each other. A settings save takes the key of every provider
