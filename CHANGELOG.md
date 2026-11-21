@@ -20,8 +20,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   removed.
   **A database created by `v0.5.2` or earlier is not migrated.** At startup,
   and in `npm run migrate`, Nexus reads `schema_migrations`. A pre-0.6
-  migration chain, or a base-schema fingerprint other than its own, makes it
-  exit non-zero without changing anything, with an error that says to start
+  migration chain, a base-schema fingerprint other than its own, or Nexus
+  tables with no record make it exit non-zero without changing the schema or
+  data, with an error that says to start
   against a new, empty database. Back up the old database (it is the rollback
   to `v0.5.2`), recreate it, deal with the old portal's resources in the Edge
   namespace, and register the first administrator again; see

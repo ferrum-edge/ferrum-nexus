@@ -208,10 +208,8 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
       const [rows] = await pool.query<mysql.RowDataPacket[]>(
         'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()',
       );
-      assert.deepEqual(
-        rows.map((row) => row.TABLE_NAME),
-        ['schema_migrations'],
-      );
+      // Refused before anything, the ledger included, was created.
+      assert.deepEqual(rows, []);
     });
   });
 

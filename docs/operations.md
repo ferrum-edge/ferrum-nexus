@@ -1090,13 +1090,16 @@ Procedure:
    setting listed above, and tell JWT clients to drop any `aud` claim.
 2. **Settle journals** as in step 2 of the v0.9.13 procedure, so that no
    conversion or restore spans the gateway upgrade.
-3. **Upgrade Edge to v0.9.20**, the control plane and every data plane together.
-4. **Upgrade Nexus** to the release that pins Edge v0.9.20 in
-   [`release/compatibility.env`](../release/compatibility.env), and check
-   `GET /api/health/edge` as an admin. That release (`v0.6.0`) needs a new,
-   empty database and cannot read an earlier one: follow
-   [moving to a new release](#moving-to-a-new-release), whose paired backup
-   also covers this Edge upgrade.
+3. **Stop Nexus and take the paired Nexus and Edge backup** before changing
+   Edge (step 2 of [moving to a new release](#moving-to-a-new-release)). The
+   release that pins Edge v0.9.20 (`v0.6.0`) needs a new, empty database and
+   cannot read an earlier one, so this backup is the way back to the previous
+   pair.
+4. **Upgrade Edge to v0.9.20**, the control plane and every data plane together.
+5. **Move Nexus** to the release that pins Edge v0.9.20 in
+   [`release/compatibility.env`](../release/compatibility.env), following
+   steps 4 to 6 of [moving to a new release](#moving-to-a-new-release), and
+   check `GET /api/health/edge` as an admin.
 
 Nexus `v0.5.2` is qualified against Edge v0.9.15 only and has not been tested
 against v0.9.20, so upgrade Nexus promptly after Edge. **Rolling back** Edge to
@@ -1465,9 +1468,9 @@ it, and later schema changes edit it directly. There are no migration files.
 **At startup** (`store.init()`, then `store.migrate()`, before the server
 listens) Nexus reads the `schema_migrations` table (a collection on MongoDB):
 
-- **Empty or missing:** a new database. Nexus creates the base schema and
-  records its fingerprint, `base_` followed by 16 hex digits, as the table's
-  only row.
+- **Empty or missing, and none of Nexus's tables exist:** a new database.
+  Nexus creates the ledger and the base schema and records its fingerprint,
+  `base_` followed by 16 hex digits, as the table's only row.
 - **Exactly this build's fingerprint:** the schema is current, so nothing
   happens.
 - **Only this build's claim** (`creating:base_…`): a first start of this
@@ -1501,28 +1504,43 @@ A release that leaves the schema unchanged keeps the fingerprint and opens the
 previous release's database as it is. Each release's notes say which applies.
 To see a database's fingerprint, run `SELECT id FROM schema_migrations`.
 
-The check refuses only what it can recognise. Never edit or empty
-`schema_migrations` to get past the refusal: with the ledger empty, Nexus would
-replay `CREATE TABLE IF NOT EXISTS` over the old tables and run against a schema
-it was not written for. Do not point an older release at a database a newer one
-created either. Releases before `v0.6.0` do not know the fingerprint and would
-try to replay their migrations over it.
+Never edit `schema_migrations` to get past the refusal. Emptying it does not
+help: Nexus then finds its tables with no record and refuses them. Writing this
+build's fingerprint or claim into it makes Nexus run against, or replay over,
+tables it did not create. Do not point an older release at a database a newer
+one created either. Releases before `v0.6.0` do not know the fingerprint and
+would try to replay their migrations over it.
+
+Only one start creates a schema in a given database. Each backend does the
+creation inside an exclusive section: a transaction-scoped advisory lock on
+PostgreSQL, an immediate transaction on SQLite, the `GET_LOCK` advisory lock
+on MySQL, and a claim on one fixed ledger key on MongoDB. It re-reads the
+ledger there before creating anything. Two instances of the same release
+starting on one empty database both come up. If two different releases start
+on one empty database at once, the first one creates its schema, and the other
+changes nothing and is refused.
 
 ### Moving to a new release
 
 When the release notes say the schema changed (until 1.0, check each release's
 notes), the new release needs a new, empty database:
 
-1. Read the release notes for the validated Ferrum Edge release.
+1. Read the release notes, including the Ferrum Edge release the new Nexus
+   release is validated against, and settle recovery journals (step 2 of
+   [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913)).
 2. Stop every Nexus instance, then **back up Nexus and Edge together**, as one
-   point in time, and record their secrets ([§5](#5-backup-and-restore)). This
-   paired backup is your only way back to the previous release: the new release
-   cannot read the Nexus half, and step 4 may change the Edge half.
-3. Create a new, empty database. For SQLite, delete (or move aside) the
+   point in time, before changing anything on either side, and record their
+   secrets ([§5](#5-backup-and-restore)). This paired backup, taken while both
+   still run the previous qualified pair, is your only way back: the new release
+   cannot read the Nexus half, and steps 3 and 5 can change the Edge half.
+3. If the new release pairs with a newer Edge release, upgrade Edge now, the
+   control plane and every data plane together, following that release's
+   upgrade section above.
+4. Create a new, empty database. For SQLite, delete (or move aside) the
    database file and its `-wal` and `-shm` files. For PostgreSQL, MySQL or
    MongoDB, drop and recreate the dedicated Nexus database, or point
    `NEXUS_DB_URL` at a new one.
-4. Deal with what the old portal created in Edge. Proxies, consumers,
+5. Deal with what the old portal created in Edge. Proxies, consumers,
    credentials and plugin configs in `FERRUM_NAMESPACE` stay in Edge, keep
    serving their callers, and are unknown to the new database. Either:
    - **remove them** from that namespace, which stops the old APIs and
@@ -1532,17 +1550,18 @@ notes), the new release needs a new, empty database:
      The old proxies and credentials keep working until you remove them or
      retire the data plane that serves the old namespace; nothing the new portal
      does touches them.
-5. Start the new release. It creates the schema, and the next registration
+6. Start the new release. It creates the schema, and the next registration
    becomes the founding `super_admin` (see
    [first run and the bootstrap token](#first-run-and-the-bootstrap-token)).
    Then re-create organizations, APIs and access.
 
-To roll back, stop the new release and restore the paired backup: the Nexus
-database into an empty database, and the Edge snapshot too if step 4 removed
-anything (credential material cannot be recovered any other way). Then start
-the previous release with the same secrets. If step 4 only added a namespace,
-restoring the Nexus database is enough, and the new namespace's resources can
-be removed.
+To roll back, stop the new release and restore the previous qualified pair from
+the paired backup: the Edge snapshot into the Edge release it came from, and
+the Nexus database into an empty database for the previous Nexus release, with
+the same secrets. Only when step 3 did not change the Edge release and step 5
+only added a namespace (the old namespace and its resources are intact) is
+restoring the Nexus database alone enough; then remove the new namespace's
+resources.
 
 ### Initializing the schema
 
@@ -1620,12 +1639,15 @@ NEXUS_DB_URL=mysql://nexus:secret@db.internal:3306/nexus
 MySQL DDL commits on its own, outside the schema ledger, so the base schema
 cannot be created in one transaction. Every statement in `base.mysql.sql` is a
 `CREATE TABLE IF NOT EXISTS` with its indexes and constraints inline, and
-Nexus refuses the file before running any of it if one is not. The ledger row
-is written only after every table exists. A start that stops part-way leaves
-the ledger empty, and the next start replays the file. Tables that already
-exist are skipped, so rows written in between are kept. A database-scoped
-advisory lock (`GET_LOCK`) serializes schema creation across instances, so
-instances starting together create the schema once.
+Nexus refuses the file before running any of it if one is not. Before the first
+`CREATE`, the ledger gets this release's claim, `creating:base_…`. After the
+last one, a single `UPDATE` replaces the claim with the fingerprint. A start
+that stops part-way leaves the claim, and the next start of the same release
+replays the file: tables that already exist are skipped, so rows written in
+between are kept. Do not delete the claim. Without it the existing tables have
+no record and are refused. A database-scoped advisory lock (`GET_LOCK`)
+serializes the check, the claim, the statements and the record across
+instances.
 
 ### MongoDB
 
@@ -1668,11 +1690,17 @@ transactions run their steps in order but without atomic commit, so a failure
 part-way (for example during an approval) leaves partial writes. Do not use it
 in production.
 
-Indexes are created by `migrate()` from `BASE_INDEXES`, and the list's
-fingerprint is recorded in `schema_migrations` like the SQL backends'. Collections
-are created by their first insert. `createIndex` is a no-op for an existing
-identical index, so a start interrupted before the ledger write finishes on the
-next start.
+Indexes are created by `migrate()` from `BASE_INDEXES`, and the schema's
+fingerprint (over that list and the SQLite base schema, which stands for the
+logical schema) is recorded in `schema_migrations` like the SQL backends'.
+Collections are created by their first insert. Index builds are not
+transactional, so a start first claims the fixed ledger key `creating` (the
+document names the schema being created), which every release contends on. It
+then builds the indexes, records the fingerprint and removes the claim.
+`createIndex` is a no-op for an existing identical index, so a later start of
+the same release finishes an interrupted one. A claim younger than 30 seconds
+belongs to a peer still at work, so the start waits for it. Do not delete the
+claim; without it the existing collections are refused.
 
 ### Transactions and contention retries
 

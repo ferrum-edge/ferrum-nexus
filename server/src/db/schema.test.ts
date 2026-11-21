@@ -19,6 +19,7 @@ import {
   schemaClaim,
   schemaFingerprint,
   SCHEMA_LEDGER_TABLE,
+  SchemaRaceError,
   type BaseSchema,
   type SchemaDriver,
 } from './schema.js';
@@ -54,6 +55,7 @@ function tables(db: ReturnType<typeof openSqliteDatabase>): string[] {
 }
 
 function ledger(db: ReturnType<typeof openSqliteDatabase>): string[] {
+  if (!tables(db).includes(SCHEMA_LEDGER_TABLE)) return [];
   return db
     .prepare(`SELECT id FROM ${SCHEMA_LEDGER_TABLE} ORDER BY id`)
     .all()
@@ -145,9 +147,9 @@ describe('ensureBaseSchema', () => {
         assert.ok(error.cause instanceof Error, 'the driver error is kept as the cause');
         return true;
       });
-      // SQLite creates the schema in one transaction: nothing is left behind.
-      assert.deepEqual(tables(db), [SCHEMA_LEDGER_TABLE]);
-      assert.deepEqual(ledger(db), []);
+      // SQLite creates the ledger and the schema in one transaction: nothing
+      // is left behind.
+      assert.deepEqual(tables(db), []);
     } finally {
       db.close();
     }
@@ -180,33 +182,104 @@ describe('ensureBaseSchema', () => {
         assert.match(error.message, NO_UPGRADE_PATH);
         return true;
       });
-      assert.deepEqual(tables(db), [SCHEMA_LEDGER_TABLE, 'users']);
-      assert.deepEqual(ledger(db), []);
+      // Not even the ledger table is created.
+      assert.deepEqual(tables(db), ['users']);
     } finally {
       db.close();
     }
   });
 
-  it("finishes this build's own interrupted creation, and refuses another build's", async () => {
+  it('refuses a claim on a driver that never writes one', async () => {
+    const db = openSqliteDatabase(':memory:');
+    try {
+      const schema = loadBaseSchema('sqlite');
+      db.exec(
+        `CREATE TABLE ${SCHEMA_LEDGER_TABLE} (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
+      );
+      db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} VALUES (?, 'now')`).run(schemaClaim(schema));
+      await assert.rejects(ensureBaseSchema(createSqliteSchemaDriver(db), schema), NO_UPGRADE_PATH);
+      assert.deepEqual(tables(db), [SCHEMA_LEDGER_TABLE]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('creates nothing when the ledger changed between the check and the creation', async () => {
+    const db = openSqliteDatabase(':memory:');
+    try {
+      const schema = loadBaseSchema('sqlite');
+      const driver = createSqliteSchemaDriver(db);
+      db.exec(
+        `CREATE TABLE ${SCHEMA_LEDGER_TABLE} (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
+      );
+      db.prepare(
+        `INSERT INTO ${SCHEMA_LEDGER_TABLE} VALUES ('base_0000000000000000', 'now')`,
+      ).run();
+      await assert.rejects(driver.createBaseSchema(schema, { resume: false }), SchemaRaceError);
+      assert.deepEqual(tables(db), [SCHEMA_LEDGER_TABLE]);
+      assert.deepEqual(ledger(db), ['base_0000000000000000']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('classifies again after losing the creation race', async () => {
     const schema = loadBaseSchema('sqlite');
-    for (const [claim, finishes] of [
-      [schemaClaim(schema), true],
-      [`creating:base_0000000000000000`, false],
+    for (const [winner, outcome] of [
+      [schema.id, 'accepted'],
+      ['base_0000000000000000', 'refused'],
     ] as const) {
-      const db = openSqliteDatabase(':memory:');
-      try {
-        const driver = createSqliteSchemaDriver(db);
-        await driver.ensureLedger();
-        db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} VALUES (?, 'now')`).run(claim);
-        if (finishes) {
-          assert.deepEqual(await ensureBaseSchema(driver, schema), { created: true });
-          assert.ok(tables(db).includes('access_gateway_jobs'));
-        } else {
-          await assert.rejects(ensureBaseSchema(driver, schema), NO_UPGRADE_PATH);
-          assert.deepEqual(ledger(db), [claim]);
-        }
-      } finally {
-        db.close();
+      let recorded: string[] = [];
+      const driver: SchemaDriver = {
+        writesClaims: false,
+        async listRecorded() {
+          return [...recorded];
+        },
+        async existingTables() {
+          return [];
+        },
+        async createBaseSchema() {
+          recorded = [winner];
+          throw new SchemaRaceError();
+        },
+      };
+      if (outcome === 'accepted') {
+        assert.deepEqual(await ensureBaseSchema(driver, schema), { created: false });
+      } else {
+        await assert.rejects(ensureBaseSchema(driver, schema), NO_UPGRADE_PATH);
+      }
+    }
+  });
+
+  it("resumes this build's own claim on a driver that writes claims, and refuses another's", async () => {
+    const schema = loadBaseSchema('sqlite');
+    const claim = schemaClaim(schema);
+    for (const [start, outcome] of [
+      [[claim], 'resumed'],
+      [[claim, schema.id], 'resumed'],
+      [['creating:base_0000000000000000'], 'refused'],
+    ] as const) {
+      let recorded: string[] = [...start];
+      const resumes: boolean[] = [];
+      const driver: SchemaDriver = {
+        writesClaims: true,
+        async listRecorded() {
+          return [...recorded];
+        },
+        async existingTables() {
+          return ['organizations'];
+        },
+        async createBaseSchema(_base, { resume }) {
+          resumes.push(resume);
+          recorded = [schema.id];
+        },
+      };
+      if (outcome === 'resumed') {
+        assert.deepEqual(await ensureBaseSchema(driver, schema), { created: true });
+        assert.deepEqual(resumes, [true]);
+      } else {
+        await assert.rejects(ensureBaseSchema(driver, schema), NO_UPGRADE_PATH);
+        assert.deepEqual(resumes, []);
       }
     }
   });
@@ -217,7 +290,7 @@ describe('ensureBaseSchema', () => {
       const recorded: string[] = [];
       let reads = 0;
       const driver: SchemaDriver = {
-        async ensureLedger() {},
+        writesClaims: false,
         async listRecorded() {
           reads += 1;
           // The peer finishes on the third read after this start failed.
@@ -244,7 +317,7 @@ describe('ensureBaseSchema', () => {
     const schema = loadBaseSchema('sqlite');
     const recorded: string[] = [];
     const driver: SchemaDriver = {
-      async ensureLedger() {},
+      writesClaims: false,
       async listRecorded() {
         return [...recorded];
       },
@@ -261,7 +334,7 @@ describe('ensureBaseSchema', () => {
   it('passes a NexusError from the driver through unchanged', async () => {
     const refusal = conflict('Another instance holds the lock');
     const driver: SchemaDriver = {
-      async ensureLedger() {},
+      writesClaims: false,
       async listRecorded() {
         return [];
       },

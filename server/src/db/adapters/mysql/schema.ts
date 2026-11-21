@@ -26,6 +26,7 @@ import {
   loadBaseSchema,
   schemaClaim,
   SCHEMA_LEDGER_TABLE,
+  SchemaRaceError,
   splitSqlStatements,
   type BaseSchema,
 } from '../../schema.js';
@@ -53,6 +54,35 @@ export function replayableStatements(schema: BaseSchema): string[] {
   return statements;
 }
 
+/** `ER_NO_SUCH_TABLE`: the ledger does not exist yet. */
+const NO_SUCH_TABLE = 1146;
+
+/** The ledger's ids, or none when there is no ledger yet. */
+async function readLedger(connection: mysql.PoolConnection): Promise<string[]> {
+  try {
+    const [recorded] = await connection.query<mysql.RowDataPacket[]>(
+      `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`,
+    );
+    return recorded.map((row) => String(row.id));
+  } catch (error) {
+    if ((error as { errno?: unknown }).errno === NO_SUCH_TABLE) return [];
+    throw error;
+  }
+}
+
+async function tablesPresent(
+  connection: mysql.PoolConnection,
+  schema: BaseSchema,
+): Promise<string[]> {
+  if (schema.tables.length === 0) return [];
+  const [tables] = await connection.query<mysql.RowDataPacket[]>(
+    `SELECT TABLE_NAME AS name FROM information_schema.TABLES
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (?)`,
+    [[...schema.tables]],
+  );
+  return tables.map((row) => String(row.name));
+}
+
 async function createBaseSchema(
   connection: mysql.PoolConnection,
   schema: BaseSchema,
@@ -60,13 +90,30 @@ async function createBaseSchema(
 ): Promise<void> {
   const statements = replayableStatements(schema);
   const claim = schemaClaim(schema);
-  if (!resume) {
+  await connection.query(`CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
+    id VARCHAR(191) NOT NULL, applied_at VARCHAR(32) NOT NULL, PRIMARY KEY (id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`);
+  // The advisory lock already makes this start the only creator; the
+  // re-read keeps the driver contract the other adapters follow.
+  const recorded = await readLedger(connection);
+  if (resume) {
+    if (!recorded.includes(claim) || recorded.some((id) => id !== claim && id !== schema.id)) {
+      throw new SchemaRaceError();
+    }
+  } else {
+    if (recorded.length > 0 || (await tablesPresent(connection, schema)).length > 0) {
+      throw new SchemaRaceError();
+    }
     await connection.execute(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`, [
       claim,
       nowIso(),
     ]);
   }
   for (const statement of statements) await connection.query(statement);
+  if (recorded.includes(schema.id)) {
+    await connection.execute(`DELETE FROM ${SCHEMA_LEDGER_TABLE} WHERE id = ?`, [claim]);
+    return;
+  }
   const [result] = await connection.execute<mysql.ResultSetHeader>(
     `UPDATE ${SCHEMA_LEDGER_TABLE} SET id = ?, applied_at = ? WHERE id = ?`,
     [schema.id, nowIso(), claim],
@@ -127,25 +174,9 @@ export async function ensureMysqlSchema(
     }
     await ensureBaseSchema(
       {
-        async ensureLedger() {
-          await connection.query(`CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
-          id VARCHAR(191) NOT NULL, applied_at VARCHAR(32) NOT NULL, PRIMARY KEY (id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`);
-        },
-        async listRecorded() {
-          const [recorded] = await connection.query<mysql.RowDataPacket[]>(
-            `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`,
-          );
-          return recorded.map((row) => String(row.id));
-        },
-        async existingTables(base) {
-          const [tables] = await connection.query<mysql.RowDataPacket[]>(
-            `SELECT TABLE_NAME AS name FROM information_schema.TABLES
-              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (?)`,
-            [[...base.tables]],
-          );
-          return tables.map((row) => String(row.name));
-        },
+        writesClaims: true,
+        listRecorded: () => readLedger(connection),
+        existingTables: (base) => tablesPresent(connection, base),
         createBaseSchema: (base, { resume }) => createBaseSchema(connection, base, resume),
       },
       schema,

@@ -64,7 +64,14 @@ import {
   type RequestContext,
 } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
-import { latestMessagesPipeline } from '../db/adapters/mongodb/index.js';
+import {
+  ensureMongoSchema,
+  latestMessagesPipeline,
+  mongoBaseSchema,
+} from '../db/adapters/mongodb/index.js';
+import { ensureMysqlSchema } from '../db/adapters/mysql/schema.js';
+import { createPostgresSchemaDriver } from '../db/adapters/postgres/index.js';
+import { ensureBaseSchema, loadBaseSchema, type BaseSchema } from '../db/schema.js';
 import { createStore } from '../db/index.js';
 import type {
   ApiSpecRecord,
@@ -6221,6 +6228,47 @@ async function olderMongo(baseUrl: string, ledger: string[] | null): Promise<Old
   };
 }
 
+/** A build with the same schema statements but another fingerprint. */
+const OTHER_BUILD = 'base_1111111111111111';
+
+/** Create `schema` in the database at `url` through the backend's own driver. */
+async function ensureWith(driver: DbDriver, url: string, schema: BaseSchema): Promise<void> {
+  if (driver === 'postgres') {
+    const pool = new pg.Pool({ connectionString: url });
+    try {
+      await ensureBaseSchema(createPostgresSchemaDriver(pool), schema);
+    } finally {
+      await pool.end();
+    }
+  } else if (driver === 'mysql') {
+    const pool = mysql.createPool(url);
+    try {
+      await ensureMysqlSchema(pool, schema);
+    } finally {
+      await pool.end();
+    }
+  } else {
+    const client = new MongoClient(url);
+    try {
+      await client.connect();
+      await ensureMongoSchema(client.db(), schema);
+    } finally {
+      await client.close();
+    }
+  }
+}
+
+/** This build's schema for `driver`, and the same schema under another fingerprint. */
+function competingBuilds(driver: DbDriver): [BaseSchema, BaseSchema] {
+  const current =
+    driver === 'postgres'
+      ? loadBaseSchema('pg')
+      : driver === 'mysql'
+        ? loadBaseSchema('mysql')
+        : mongoBaseSchema();
+  return [current, { ...current, id: OTHER_BUILD }];
+}
+
 function registerOlderSchemaRefusal(
   label: string,
   driver: DbDriver,
@@ -6277,6 +6325,29 @@ function registerOlderSchemaRefusal(
         if (driver !== 'mongodb') {
           assert.ok(tables.includes('access_gateway_jobs'), JSON.stringify(tables));
         }
+      } finally {
+        await empty.drop();
+      }
+    });
+
+    it('lets exactly one of two different builds create an empty database', async () => {
+      const empty = await makeOlder(url, null);
+      try {
+        const builds = competingBuilds(driver);
+        const outcomes = await Promise.allSettled(
+          builds.map((schema) => ensureWith(driver, empty.url, schema)),
+        );
+        const won = outcomes.flatMap((outcome, i) =>
+          outcome.status === 'fulfilled' ? [builds[i]!.id] : [],
+        );
+        assert.equal(won.length, 1, JSON.stringify(outcomes));
+        const lost = outcomes.find((outcome) => outcome.status === 'rejected');
+        assert.ok(lost && lost.status === 'rejected');
+        assert.match(String((lost.reason as Error).message), NO_UPGRADE_PATH);
+        // The loser left the winner's record alone, and the winner still opens it.
+        assert.deepEqual((await empty.inspect()).ledger, won);
+        const winner = builds.find((schema) => schema.id === won[0])!;
+        await ensureWith(driver, empty.url, winner);
       } finally {
         await empty.drop();
       }

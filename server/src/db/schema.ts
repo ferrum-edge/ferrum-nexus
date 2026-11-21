@@ -16,29 +16,33 @@
  * migration ids there, which is how {@link ensureBaseSchema} recognises it
  * and refuses it instead of creating tables over it.
  *
- * On every start:
+ * On every start, before anything reads the data:
  *
  * - a ledger holding exactly this build's fingerprint means the schema is
  *   current: do nothing;
- * - an empty ledger in a database that holds none of the schema's tables
- *   means a new database: create the base schema and record its fingerprint
- *   (atomically where the driver has transactional DDL);
- * - a ledger holding only this build's *claim* (`creating:<fingerprint>`)
- *   means a creation by this build stopped part-way, on a driver that cannot
- *   create the schema atomically: finish it;
+ * - an empty or missing ledger in a database that holds none of the schema's
+ *   tables means a new database: create the base schema and record its
+ *   fingerprint;
+ * - on a driver that cannot create the schema in one transaction (MySQL,
+ *   MongoDB), a ledger holding this build's *claim* (`creating:<fingerprint>`)
+ *   means a creation by this build stopped part-way: finish it;
  * - anything else — an earlier release's migration ids, the fingerprint or
  *   claim of a base schema this build does not have, or the schema's tables
- *   with no record at all — fails fast before any service touches the data,
- *   leaving the schema and data as they were.
+ *   with no record at all — fails fast, leaving the schema and data as they
+ *   were.
+ *
+ * Creation has a single winner per database. Each driver creates the schema
+ * inside an exclusive section (a transaction-scoped advisory lock, an
+ * immediate SQLite transaction, the MySQL advisory lock, or a MongoDB claim on
+ * one fixed ledger key) and re-reads the ledger there before any DDL. A start
+ * that finds another start got there first changes nothing and classifies the
+ * database again: the same build's schema is accepted, any other is refused.
  *
  * Because the fingerprint is computed from the schema's statements, editing
  * the base schema changes it, so a database created before the edit is
  * refused rather than run against tables that no longer match the code.
  * Comments and runs of whitespace outside quoted literals are not part of the
  * fingerprint.
- *
- * Two instances starting on one empty database at once both succeed: the
- * loser of the creation race finds the winner's record and accepts it.
  */
 
 import { createHash } from 'node:crypto';
@@ -69,42 +73,56 @@ export interface BaseSchema {
   tables: readonly string[];
 }
 
-/** The ledger row a non-atomic driver writes before its first DDL. */
+/** The ledger entry a non-atomic driver holds while it creates the schema. */
 export function schemaClaim(schema: BaseSchema): string {
   return `creating:${schema.id}`;
 }
 
 /** The primitives an adapter provides to {@link ensureBaseSchema}. */
 export interface SchemaDriver {
-  /** Create the ledger table if it does not exist. Must be idempotent. */
-  ensureLedger(): Promise<void>;
-  /** Ids recorded in the ledger, in any order. */
+  /**
+   * Whether the driver writes {@link schemaClaim} entries (it cannot create
+   * the schema in one transaction). Only such a driver may resume one.
+   */
+  readonly writesClaims: boolean;
+  /** Entries in the ledger, in any order; empty when there is no ledger. */
   listRecorded(): Promise<string[]>;
   /** Which of `schema.tables` already exist in the database. */
   existingTables(schema: BaseSchema): Promise<string[]>;
   /**
-   * Create the base schema **and** record its id. A driver with
-   * transactional DDL does both atomically. One without writes
-   * {@link schemaClaim} before its first DDL, makes every statement
-   * replayable, and replaces the claim with the id last; with
-   * `resume: true` the claim is already there and the schema is replayed.
-   * A driver that finds a peer of this build already creating the schema
-   * throws {@link SchemaBusyError}.
+   * Create the ledger (if missing) and the base schema, and record the
+   * schema's id, inside an exclusive section. Before any DDL, re-read the
+   * ledger there and require it to be empty, with none of `schema.tables`
+   * present (or, with `resume: true`, to hold only this build's claim and
+   * possibly its id); otherwise change nothing and throw
+   * {@link SchemaRaceError}. A driver with transactional DDL does all of it
+   * atomically. One without writes the claim before its first DDL, makes
+   * every statement replayable, and publishes the id last. A driver that
+   * finds a peer of this build already creating the schema throws
+   * {@link SchemaBusyError}.
    */
   createBaseSchema(schema: BaseSchema, options: { resume: boolean }): Promise<void>;
 }
 
 /** Thrown by a driver when another instance is creating the same schema. */
 export class SchemaBusyError extends Error {
-  constructor(message = 'Another instance is creating the base schema') {
-    super(message);
+  constructor(message = 'Another instance is creating the base schema', options?: ErrorOptions) {
+    super(message, options);
     this.name = 'SchemaBusyError';
+  }
+}
+
+/** Thrown by a driver whose exclusive re-read found the database changed. */
+export class SchemaRaceError extends Error {
+  constructor(message = 'The database changed while the base schema was being created') {
+    super(message);
+    this.name = 'SchemaRaceError';
   }
 }
 
 /** What {@link ensureBaseSchema} did. */
 export interface SchemaResult {
-  /** `true` when this call created the schema in an empty database. */
+  /** `true` when this call created (or finished creating) the schema. */
   created: boolean;
 }
 
@@ -121,13 +139,45 @@ export const SCHEMA_POLICY_DOC = 'docs/operations.md, "Schema and upgrades befor
 
 const DEFAULT_PEER_WAIT_MS = 60_000;
 const DEFAULT_POLL_MS = 250;
+/** Re-classifications after a lost race; the second one normally decides. */
+const MAX_RACES = 3;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The ledger shows `schema` created: its id, and at most its own leftover claim. */
+/** The ledger records exactly `schema`. */
 function isCurrent(recorded: readonly string[], schema: BaseSchema): boolean {
+  return recorded.length === 1 && recorded[0] === schema.id;
+}
+
+/**
+ * The ledger shows this build's own interrupted creation: its claim, and at
+ * most its id (published just before the claim could be removed).
+ */
+function isResumable(
+  recorded: readonly string[],
+  schema: BaseSchema,
+  driver: SchemaDriver,
+): boolean {
   const claim = schemaClaim(schema);
-  return recorded.includes(schema.id) && recorded.every((id) => id === schema.id || id === claim);
+  return (
+    driver.writesClaims &&
+    recorded.includes(claim) &&
+    recorded.every((id) => id === claim || id === schema.id)
+  );
+}
+
+/** What to do with the database as it is now; a refusal throws. */
+async function classify(
+  driver: SchemaDriver,
+  schema: BaseSchema,
+): Promise<'current' | { resume: boolean }> {
+  const recorded = await driver.listRecorded();
+  if (isCurrent(recorded, schema)) return 'current';
+  if (isResumable(recorded, schema, driver)) return { resume: true };
+  if (recorded.length > 0) throw olderSchemaError(recorded, schema);
+  const existing = await driver.existingTables(schema);
+  if (existing.length > 0) throw unrecordedSchemaError(existing, schema);
+  return { resume: false };
 }
 
 /**
@@ -141,50 +191,29 @@ export async function ensureBaseSchema(
   schema: BaseSchema,
   options: SchemaWaitOptions = {},
 ): Promise<SchemaResult> {
-  try {
-    await driver.ensureLedger();
-  } catch {
-    // Two first starts can race to create the ledger table itself (PostgreSQL
-    // reports the loser's duplicate catalog row); the second try finds it.
-    await sleep(options.pollMs ?? DEFAULT_POLL_MS);
-    await driver.ensureLedger();
-  }
-  let recorded = await driver.listRecorded();
-  if (isCurrent(recorded, schema)) return { created: false };
-  const claim = schemaClaim(schema);
-  let resume = recorded.length === 1 && recorded[0] === claim;
-  if (recorded.length > 0 && !resume) throw olderSchemaError(recorded, schema);
-
-  if (!resume) {
-    const existing = await driver.existingTables(schema);
-    if (existing.length > 0) {
-      // A peer of this build may have created (or be creating) the schema
-      // since the ledger was read: its tables and its record or claim land
-      // before this second read.
-      recorded = await driver.listRecorded();
-      if (isCurrent(recorded, schema)) return { created: false };
-      if (recorded.length === 1 && recorded[0] === claim) resume = true;
-      else if (recorded.length > 0) throw olderSchemaError(recorded, schema);
-      else throw unrecordedSchemaError(existing, schema);
+  for (let races = 0; ; races += 1) {
+    const state = await classify(driver, schema);
+    if (state === 'current') return { created: false };
+    try {
+      await driver.createBaseSchema(schema, state);
+    } catch (error) {
+      // Another start got there first and this one changed nothing: look again.
+      if (error instanceof SchemaRaceError && races < MAX_RACES) continue;
+      if (await peerCreated(driver, schema, error, options)) return { created: false };
+      // A peer that stopped mid-creation leaves its claim; look again and
+      // resume it.
+      if (error instanceof SchemaBusyError && races < MAX_RACES) continue;
+      throw schemaFailure(schema, error);
     }
+    const recorded = await driver.listRecorded();
+    if (!isCurrent(recorded, schema)) throw olderSchemaError(recorded, schema);
+    return { created: true };
   }
-
-  try {
-    await driver.createBaseSchema(schema, { resume });
-  } catch (error) {
-    if (await peerCreated(driver, schema, error, options)) return { created: false };
-    throw schemaFailure(schema, error);
-  }
-  // A different build creating its own schema on the same empty database at
-  // the same moment would leave two records; refuse rather than run on it.
-  recorded = await driver.listRecorded();
-  if (!isCurrent(recorded, schema)) throw olderSchemaError(recorded, schema);
-  return { created: true };
 }
 
 /**
- * Whether a failed creation lost a race to a peer that created this schema.
- * A {@link SchemaBusyError} means the peer is still at it, so wait for its
+ * Whether a failed creation lost to a peer that created this schema. A
+ * {@link SchemaBusyError} means the peer is still at it, so wait for its
  * record; any other failure is a peer's only if its record is already there.
  */
 async function peerCreated(
@@ -197,12 +226,11 @@ async function peerCreated(
   if (isCurrent(await read(), schema)) return true;
   if (!(error instanceof SchemaBusyError)) return false;
   const deadline = Date.now() + (options.peerWaitMs ?? DEFAULT_PEER_WAIT_MS);
-  const claim = schemaClaim(schema);
   while (Date.now() < deadline) {
     await sleep(options.pollMs ?? DEFAULT_POLL_MS);
     const recorded = await read();
     if (isCurrent(recorded, schema)) return true;
-    if (!recorded.every((id) => id === claim)) return false;
+    if (!isResumable(recorded, schema, driver)) return false;
   }
   return false;
 }

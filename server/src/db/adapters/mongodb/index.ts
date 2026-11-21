@@ -111,9 +111,9 @@ import {
   ensureBaseSchema,
   loadBaseSchema,
   SchemaBusyError,
-  schemaClaim,
   SCHEMA_LEDGER_TABLE,
   schemaFingerprint,
+  SchemaRaceError,
   type BaseSchema,
   type SchemaDriver,
   type SchemaWaitOptions,
@@ -1530,14 +1530,28 @@ export function latestMessagesPipeline(threadIds: readonly string[]): Document[]
   ];
 }
 
+/** The one ledger key every build's claim contends on. */
+const CLAIM_ID = 'creating';
+/** A claim younger than this is a peer still at work, not an interrupted start. */
+const FRESH_CLAIM_MS = 30_000;
+/**
+ * Index-build errors another builder running at the same moment can cause:
+ * IndexBuildAlreadyInProgress, BackgroundOperationInProgressForNamespace and
+ * ForDatabase, WriteConflict, NamespaceExists, IndexBuildAborted.
+ */
+const CONCURRENT_INDEX_ERRORS = new Set([276, 12587, 12586, 112, 48, 11602]);
+
 /**
  * Create the base schema in an empty database, accept one already at it, and
  * refuse any other, under the same protocol as the SQL adapters. Index builds
- * are not transactional, so the ledger first gets this build's claim, then
- * the indexes are created (`createIndex` is a no-op for an identical index),
- * then the fingerprint is recorded and the claim removed. A start interrupted
- * part-way leaves the claim and the next start finishes; a peer of the same
- * build that loses the race to insert the claim waits for the winner.
+ * are not transactional, so a start first claims the fixed ledger key
+ * `creating` (recording which schema it is creating), which every build
+ * contends on: one creator at a time. It then checks that nobody finished in
+ * the meantime, creates the indexes (`createIndex` is a no-op for an
+ * identical index), records the fingerprint and removes the claim. A start
+ * interrupted part-way leaves the claim, and a later start of the same build
+ * finishes the job; a claim younger than {@link FRESH_CLAIM_MS} belongs to a
+ * peer still at work, so a start waits for it instead.
  */
 export async function ensureMongoSchema(
   db: Db,
@@ -1546,47 +1560,62 @@ export async function ensureMongoSchema(
   options: SchemaWaitOptions = {},
 ): Promise<void> {
   const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE);
+  const existing = async (base: BaseSchema): Promise<string[]> => {
+    const names = new Set(base.tables);
+    const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+    return collections.map((collection) => collection.name).filter((name) => names.has(name));
+  };
+  const claimDoc = async (): Promise<Row | null> =>
+    (await ledger.findOne({ _id: CLAIM_ID })) as Row | null;
   const driver: SchemaDriver = {
-    ensureLedger: async (): Promise<void> => {
-      // `_id` is the schema id, so the implicit unique index is all the
-      // bookkeeping this needs; the collection is created on first insert.
-    },
+    writesClaims: true,
     listRecorded: async (): Promise<string[]> => {
-      const docs = await ledger.find({}).toArray();
-      return docs.map((doc) => str((doc as Row)._id));
+      const docs = (await ledger.find({}).toArray()) as Row[];
+      return docs.map((doc) =>
+        str(doc._id) === CLAIM_ID ? `${CLAIM_ID}:${str(doc.schema)}` : str(doc._id),
+      );
     },
-    existingTables: async (base: BaseSchema): Promise<string[]> => {
-      const names = new Set(base.tables);
-      const collections = await db.listCollections({}, { nameOnly: true }).toArray();
-      return collections.map((collection) => collection.name).filter((name) => names.has(name));
-    },
+    existingTables: existing,
     createBaseSchema: async (base: BaseSchema, { resume }): Promise<void> => {
-      const claim = schemaClaim(base);
-      if (!resume) {
+      if (resume) {
+        const claim = await claimDoc();
+        if (!claim || str(claim.schema) !== base.id) throw new SchemaRaceError();
+        if (Date.now() - Date.parse(str(claim.applied_at)) < FRESH_CLAIM_MS) {
+          throw new SchemaBusyError();
+        }
+      } else {
         try {
-          await ledger.insertOne({ _id: claim, applied_at: nowIso() });
+          await ledger.insertOne({ _id: CLAIM_ID, schema: base.id, applied_at: nowIso() });
         } catch (error) {
-          if ((error as { code?: unknown }).code === 11000) throw new SchemaBusyError();
-          throw error;
+          if ((error as { code?: unknown }).code !== 11000) throw error;
+          const claim = await claimDoc();
+          if (claim && str(claim.schema) === base.id) throw new SchemaBusyError();
+          throw new SchemaRaceError();
+        }
+        // A start that classified the database before another finished must
+        // not build over it: give the claim back and look again.
+        const finished = await ledger.countDocuments({ _id: { $ne: CLAIM_ID } });
+        if (finished > 0 || (await existing(base)).length > 0) {
+          await ledger.deleteOne({ _id: CLAIM_ID, schema: base.id });
+          throw new SchemaRaceError();
         }
       }
       try {
         await createIndexes(db, indexes);
       } catch (error) {
-        // Resuming may mean a peer of this build is building the same indexes
-        // right now; let the caller wait for its record before failing.
-        if (resume)
-          throw new SchemaBusyError(`Index creation failed while resuming: ${String(error)}`);
+        const code = (error as { code?: unknown }).code;
+        if (typeof code === 'number' && CONCURRENT_INDEX_ERRORS.has(code)) {
+          throw new SchemaBusyError('A concurrent index build interfered', { cause: error });
+        }
         throw error;
       }
       try {
         await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
       } catch (error) {
-        // A resuming peer recorded it first; the ledger check that follows
-        // decides.
+        // Already published by an earlier, interrupted run of this build.
         if ((error as { code?: unknown }).code !== 11000) throw error;
       }
-      await ledger.deleteOne({ _id: claim });
+      await ledger.deleteOne({ _id: CLAIM_ID, schema: base.id });
     },
   };
   await ensureBaseSchema(driver, schema, options);
