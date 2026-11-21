@@ -92,7 +92,9 @@ describe('base schema', () => {
       assert.deepEqual(db.prepare('SELECT agents_json FROM apis').get(), { agents_json: null });
       assert.deepEqual(
         db
-          .prepare('SELECT requested_tools_json, approved_tools_json, grant_id FROM access_requests')
+          .prepare(
+            'SELECT requested_tools_json, approved_tools_json, grant_id FROM access_requests',
+          )
           .get(),
         { requested_tools_json: null, approved_tools_json: null, grant_id: null },
       );

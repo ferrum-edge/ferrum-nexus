@@ -4152,7 +4152,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 /**
  * Everything a concrete SQL adapter must supply. `postgres/index.ts` and
  * `mysql/index.ts` implement exactly this and nothing else — connection setup,
- * migration application, and the driver's native transaction primitive.
+ * base-schema creation, and the driver's native transaction primitive.
  */
 export interface SqlStoreBackend {
   /** Reported as {@link NexusStore.driver}. */

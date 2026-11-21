@@ -138,7 +138,6 @@ async function restartAndVerify(pool: mysql.Pool, url: string, expected: string[
   }
 }
 
-
 /** Drop every table, leaving the fixture database empty. */
 async function resetDatabase(pool: mysql.Pool): Promise<void> {
   const [tables] = await pool.query<mysql.RowDataPacket[]>(
@@ -213,7 +212,7 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
 
   it('caps schema metadata waits and restores successful sessions', async () => {
     await fixture(async (pool, url) => {
-      const migrator = mysql.createPool({ uri: url, connectionLimit: 1 });
+      const creator = mysql.createPool({ uri: url, connectionLimit: 1 });
       const operations = [
         'CREATE TABLE',
         'SELECT id FROM schema_migrations',
@@ -224,9 +223,9 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
         for (const [round, original] of [123, 1].entries()) {
           // Each round starts from an empty database, so both create the schema.
           if (round > 0) await resetDatabase(pool);
-          await migrator.query('SET SESSION lock_wait_timeout = ?', [original]);
-          const before = await sessionState(migrator);
-          const checked = intercept(migrator, async (_method, sql, _params, after, connection) => {
+          await creator.query('SET SESSION lock_wait_timeout = ?', [original]);
+          const before = await sessionState(creator);
+          const checked = intercept(creator, async (_method, sql, _params, after, connection) => {
             const operation = operations.find((prefix) => sql.startsWith(prefix));
             if (after || !operation) return;
             const [settings] = await connection.query<mysql.RowDataPacket[]>(
@@ -236,30 +235,30 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
             observed.add(operation);
           });
           await ensureMysqlSchema(checked);
-          assert.deepEqual(await sessionState(migrator), before);
+          assert.deepEqual(await sessionState(creator), before);
           await assertSchemaLockAvailable(pool, url);
         }
         for (const operation of operations) assert.ok(observed.has(operation), operation);
         for (const invalid of [0, 31, 1.5]) {
           await assert.rejects(
-            () => ensureMysqlSchema(migrator, base, { lockWaitTimeoutSeconds: invalid }),
+            () => ensureMysqlSchema(creator, base, { lockWaitTimeoutSeconds: invalid }),
             RangeError,
           );
         }
       } finally {
-        await migrator.end();
+        await creator.end();
       }
     });
   });
 
   it('restores the session when the timeout SET acknowledgement is lost', async () => {
     await fixture(async (pool, url) => {
-      const migrator = mysql.createPool({ uri: url, connectionLimit: 1 });
+      const creator = mysql.createPool({ uri: url, connectionLimit: 1 });
       try {
-        await migrator.query('SET SESSION lock_wait_timeout = 123');
-        const before = await sessionState(migrator);
+        await creator.query('SET SESSION lock_wait_timeout = 123');
+        const before = await sessionState(creator);
         let fired = false;
-        const faulty = intercept(migrator, (method, sql, params, after) => {
+        const faulty = intercept(creator, (method, sql, params, after) => {
           if (
             !fired &&
             method === 'query' &&
@@ -274,14 +273,14 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
         });
         await assert.rejects(() => ensureMysqlSchema(faulty), INTERRUPTION);
         assert.ok(fired);
-        assert.deepEqual(await sessionState(migrator), before);
+        assert.deepEqual(await sessionState(creator), before);
         const [tables] = await pool.query<mysql.RowDataPacket[]>(
           'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()',
         );
         assert.equal(tables.length, 0);
-        await ensureMysqlSchema(migrator);
+        await ensureMysqlSchema(creator);
       } finally {
-        await migrator.end();
+        await creator.end();
       }
     });
   });
@@ -290,14 +289,14 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
     for (const cleanup of ['restore', 'release']) {
       for (const after of [false, true]) {
         await fixture(async (pool, url) => {
-          const migrator = mysql.createPool({ uri: url, connectionLimit: 1 });
+          const creator = mysql.createPool({ uri: url, connectionLimit: 1 });
           try {
-            await migrator.query('SET SESSION lock_wait_timeout = 123');
-            const before = await sessionState(migrator);
+            await creator.query('SET SESSION lock_wait_timeout = 123');
+            const before = await sessionState(creator);
             const aborted = new Error(interruption);
             aborted.name = 'AbortError';
             let fired = false;
-            const faulty = intercept(migrator, (method, sql, params, completed) => {
+            const faulty = intercept(creator, (method, sql, params, completed) => {
               if (
                 method === 'query' &&
                 !completed &&
@@ -321,7 +320,7 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
               (error: unknown) => error instanceof Error && error.cause === aborted,
             );
             assert.ok(fired, `${cleanup}: ${after ? 'lost acknowledgement' : 'before write'}`);
-            const replacement = await sessionState(migrator);
+            const replacement = await sessionState(creator);
             assert.notEqual(replacement.id, before.id, 'the uncertain session was discarded');
             const [settings] = await pool.query<mysql.RowDataPacket[]>(
               'SELECT @@GLOBAL.lock_wait_timeout AS lock_wait_timeout',
@@ -330,9 +329,9 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
             await assertSchemaLockAvailable(pool, url);
             const [ledgerAfter] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
             assert.deepEqual(ledgerAfter, [], 'nothing was recorded');
-            await ensureMysqlSchema(migrator);
+            await ensureMysqlSchema(creator);
           } finally {
-            await migrator.end();
+            await creator.end();
           }
         });
       }

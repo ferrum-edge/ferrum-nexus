@@ -1895,7 +1895,7 @@ export interface AccessGatewayJobRepo {
    * `pending`, due at `now`, `attempts = 0`. An existing row — owned by a live
    * decision or already queued — is left exactly as it is. Resolves to
    * whether this call inserted the row. Used by the one-time repair that
-   * queues gateway work decisions made before migration `015` stranded.
+   * queues gateway work that decisions made before `access_gateway_jobs` stranded.
    */
   enqueueIfAbsent(input: AccessGatewayJobInput, now: IsoTimestamp): Promise<boolean>;
   findBySubject(subjectId: Uuid): Promise<AccessGatewayJobRecord | null>;

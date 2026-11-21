@@ -1,6 +1,8 @@
 /**
- * The one-time repair of gateway work stranded before migration `015`
- * (issue #651).
+ * The one-time repair of gateway work stranded before `access_gateway_jobs`
+ * existed (issue #651). Since v0.6.0 a database an earlier release created is
+ * refused rather than upgraded, so on a database created at the base schema
+ * this finds nothing; it still runs once.
  *
  * `access_gateway_jobs` records the gateway half of every decision made from
  * now on, but a database upgraded from an earlier release may already hold
@@ -116,7 +118,7 @@ function identityKey(row: Pick<GrantRecord, 'api_id' | 'user_id' | 'application_
   return JSON.stringify([row.api_id, row.user_id, row.application_id]);
 }
 
-/** Queue the gateway work stranded before migration `015`, once. */
+/** Queue the gateway work stranded before `access_gateway_jobs`, once. */
 export async function queueStrandedAccessRepairs(
   deps: StrandedRepairDeps,
 ): Promise<StrandedRepairResult> {

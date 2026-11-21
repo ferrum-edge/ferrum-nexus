@@ -6076,7 +6076,9 @@ async function olderPostgres(adminUrl: string, ledger: string[]): Promise<OlderD
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {
-    await client.query('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)');
+    await client.query(
+      'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
+    );
     await client.query('CREATE TABLE users (id TEXT PRIMARY KEY)');
     for (const id of ledger) {
       await client.query("INSERT INTO schema_migrations VALUES ($1, 'then')", [id]);
@@ -6168,7 +6170,9 @@ async function olderMongo(baseUrl: string, ledger: string[]): Promise<OlderDatab
     const db = client.db(database);
     await db.collection('users').insertOne({ _id: 'older' } as Document);
     for (const id of ledger) {
-      await db.collection('schema_migrations').insertOne({ _id: id, applied_at: 'then' } as Document);
+      await db
+        .collection('schema_migrations')
+        .insertOne({ _id: id, applied_at: 'then' } as Document);
     }
   } finally {
     await client.close();

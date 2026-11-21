@@ -1085,8 +1085,9 @@ export async function buildServer(
   if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
   if (deps.startAccountRecoveryWorker ?? config.env !== 'test') recovery.start();
   if (deps.startAccessGatewayWorker ?? config.env !== 'test') {
-    // Once per database, after migration `015`: queue the gateway work that
-    // decisions made by an earlier release may have stranded (issue #651).
+    // Once per database: queue the gateway work that decisions made by a
+    // release before `access_gateway_jobs` may have stranded (issue #651). A
+    // database created at the base schema has none, so this finds nothing.
     // In the background, so a large history never delays serving; a run that
     // fails is retried by the next start.
     void queueStrandedAccessRepairs({
