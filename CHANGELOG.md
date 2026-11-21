@@ -6,11 +6,27 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-21
+
+Paired with Ferrum Edge `v0.9.20`
+([release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.20)), which
+includes Edge `v0.9.17`'s fixes for the published QUIC advisories affecting `v0.9.15`
+and the stricter configuration and traffic admission of `v0.9.19` and `v0.9.20`.
+**Breaking: Ferrum Nexus is in buildout, and no upgrade paths will be designed
+until 1.0.** Every earlier migration is folded into one base schema per backend,
+and a database created by `v0.5.2` or earlier is refused at startup rather than
+migrated: `v0.6.0` needs a new, empty database. Also in this release: grant
+revocations and access approvals whose gateway half was interrupted are finished by
+a durable worker, credential deletes are conditioned on the Edge read they were
+decided from, and several Nexus security fixes. See
+[`docs/release-notes.md`](docs/release-notes.md) for the supported combination and
+how to move from `v0.5.2`.
+
 ### Breaking
 
 - **One base schema, and no upgrade path before 1.0.** Ferrum Nexus is in
   buildout, and no upgrade paths will be designed until 1.0. Every migration,
-  `001_initial` through `015_access_gateway_jobs` (including the unreleased
+  `001_initial` through `015_access_gateway_jobs` (including the never separately released
   `014_mysql_text_capacity` and `015_access_gateway_jobs`), is folded into a
   single base schema per backend: `server/src/db/schema/base.sql`,
   `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in the MongoDB adapter.

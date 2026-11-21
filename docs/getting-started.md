@@ -3,11 +3,10 @@
 This walkthrough takes you from an empty machine to a client calling a
 published API through the gateway, with a credential the portal issued.
 
-It targets Ferrum Nexus `v0.5.2` with Ferrum Edge `v0.9.15`, the supported pair
-in the [release notes](release-notes.md). From `v0.6.0` there is no upgrade
-path before 1.0: a database created by `v0.5.2` or earlier, or at a different
-base schema generation, is refused at startup
-and must be recreated (see
+It targets Ferrum Nexus `v0.6.0` with Ferrum Edge `v0.9.20`, the supported pair
+in the [release notes](release-notes.md). There is no upgrade path before 1.0:
+a database created by `v0.5.2` or earlier, or at a different base schema
+generation, is refused at startup and must be recreated (see
 [schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10)).
 Start this walkthrough with a new database.
 
@@ -58,7 +57,7 @@ exact Edge image this release was tested with, the same one the
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
-git checkout --detach v0.5.2
+git checkout --detach v0.6.0
 set -a
 . ./release/compatibility.env
 set +a

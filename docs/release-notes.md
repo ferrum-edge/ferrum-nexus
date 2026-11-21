@@ -1,56 +1,52 @@
-# Ferrum Nexus v0.5.2 — release notes
+# Ferrum Nexus v0.6.0 — release notes
 
-**Released 2026-10-08.** Paired with Ferrum Edge `v0.9.15`, a security release. The
-pair is recorded in [`release/compatibility.env`](../release/compatibility.env), which
-the README quickstart, the Compose example, the getting-started walkthrough and the
-real-stack `acceptance` CI job all read, so every one of them runs the same gateway
-build. `v0.5.2` ships that pairing: Edge `v0.9.15` fixes 26 published Ferrum Edge
-security advisories (see the
-[Edge security advisories](https://github.com/ferrum-edge/ferrum-edge/security/advisories);
-the Security section of the Edge `v0.9.15`
-[changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/CHANGELOG.md)
-describes the fixes), and
-**operators should upgrade Edge to `v0.9.15` for those fixes.** Nexus itself adds no
-migration, so a `v0.5.1` database opens unchanged, and the gateway's database opens in
-place. **Read the [upgrade](#upgrading-from-v051) before starting:** it upgrades Edge,
-and Edge `v0.9.15` reserves a header name and refuses some gRPC, WebSocket and MCP
-traffic that `v0.9.14` served. The full list of changes is in the
-[changelog](../CHANGELOG.md#052---2026-10-08).
+**Released 2026-11-21.** Paired with Ferrum Edge `v0.9.20`. The pair is recorded in
+[`release/compatibility.env`](../release/compatibility.env), which the README
+quickstart, the Compose example, the getting-started walkthrough and the real-stack
+`acceptance` CI job all read, so every one of them runs the same gateway build.
+
+> **Breaking: one base schema, and no upgrade path before 1.0.** Ferrum Nexus is in
+> buildout, and no upgrade paths will be designed until 1.0. `v0.6.0` folds every
+> earlier migration (`001_initial` through `015_access_gateway_jobs`) into a single
+> base schema per backend, and **a database created by `v0.5.2` or earlier is not
+> migrated**: Nexus refuses to start against it, changes nothing, and tells you to
+> start against a new, empty database. Read
+> [moving from v0.5.2](#moving-from-v052) before you start `v0.6.0` anywhere that
+> keeps data.
+
+The full list of changes is in the [changelog](../CHANGELOG.md#060---2026-11-21).
 
 ## Supported combination
 
 | Component      | Version                                | Pinned as                                                                                                |
 | -------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Ferrum Nexus   | `v0.5.2`                               | Git tag `v0.5.2`; build `docker/Dockerfile` from that checkout                                           |
-| Ferrum Edge    | `v0.9.15`                              | `ferrumedge/ferrum-edge:v0.9.15@sha256:29b468dfeea13b1ecaac8dfbc7e019f310e71e647611d43800a1dc64436eaca3` |
-| Node.js        | `^22.22.2 \|\| ^24.15.0 \|\| >=26.0.0` | Source installs; the image uses a digest-pinned Node 22 base (22.23.3)                                   |
-| Nexus database | PostgreSQL 17 (Compose sample)         | Also supported: SQLite, MySQL, MongoDB replica set — see [schema and upgrades](#schema-and-upgrades)     |
+| Ferrum Nexus   | `v0.6.0`                               | Git tag `v0.6.0`; build `docker/Dockerfile` from that checkout                                           |
+| Ferrum Edge    | `v0.9.20`                              | `ferrumedge/ferrum-edge:v0.9.20@sha256:32a0b0574bb2ed105d315888fab12e33242e1cec3ae9f1ae34c1fb4d0c9a2689` |
+| Node.js        | `^22.22.2 \|\| ^24.15.0 \|\| >=26.0.0` | Source installs; the image uses a digest-pinned Node 22 base (22.23.5)                                   |
+| Nexus database | PostgreSQL 17 (Compose sample)         | Also supported: SQLite, MySQL, MongoDB replica set — see [schema](#schema-no-upgrade-path-before-10)     |
 
-- **Ferrum Edge `v0.9.15`** is the
-  [published release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15)
-  (tag commit `25b37395ff61bfea0f3ffd189d9011c4984fa755`). The digest above is the
-  multi-architecture image index; it resolves to
-  `sha256:0404dc6d70d67abb70feea4e5aa295fdb1c19a0968900f467fc4b908528d19d1` on
+- **Ferrum Edge `v0.9.20`** is the
+  [published release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.20)
+  (tag commit `e4a606a00352674daaef08636e3e359e6c48ba18`, published 2026-11-03). The
+  digest above is the multi-architecture image index; it resolves to
+  `sha256:d3e3e7e8409d0583b23e0fa4eee4b85c7b20885a314d4ada2ca8aad66bd33e1c` on
   `linux/amd64` and
-  `sha256:51b8134770441b3ad340ba87ca9acd8a03fd864315c54d79911b27d95437c91a` on
-  `linux/arm64`. Both were checked against the Docker Hub registry on
-  2026-10-08. Nexus vendors the matching contracts, `contracts-edge-0.9.15`
-  (`6fb64c5dc2e014204c17609fc717d976f3b4589e`).
-- **What changed on the Edge side.** Edge `v0.9.15` keeps every contract Nexus
-  depends on: egress policy schema 2 and its data-plane attestation, deployment
+  `sha256:406d8335e60f15ee024141762a7b280bea4abe76fef37ac26b65c45085ae7426` on
+  `linux/arm64`. All three were checked against the Docker Hub registry on
+  2026-11-21. Nexus vendors the matching contracts, `contracts-edge-0.9.20`
+  (`39da322083044c2e92617209e62983c92387f0ad`).
+- **What changed on the Edge side.** Since `v0.9.15`, Edge has published `v0.9.17`
+  (no `v0.9.16`), `v0.9.19` (no `v0.9.18`) and `v0.9.20`. Every contract Nexus depends
+  on is unchanged: egress policy schema 2 and its data-plane attestation, deployment
   snapshot v2 and its `deployment_snapshot.v2` tokens, and the acknowledgement shape.
-  The ConfigSync protocol revision stays `3`, so a control plane and its data planes
-  still run the same build, and Edge adds no core schema change, so the gateway
-  database opens in place. Read Edge's
-  [upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/docs/upgrade_guide.md#upgrading-to-0915)
-  and its
-  [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/CHANGELOG.md)
-  for the gateway-wide changes; [Upgrading to Edge v0.9.15](operations.md#upgrading-to-edge-v0915)
-  reviews every one Nexus consumes.
-- **Other Edge versions are unverified.** Nexus `v0.5.2` is tested only against
-  Edge `v0.9.15`. It still reads Edge `v0.9.14`'s answers, which keeps an Edge-only
-  rollback possible (see [rollback](#rollback)), but that reopens the vulnerabilities
-  `v0.9.15` fixes: run the pinned pair. Edge `v0.9.12` or earlier is refused.
+  The ConfigSync protocol revision stays `3`. But `v0.9.17`, `v0.9.19` and `v0.9.20`
+  each refuse configuration and traffic the previous release accepted; see
+  [behaviour changes](#behaviour-changes-to-plan-for), and
+  [Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917) and
+  [Upgrading to Edge v0.9.20](operations.md#upgrading-to-edge-v0920), which review
+  every change Nexus consumes.
+- **Other Edge versions are unverified.** Nexus `v0.6.0` is tested only against Edge
+  `v0.9.20`. Edge `v0.9.12` or earlier is refused.
 - **No prebuilt Nexus image.** The release is a tagged source build: the
   Dockerfile uses a digest-pinned Node 22 base in both stages and `npm ci`
   against the committed lockfile. The tag, the base digest and the lockfile are
@@ -59,13 +55,21 @@ traffic that `v0.9.14` served. The full list of changes is in the
 
 ## Highlights
 
-- **Pairs with Edge `v0.9.15`, a security release.** It fixes 26 published Ferrum
-  Edge advisories; see [security](#security).
-- **`X-Authenticated-Identity` is reserved.** The portal and the plugin form refuse it
-  as a palette header name, as Edge `v0.9.15` does, before any gateway write.
-- **The gRPC and WebSocket refusal is documented.** The palette help, the provider
-  guide and the API reference say which Nexus settings make Edge `v0.9.15` refuse
-  native gRPC and WebSocket requests to an API.
+- **One base schema; no upgrade path before 1.0.** A new database is created directly
+  at the final schema. A database created by an earlier version is refused at
+  startup, before anything reads it; see [schema](#schema-no-upgrade-path-before-10).
+- **Pairs with Edge `v0.9.20`.** Includes Edge `v0.9.17`'s fixes for the published
+  QUIC advisories that affect `v0.9.15`, and the stricter admission of `v0.9.19` and
+  `v0.9.20`. The palette refuses, before any gateway write, what those releases
+  refuse.
+- **Grant revocations and access approvals are finished, not stranded** (#651). Each
+  decision's gateway half is recorded durably (`access_gateway_jobs`) and a
+  background worker completes it after a crash or a failed compensation.
+- **Safer credential changes.** Credential deletes are conditioned on the exact
+  Edge read they were decided from (`If-Match`, ferrum-edge#7393), `keyauth` and
+  `jwt` credentials are deleted by identity rather than by position, and Nexus
+  honours Edge's 500-ACL-group cap per consumer.
+- **Security fixes in Nexus itself**; see [security](#security).
 
 ## Install
 
@@ -74,7 +78,7 @@ From a clean shell, with Docker Compose v2 and `openssl`:
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
-git checkout --detach v0.5.2
+git checkout --detach v0.6.0
 cp docker/docker-compose.example.yml docker-compose.yml
 set -a
 . ./release/compatibility.env
@@ -92,203 +96,184 @@ restore needs the same values. The portal is at <http://127.0.0.1:8787> and
 [getting-started walkthrough](getting-started.md) continues from there to a
 published API and an authenticated request through the gateway.
 
-## Upgrading from v0.5.1
+## Moving from v0.5.2
 
-`v0.5.1` is the supported upgrade source. A `v0.5.0` or older database also
-upgrades in one run (CI covers every release), but read the
-[`v0.5.1` notes](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/docs/release-notes.md#upgrading-from-v050)
-first: an upgrade from `v0.5.0` also applies `013_account_recovery_jobs`, which needs
-every older Nexus writer drained, and its first trusted password reset revokes
-credentials. From `v0.5.1`, Nexus adds no migration; what changes is Edge. Follow the
-[production upgrade procedure](operations.md#production-upgrade-procedure) and
-[Upgrading to Edge v0.9.15](operations.md#upgrading-to-edge-v0915):
+There is no upgrade path: `v0.6.0` needs a new, empty Nexus database. Started
+against a `v0.5.2` (or older) database, it exits non-zero, changes nothing, and
+prints that the database was created by a different Ferrum Nexus schema and that
+there is no upgrade path before 1.0. Accounts, organizations, APIs, approvals,
+grants, credentials metadata, messages, settings and the audit history in the old
+database do not carry over. Follow
+[moving to a new release](operations.md#moving-to-a-new-release):
 
 1. **Check the prerequisites.**
    - **Node.** Unchanged since `v0.4.0`: a source install needs Node
-     `^22.22.2 || ^24.15.0 || >=26.0.0`. The container image carries Node
-     22.23.3.
-   - **The gateway.** Work through the Edge
-     [upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/docs/upgrade_guide.md#upgrading-to-0915)'s
-     checklist for anything Nexus does not manage, such as Gateway API routes,
-     DestinationRules, plugin configs that name environment variables (now only
-     `FERRUM_PLUGIN_SECRET_<NAME>`) and namespace-scoped `operator` tokens.
-   - **Palette header names.** Rename any `correlation_id` or
-     `request_deduplication` `header_name` that is `X-Authenticated-Identity` (any
-     case, `_` or `-`); see [behaviour changes](#behaviour-changes-to-plan-for).
-   - **gRPC and WebSocket clients.** Find every API at the `routes` enforcement
-     level, available to AI agents, or requiring idempotency keys
-     (`enforce_required`) that also serves native gRPC or WebSocket clients. Serve
-     that traffic from a separate API, or relax the setting, before upgrading.
-   - **MCP concurrency.** Compare each agent API's expected concurrent MCP sessions
-     per caller with Edge's new default cap of 128.
-2. **Settle gateway recovery work.** Tokens Edge `v0.9.14` issued keep verifying on
-   Edge `v0.9.15`, so this is not required, but it keeps the upgrade window free of
-   conversions in flight. Run `POST /api/apis/:id/restore-gateway` for every API
-   whose `gateway_state` is `repair_required` until it completes, and ask providers
-   not to change `spec_enforcement` or restore gateways until the upgrade is done.
-3. **Stop and drain every Nexus instance**, request handlers and background
-   workers alike, so the backup in the next step is one point in time. `v0.5.2`
-   changes no stored data, so a `v0.5.1` writer left running would not corrupt
-   anything, but it would keep accepting the header name Edge `v0.9.15` refuses.
-4. **Back up Nexus and Edge together**, as one point in time, following the
-   [backup and restore runbook](operations.md#5-backup-and-restore). This backup
-   is your rollback.
-5. **Upgrade Edge to `v0.9.15`** on its existing database. The control plane and
-   every data plane must run the same build: upgrade them together. Keep Nexus
-   stopped until step 6.
-6. **Start `v0.5.2`** on every instance. There is no migration to run. Verify it as
-   the procedure says: `schema_migrations` still lists `001_initial` through
-   `013_account_recovery_jobs`; `GET /api/health/edge`, read as an administrator,
-   reports `status: "ok"` and `public_egress_guaranteed: true` for a local
-   public-only data plane or a fully attested control plane; and a known client
-   still calls an API through the gateway with its existing credential, its backend
-   still receiving `X-Consumer-Username`.
+     `^22.22.2 || ^24.15.0 || >=26.0.0`. The container image carries Node 22.23.5.
+   - **The gateway.** Work through the Edge upgrade guide's sections for
+     [0.9.17](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.17/docs/upgrade_guide.md#upgrading-to-0917),
+     [0.9.19](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20/docs/upgrade_guide.md#upgrading-to-0919)
+     and
+     [0.9.20](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20/docs/upgrade_guide.md#upgrading-to-0920)
+     for anything Nexus does not manage.
+   - **Saved palette settings, while the `v0.5.2` portal still runs.** Edge
+     refuses to start on a saved config it rejects. Rename any `correlation_id`
+     `header_name` set to `X-Ferrum-Hops`, `X-Real-IP` or `X-Geo-Country`, and fix
+     or remove the `compression` and `ip_restriction` values Edge `v0.9.19`
+     refuses (step 1 of [Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917)
+     and of [Upgrading to Edge v0.9.20](operations.md#upgrading-to-edge-v0920)).
+     Settle recovery journals too.
+2. **Stop every Nexus instance**, request handlers and background workers alike.
+3. **Back up Nexus and Edge together**, as one point in time, following the
+   [backup and restore runbook](operations.md#5-backup-and-restore). This backup is
+   your only way back to `v0.5.2`; `v0.6.0` cannot read it.
+4. **Upgrade Edge to `v0.9.20`**, the control plane and every data plane together.
+5. **Create a new, empty Nexus database.** For SQLite, delete (or move aside) the
+   database file and its `-wal` and `-shm` files. For PostgreSQL, MySQL or MongoDB,
+   drop and recreate the dedicated Nexus database, or point `NEXUS_DB_URL` at a new
+   one.
+6. **Deal with what the old portal created in Edge.** Its proxies, consumers,
+   credentials and plugin configs in `FERRUM_NAMESPACE` stay in Edge, and the new
+   database does not know them. Remove them from that namespace, or give the new
+   portal its own namespace (and the gateway access that needs), so that nothing
+   left over keeps serving traffic or collides with what the new portal creates.
+7. **Start `v0.6.0`** on every instance. It creates the schema; register the
+   founding `super_admin` with the bootstrap token, then re-create organizations,
+   APIs and access. Verify that `GET /api/health/edge`, read as an administrator,
+   reports `status: "ok"`, and that a client calls an API through the gateway with
+   a credential the new portal issued.
 
-Nexus `v0.5.1` reads Edge `v0.9.15`, and `v0.5.2` reads Edge `v0.9.14`, so a
-deployment that cannot keep Nexus stopped across step 5 may restart `v0.5.1` after
-the step-4 backup, upgrade Edge, and then upgrade Nexus. Do not stay on a mixed pair:
-`v0.5.1` with Edge `v0.9.15` would accept a palette header name the gateway refuses,
-and `v0.5.2` with Edge `v0.9.14` leaves the Edge vulnerabilities open.
-
-On the Compose stack, from the checkout you installed from, with the four
-secrets you saved at install time exported again (never newly generated
-values):
+On the Compose stack the gateway serves only this portal, so the simplest path is
+to start both from empty volumes. From the checkout you installed from, with the
+four secrets you saved at install time exported again (never newly generated
+values), after taking the paired backup (step 3):
 
 ```bash
-docker compose stop nexus
+docker compose down -v
 git fetch --tags origin
-git checkout --detach v0.5.2
+git checkout --detach v0.6.0
 set -a
 . ./release/compatibility.env
 set +a
-docker compose up -d ferrum-edge
 docker compose up -d --build
 ```
 
-Take the paired backup (step 4) after `docker compose stop nexus` and before
-`docker compose up -d ferrum-edge`. The Compose stack runs a single local Edge
-process, so `NEXUS_EXPECTED_DATA_PLANES` does not apply to it. The gateway keeps
-the `ferrumdata` volume as it is, and Nexus opens the retained `pgdata` database
-with nothing to migrate.
+`docker compose down -v` deletes both the Nexus database (`pgdata`) and the
+gateway's database (`ferrumdata`), which covers steps 5 and 6; run it only after
+the backup. Then register the founding administrator again with the bootstrap
+token from `docker compose logs nexus`.
 
 ### Behaviour changes to plan for
 
-All are listed in the [changelog](../CHANGELOG.md#052---2026-10-08) and reviewed in
-[Upgrading to Edge v0.9.15](operations.md#upgrading-to-edge-v0915).
+All are listed in the [changelog](../CHANGELOG.md#060---2026-11-21) and reviewed in
+[Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917) and
+[Upgrading to Edge v0.9.20](operations.md#upgrading-to-edge-v0920).
 
-- **`X-Authenticated-Identity` is reserved.** Edge `v0.9.15` sends an external
-  identity as the new gateway-owned `X-Authenticated-Identity` header, and
-  `X-Consumer-Username` now carries only a mapped Consumer. Every Nexus caller is a
-  mapped Consumer (`nexus-user-<id>` or `nexus-app-<id>`), so backends behind Nexus
-  keep receiving `X-Consumer-Username` and never the new header. Edge strips
-  `X-Authenticated-Identity` from client requests and refuses it as a configured
-  header, and Nexus now does the same: a `correlation_id` or `request_deduplication`
-  `header_name` of that name, in any case and with `_` or `-`, is
-  `400 VALIDATION_FAILED` in the portal and the plugin form, before any gateway
-  write.
-- **gRPC and WebSocket requests are refused for some APIs.** Edge `v0.9.15` refuses
-  a native WebSocket request with `403` and a native gRPC request with a trailers-only
-  `PERMISSION_DENIED` (gRPC status 7); both are logged with rejection phase
-  `route_protocol_admission`. It does so when the proxy runs, on HTTP, an
-  authentication or admission plugin that cannot run on that flavor. These
-  requests used to skip that policy. On Nexus proxies that means an API at the
-  `routes` enforcement level (a blocking `openapi_validator`), every API available
-  to AI agents (`mcp_gateway`, `openapi_validator`, `ai_tool_governor`,
-  `ai_prompt_shield` and the tool-call `rate_limiting`), and an API whose
-  idempotency keys use `enforce_required`. The authentication plugins,
-  `access_control` and the quota `rate_limiting` run on both flavors, so an API
-  without those settings serves gRPC and WebSocket as before. Separately, a client
-  that nominates `Authorization` in `Connection` on HTTP/1.1 or HTTP/3 now has it
-  removed before authentication and gets `401`.
-- **The MCP session store refuses instead of evicting.** Aggregate MCP sessions now
-  default to at most 128 live sessions per authenticated principal, which Nexus
-  keeps (it sets no `sessions` options). A caller at its own cap has its oldest
-  session replaced. When the gateway-wide session store is full and the caller has
-  no session to replace, Edge refuses the new session instead of evicting another
-  caller's live session, so an MCP client can see initialization refused under
-  load. See the [agent marketplace](agent-marketplace.md).
-- **IPv6 clients are grouped by `/64`.** Edge's per-source caps and IP-keyed plugin
-  state now group IPv6 clients by `/64`. Nexus quotas count by Consumer, and Nexus
-  never sets `rate_limiting`'s new `ipv6_prefix`, so portal quotas are unaffected.
+- **The schema.** A database created by an earlier version is refused; see
+  [schema](#schema-no-upgrade-path-before-10).
+- **Namespace-bounded admin tokens** (Edge `v0.9.17`). Every admin token Nexus
+  mints carries an `ns` claim, so Edge refuses it on the fleet-wide metrics reads.
+  The Usage card needs `FERRUM_METRICS_BEARER_TOKEN` (and optionally
+  `FERRUM_ADMIN_FLEET_READ_JWT_SECRET`) to show request counts.
+- **Reserved header names.** `X-Ferrum-Hops`, `X-Real-IP` and `X-Geo-Country` (any
+  case, `_` or `-`) are refused as a `correlation_id` `header_name`, as
+  `X-Authenticated-Identity` already was.
+- **Stricter palette admission** (Edge `v0.9.19`). Duplicate or wildcard-misplaced
+  `compression` algorithms and content types, an empty `content_types` list, and a
+  non-canonical `ip_restriction` prefix length are `400 VALIDATION_FAILED`.
+  `ip_restriction` no longer has an evaluation order (`mode`), which the next Edge
+  release removes.
+- **JWT clients must leave out `aud`** (Edge `v0.9.19`): `jwt_auth` refuses a token
+  whose `aud` is not configured, and Nexus configures none. A request carrying two
+  credentials is refused with `400`.
+- **Request parameters on `routes` APIs** (Edge `v0.9.19`). A document whose
+  required parameter uses a serialization the gateway's validator cannot read is
+  refused at import. Nexus keeps request validation off, so a `routes` API still
+  enforces only its paths and methods.
+- **Agent APIs** (Edge `v0.9.19`). An MCP tool call no longer forwards the caller's
+  credentials or query string to the backend. An API cannot use request
+  deduplication and be available to AI agents at once; the portal refuses the pair.
+- **Idempotency keys** (Edge `v0.9.19`). A retry that crosses the gateway upgrade
+  runs again instead of replaying.
 
 ### Rollback
 
-Rolling back Edge to `v0.9.14` reopens the vulnerabilities Edge `v0.9.15` fixes
-(see [security](#security)), so prefer fixing forward and roll back only to restore
-service. Settle recovery journals before rolling back.
-
-Rollback is a restore of the backup taken in step 4, Nexus and Edge together:
-restore the Edge database and run Edge `v0.9.14` on it, and restore the Nexus
-database and run `v0.5.1` on it. Every post-upgrade change is lost with the restore.
-Never run an older Nexus image over a database a newer Nexus has migrated.
-
-Rolling back Edge alone runs Edge `v0.9.14` on the current Edge database, without
-restoring either side: Edge `v0.9.15` adds no core schema change, and Nexus `v0.5.2`
-reads Edge `v0.9.14`'s answers, so it keeps working. Nexus then still refuses
-`X-Authenticated-Identity` as a header name, which `v0.9.14` would accept; nothing
-else Nexus does changes.
+Rollback is a restore of the backup taken in step 3, Nexus and Edge together:
+restore the Edge database and run the Edge release it came from, and restore the
+Nexus database into an empty database and run `v0.5.2` on it. Everything done on
+`v0.6.0` is lost with the restore. Never point `v0.5.2` at a database `v0.6.0`
+created: it does not know the new schema ledger and would try to replay its
+migrations over it.
 
 ## Security
 
-`v0.5.2` pairs Nexus with Edge `v0.9.15`, which fixes 26 published Ferrum Edge
-security advisories. They are listed among the
-[Edge security advisories](https://github.com/ferrum-edge/ferrum-edge/security/advisories),
-and the Security section of the Edge `v0.9.15`
-[changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/CHANGELOG.md)
-describes the fixes. Several of them change what Nexus users see:
+Fixed in Nexus since `v0.5.2` (details in the
+[changelog](../CHANGELOG.md#060---2026-11-21)):
 
-- a native gRPC or WebSocket request no longer skips the `routes` enforcement level,
-  MCP governance or a required idempotency key; it is refused instead;
-- when the gateway-wide MCP session store is full, a caller with no session to
-  replace is refused a new session instead of evicting another caller's;
-- a client that nominates `Authorization` in `Connection` has it removed before
-  authentication and gets `401`;
-- `X-Authenticated-Identity` is a reserved, gateway-owned header name, so the
-  portal refuses it as a palette header name.
+- An SMTP relay configured for STARTTLS no longer falls back to plaintext
+  ([GHSA-v7p7-85wx-8wrp](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v7p7-85wx-8wrp)).
+- Encrypted settings are bound to their row, so a ciphertext cannot be transplanted
+  to another secret
+  ([GHSA-qm46-qg94-mpg7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-qm46-qg94-mpg7)).
+- Registration re-checks its policy when it commits
+  ([GHSA-9cr4-49fg-gfcx](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-9cr4-49fg-gfcx)).
+- Turning the login policy to `local_only` ends the sessions of every account
+  linked at a provider it shuts out
+  ([GHSA-627m-vcp5-v2p7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-627m-vcp5-v2p7));
+  a returning single sign-on commits under the provider's lease, so a concurrent
+  settings change that cuts the provider off also cuts that session off
+  ([GHSA-2343-7j5f-mjcv](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-2343-7j5f-mjcv));
+  and unlinking an identity re-checks the account's role inside its transaction
+  ([GHSA-3qj2-5wrm-hgr4](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-3qj2-5wrm-hgr4)).
+- A grant revocation or access approval interrupted between its decision and its
+  Edge write is finished by a worker instead of leaving gateway access live (#651).
+- Sessions have an absolute lifetime; anonymous health checks no longer fingerprint
+  the deployment; stored scrypt parameters are bounded before verification; the
+  Content-Security-Policy admits only the CAPTCHA provider in use; the SMTP password
+  is presented only to the relay it was stored for; a recipient's display name can
+  no longer stop a mass-email campaign; API deletion never removes an operator's own
+  plugin config; and private APIs' summaries are no longer shown to an account that
+  can no longer read the API.
 
-Nexus itself carries no new security fix in `v0.5.2`. Upgrade any deployment running
-Edge `v0.9.14` or earlier; a deployment still on Nexus `v0.5.0` or earlier also needs
-the fixes of [`v0.5.1`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/docs/release-notes.md#security).
+Edge `v0.9.17` fixes the published QUIC advisories that affect Edge `v0.9.15`; see
+the [Edge security advisories](https://github.com/ferrum-edge/ferrum-edge/security/advisories)
+and the Edge [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20/CHANGELOG.md).
 
-## Schema and upgrades
+## Schema: no upgrade path before 1.0
 
-- **`v0.5.2` adds no migration and freezes nothing.**
-  `server/src/db/released-migrations.ts` is unchanged: it lists `001_initial`
-  (`v0.1.0`), `002`/`003` (`v0.2.0`), `004` to `006` (`v0.3.0`), `007` to `011`
-  (`v0.4.0`), `012` (`v0.5.0`) and `013` (`v0.5.1`), each with a SHA-256 checksum
-  per backend, and CI fails on any edit to them. Later releases change the schema
-  only with forward migrations that upgrade a `v0.5.2` database in place; see
-  [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades).
-- **Every release is an upgrade source.** The released-baseline upgrade test
-  builds a database as `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.5.0` and
-  `v0.5.1` each left it, migrates it with the current code and reads every value
-  back. A `v0.5.2` database is a `v0.5.1` one.
-- **No upgrade from pre-release checkouts.** Databases created by buildout
-  checkouts before `v0.1.0` are not supported; recreate them
-  ([development reset](operations.md#buildout-schema-policy)).
-- **Per backend.** SQLite and PostgreSQL apply each migration and its ledger
-  row in one transaction. MySQL commits DDL statement by statement; its runner
-  accepts only replay-safe forms and checks live definitions before replaying
-  one. MongoDB requires a replica set; a standalone server
-  (`NEXUS_DB_ALLOW_STANDALONE=true`) carries no upgrade guarantee.
-- **Downgrades are not supported.** Roll Nexus back by restoring the pre-upgrade
-  backup, never by running an older Nexus image over a database a newer Nexus has
-  migrated. The Edge-only [rollback](#rollback) needs no restore.
+- **One base schema per backend.** `server/src/db/schema/base.sql` (SQLite),
+  `base.pg.sql` (PostgreSQL), `base.mysql.sql` (MySQL) and `BASE_INDEXES` in the
+  MongoDB adapter. The earlier migration chain, including the never-released
+  `014_mysql_text_capacity` and `015_access_gateway_jobs`, is folded into it, and the
+  released-migration freeze and upgrade suite are gone. Until 1.0, schema changes
+  edit the base schema directly.
+- **What startup does.** Nexus records the base schema's generation,
+  `000_base_v0_6`, as the only entry of `schema_migrations`. An empty database
+  gets the schema, and a database at the same generation is left alone. Anything
+  else is refused with an error, and its schema and data are left unchanged. That
+  includes a `v0.5.2` database, whose ledger lists `001_initial` to
+  `013_account_recovery_jobs`. `npm run migrate` (and
+  `node server/dist/db/migrate-cli.js` in the image) does the same and prints
+  `Schema ready (driver: …).`
+- **Later releases.** The generation is bumped whenever the base schema changes,
+  so a release that changes it refuses databases created by earlier ones; a
+  release that keeps it opens the previous release's database. Each release's notes say which. See
+  [schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10).
+- **Downgrades are not supported.** Roll back by restoring the backup into the
+  release that wrote it.
 
 ## Operations
 
 - **Persistence and secrets.** Retain the PostgreSQL `pgdata` and Edge
   `ferrumdata` volumes together. Keep `NEXUS_SECRET_KEY`,
   `FERRUM_ADMIN_JWT_SECRET`, `FERRUM_BASIC_AUTH_HMAC_SECRET` and the database
-  password stable across restarts, upgrades and restores, and store them
-  outside the source tree. Recovery journals are encrypted under
-  `NEXUS_SECRET_KEY` and take part in its key rotation.
+  password stable across restarts and restores, and store them outside the source
+  tree. Recovery journals are encrypted under `NEXUS_SECRET_KEY` and take part in
+  its key rotation.
 - **Backup and restore.** Back up Nexus and Edge together, as one point in
   time, following the [backup and restore runbook](operations.md#5-backup-and-restore).
-  Treat a recovery journal's manifest and chunk rows as one record and never
-  trim them by hand. The Nexus database alone cannot rebuild Edge consumers,
-  credentials, proxies or plugins: without an Edge backup, show-once
-  credentials must be re-issued.
+  Restore into the same Nexus release that wrote the backup. The Nexus database
+  alone cannot rebuild Edge consumers, credentials, proxies or plugins: without an
+  Edge backup, show-once credentials must be re-issued.
 - **TLS.** The sample binds the portal and the gateway listener to loopback for
   local HTTP. For a network deployment, terminate TLS at a trusted reverse
   proxy, set `NEXUS_PUBLIC_URL` to the HTTPS origin and
@@ -302,6 +287,8 @@ the fixes of [`v0.5.1`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/
 
 ## Known limitations
 
+- There is no upgrade path between releases before 1.0; plan to recreate the Nexus
+  database when a release changes the schema.
 - Edge serves one data-plane namespace per process: keep `FERRUM_NAMESPACE`
   equal on both sides.
 - A control plane with remote data planes is reported public-only only from
@@ -316,20 +303,14 @@ the fixes of [`v0.5.1`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/
   the control plane terminates each data plane's HTTP/2 connection itself,
   directly or through an L4 pass-through: behind a proxy that terminates HTTP/2,
   a dead data plane's stream can stay listed for minutes and a restarted data
-  plane can count twice. Edge reports no stream liveness, so a data plane whose
-  restarted process subscribes to another control plane can still be covered by
-  its stale stream for that window. A disconnected data plane that keeps serving
-  cached configuration is not listed.
+  plane can count twice. A disconnected data plane that keeps serving cached
+  configuration is not listed.
 - An API at the `routes` enforcement level, available to AI agents, or requiring
-  idempotency keys cannot serve native gRPC or WebSocket clients on Edge
-  `v0.9.15`; publish that traffic as a separate API.
+  idempotency keys cannot serve native gRPC or WebSocket clients; publish that
+  traffic as a separate API. A `routes` API does not check request parameters.
 - Gateway-origin detection runs at write time only; re-pointing DNS after a publish,
   or moving the gateway, is left to Edge's request-time egress screening
   (`FERRUM_BACKEND_ALLOW_IPS`).
-- A password reset revokes credentials only on the account's first trusted proof
-  of its current address, and a reset completed before the `v0.5.1` upgrade is not
-  revisited. A revocation that cannot be placed without emptying a credential type
-  shared with another account stalls for an administrator.
 - The public-only DNS-rebinding fixture
   ([`e2e/public-only/`](../e2e/public-only/README.md)) runs on demand with a
   packaged image and covers the local data-plane profile only; it is not part
@@ -341,9 +322,9 @@ the fixes of [`v0.5.1`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/
 - An unconfirmed gateway deployment mutation is never resolved automatically;
   the [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation)
   resolves it by observation.
-- Other gateway compensation is held in memory: a process that dies between
-  Edge applying such a change and its undo running leaves no record
-  (`docs/security.md`).
+- Gateway compensation other than grant revocations, access approvals and account
+  recovery is held in memory: a process that dies between Edge applying such a
+  change and its undo running leaves no record (`docs/security.md`).
 - SMTP must be configured for real email delivery, and, unless the provider
   creates the accounts, for any account but the founder to link a single
   sign-on identity.
@@ -353,8 +334,9 @@ the fixes of [`v0.5.1`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/
 
 ## Release step
 
-This file is published as the GitHub release notes for tag `v0.5.2`. Earlier
+This file is published as the GitHub release notes for tag `v0.6.0`. Earlier
 notes are kept at their tags:
+[`v0.5.2`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.2/docs/release-notes.md),
 [`v0.5.1`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/docs/release-notes.md),
 [`v0.5.0`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.0/docs/release-notes.md),
 [`v0.4.0`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.4.0/docs/release-notes.md),
@@ -365,7 +347,7 @@ and
 
 1. Merge the release change and require every check, `acceptance` included,
    to pass on the merge commit.
-2. Create tag `v0.5.2` at that commit and publish a GitHub release for it with
+2. Create tag `v0.6.0` at that commit and publish a GitHub release for it with
    these notes.
 3. Require a green run of the **verbatim quickstart gate** for the tag
    (`.github/workflows/quickstart-gate.yml`, run by the tag push). In a clean

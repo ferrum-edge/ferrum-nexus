@@ -1,6 +1,6 @@
 # Operations
 
-Deployment reference for Ferrum Nexus (current release: `v0.5.2`; first
+Deployment reference for Ferrum Nexus (current release: `v0.6.0`; first
 supported release: `v0.1.0`): configuration, databases and upgrades, containers,
 TLS, backup and restore, key rotation, the email outbox, scaling limits, health
 checks, metrics and gateway recovery.
@@ -956,8 +956,9 @@ Procedure:
    gateway issued keep verifying on v0.9.15.
 3. **Upgrade Edge to v0.9.15**, the control plane and every data plane together.
 4. **Upgrade Nexus** to `v0.5.2`, which pins Edge v0.9.15 in
-   [`release/compatibility.env`](../release/compatibility.env), and check
-   `GET /api/health/edge` as an admin.
+   [the `v0.5.2` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.2/release/compatibility.env),
+   and check `GET /api/health/edge` as an admin. Then continue with
+   [Upgrading to Edge v0.9.17](#upgrading-to-edge-v0917).
 
 Nexus `v0.5.1` reads Edge v0.9.15 unchanged, and `v0.5.2` still reads v0.9.14, so the
 order of steps 3 and 4 does not matter for compatibility. **Rolling back** Edge to
@@ -966,10 +967,10 @@ to restore service.
 
 ### Upgrading to Edge v0.9.17
 
-The next Nexus release pairs with Edge v0.9.17 and requires it: v0.9.17 fixes
-the published QUIC advisories affecting v0.9.15, and it is the only Edge
-version that release's acceptance suite tests. There is no published v0.9.16;
-v0.9.17 is its replacement. Read the
+No Nexus release pairs with Edge v0.9.17: Nexus `v0.6.0` pairs with v0.9.20,
+which includes v0.9.17's fixes for the published QUIC advisories affecting
+v0.9.15. This section reviews what v0.9.17 changed for Nexus. There is no
+published v0.9.16; v0.9.17 is its replacement. Read the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.17/docs/upgrade_guide.md#upgrading-to-0917)
 for the gateway-wide changes. Every contract Nexus depends on is unchanged:
 egress policy schema 2 and its data-plane attestation, deployment snapshot v2
@@ -1008,9 +1009,8 @@ Procedure:
 2. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.15
    gateway issued keep verifying on v0.9.17.
 3. **Upgrade Edge to v0.9.17**, the control plane and every data plane together.
-4. **Upgrade Nexus** to the release that pins Edge v0.9.17 in
-   [`release/compatibility.env`](../release/compatibility.env), and check
-   `GET /api/health/edge` as an admin.
+4. **Continue with [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920).**
+   No Nexus release pins v0.9.17; `v0.6.0` pins v0.9.20.
 
 Nexus `v0.5.2` already works with Edge v0.9.17's bounded-token behavior, so
 the order of steps 3 and 4 does not matter for compatibility. **Rolling back**
@@ -1019,7 +1019,7 @@ v0.9.17 fixes; do it only to restore service.
 
 ### Upgrading to Edge v0.9.20
 
-The next Nexus release pairs with Edge v0.9.20, the only Edge version its
+Nexus `v0.6.0` pairs with Edge v0.9.20, the only Edge version its
 acceptance suite tests. v0.9.20 follows published v0.9.19, which follows
 v0.9.17: v0.9.18 was tagged but never published, so its changes ship in
 v0.9.19. Read both sections of the Edge upgrade guide,
@@ -1096,19 +1096,18 @@ Procedure:
 2. **Settle journals** as in step 2 of the v0.9.13 procedure, so that no
    conversion or restore spans the gateway upgrade.
 3. **Stop Nexus and take the paired Nexus and Edge backup** before changing
-   Edge (step 2 of [moving to a new release](#moving-to-a-new-release)). The
-   release that pins Edge v0.9.20 (`v0.6.0`) needs a new, empty database and
-   cannot read an earlier one, so this backup is the way back to the previous
-   pair.
+   Edge (step 2 of [moving to a new release](#moving-to-a-new-release)).
+   `v0.6.0` needs a new, empty database and cannot read an earlier one, so this
+   backup is the way back to the previous pair.
 4. **Upgrade Edge to v0.9.20**, the control plane and every data plane together.
-5. **Move Nexus** to the release that pins Edge v0.9.20 in
+5. **Move Nexus** to `v0.6.0`, which pins Edge v0.9.20 in
    [`release/compatibility.env`](../release/compatibility.env), following
    steps 4 to 6 of [moving to a new release](#moving-to-a-new-release), and
    check `GET /api/health/edge` as an admin.
 
 Nexus `v0.5.2` is qualified against Edge v0.9.15 only and has not been tested
 against v0.9.20, so upgrade Nexus promptly after Edge. **Rolling back** Edge to
-v0.9.17 is not qualified for the release that pins v0.9.20.
+v0.9.17 is not qualified for Nexus `v0.6.0`.
 
 ### Palette keys the next Edge release removes
 
@@ -1794,7 +1793,7 @@ Dependabot advances the pinned digest within that channel, so the exact Node 22
 patch release changes over time; the
 [migration notes](dependency-majors-449-higher-floor-draft.md) record the published OCI
 evidence for the digest `v0.4.0` through `v0.5.2` shipped (Node 22.23.3) and the
-rollback boundary. The image sets:
+rollback boundary; `v0.6.0` ships Node 22.23.5. The image sets:
 
 - `NODE_ENV=production`, and runs as the unprivileged `node` user.
 - `NEXUS_HOST=0.0.0.0`, `NEXUS_PORT=8787`.
@@ -2028,12 +2027,12 @@ rotated in that window ([§12](#12-the-credential-mirror)).
 Each Nexus release is validated against one Edge release and vendors that release's
 contracts (`contracts/ferrum-contracts/PIN`):
 
-| Nexus release         | Ferrum Edge | Vendored contracts      |
-| --------------------- | ----------- | ----------------------- |
-| `v0.4.0`              | `v0.9.13`   | `contracts-edge-0.9.13` |
-| `v0.5.0`, `v0.5.1`    | `v0.9.14`   | `contracts-edge-0.9.14` |
-| `v0.5.2`              | `v0.9.15`   | `contracts-edge-0.9.15` |
-| `main` (next release) | `v0.9.20`   | `contracts-edge-0.9.20` |
+| Nexus release      | Ferrum Edge | Vendored contracts      |
+| ------------------ | ----------- | ----------------------- |
+| `v0.4.0`           | `v0.9.13`   | `contracts-edge-0.9.13` |
+| `v0.5.0`, `v0.5.1` | `v0.9.14`   | `contracts-edge-0.9.14` |
+| `v0.5.2`           | `v0.9.15`   | `contracts-edge-0.9.15` |
+| `v0.6.0`           | `v0.9.20`   | `contracts-edge-0.9.20` |
 
 ### Restoring
 

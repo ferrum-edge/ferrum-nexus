@@ -10,8 +10,8 @@ commit `9626821eb089c71f5d4d71268c7b8276a8a5ab50`. Nexus `v0.5.0` and `v0.5.1` p
 `contracts-edge-0.9.14`, which keep this protocol and report a store failure before
 commit as `durable` `not_started` or `not_committed` instead of `unknown`. Nexus `v0.5.2`
 pairs with [Edge v0.9.15](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15) and
-`contracts-edge-0.9.15`, whose deployment mutation sources and schemas are unchanged; the
-next release pairs with Edge v0.9.20 and `contracts-edge-0.9.20`, also unchanged. See the
+`contracts-edge-0.9.15`, whose deployment mutation sources and schemas are unchanged, and
+Nexus `v0.6.0` pairs with Edge v0.9.20 and `contracts-edge-0.9.20`, also unchanged. See the
 [artifact identities](edge-0.9.11-adoption.md). To resolve an
 unconfirmed mutation, follow the
 [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
