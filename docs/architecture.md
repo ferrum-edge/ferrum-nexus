@@ -543,9 +543,10 @@ is not the portal's to rewrite:
 - a recorded id no longer on the proxy means an operator removed it; the next
   change creates a fresh config rather than adopting another of that name.
 
-**An API with no ownership rows** (published before `002_api_gateway_plugins`
-by a release whose database `v0.6.0` now refuses, so in practice none) has its
-configs recognised role by role, conservatively. A config counts as the
+**An API with no ownership rows** (one published before
+`002_api_gateway_plugins`; `v0.6.0` refuses databases that old, so a database
+created at the base schema has none for that reason) has its configs
+recognised role by role, conservatively. A config counts as the
 portal's only if the API uses that role and the config still holds what the
 portal wrote (the empty auth config, its ACL group, its quota, its CORS
 origins). An auth config with settings of its own is never adopted or deleted.
