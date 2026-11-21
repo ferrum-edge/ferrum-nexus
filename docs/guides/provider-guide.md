@@ -563,9 +563,9 @@ gateway.
 
 **Backend states:**
 
-- **Unknown**: the gateway has nothing to report. The card says whether
-  circuit breaking is on in the API's settings: with it off there is no
-  breaker to report, and with it on the gateway lists the breaker only once a
+- **Unknown**: the gateway's backend sample has no state for the API. The card
+  says whether circuit breaking is on in the API's saved settings, beside that
+  observation. With it on, the gateway normally lists the breaker once a
   request has reached it, which can be a while after you turn it on even if
   the API already had traffic. It never means the backend is down.
 - **Failing**: the circuit breaker has opened, or health checks removed a
@@ -897,8 +897,9 @@ most often after an authentication change.
 
 **"A client gets 502/503."** That is your backend. Check **Backend** on the
 Overview tab: **Failing** confirms it and says since when. **Unknown** does not
-clear your backend; it usually means there is no circuit breaker. Check the
-backend is healthy and reachable **from the gateway**.
+clear your backend; it means the gateway has no breaker or health-check state
+to report for the API right now. Check the backend is healthy and reachable
+**from the gateway**.
 
 **"My rate limit is not applied."** Confirm it is saved on **Settings**. It is
 per caller, and each caller (including the test consumer) has its own budget.
