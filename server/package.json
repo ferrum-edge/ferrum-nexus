@@ -15,6 +15,7 @@
     "migrate": "tsx src/db/migrate-cli.ts",
     "rotate-secret-key": "tsx src/db/rotate-key-cli.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "test:store-contracts": "node --import tsx --test src/test/smoke.test.ts src/test/mysql-migration-recovery.test.ts src/test/mysql-user-transition.test.ts src/test/baseline-upgrade.test.ts",
     "test:coverage": "node --import tsx --experimental-test-coverage --test \"src/**/*.test.ts\""
   },
   "dependencies": {

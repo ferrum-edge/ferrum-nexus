@@ -133,8 +133,9 @@ npm test --workspace server
 out of four typechecks fine and fails only at runtime, on whichever backend the reviewer does not
 run. CI runs this suite on all four backends: SQLite in every `checks` leg through `npm test`, and
 each server backend in its own `store-contracts` lane, together with the MySQL migration tests and
-the baseline-upgrade fixture. The lanes set `NEXUS_TEST_SKIP_SQLITE=true` so they do not repeat the
-SQLite suite.
+the baseline-upgrade fixture. The lanes run `npm run test:store-contracts --workspace server`, so the
+file list lives in `server/package.json`, and set `NEXUS_TEST_SKIP_SQLITE=true` so they do not repeat
+the SQLite suite.
 
 The Mongo URL must point at a replica set (single-node is fine). A standalone `mongod` is rejected
 at `init()` unless `NEXUS_DB_ALLOW_STANDALONE=true`, and the smoke suite's transaction cases need
