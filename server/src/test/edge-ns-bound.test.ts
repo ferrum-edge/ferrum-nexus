@@ -41,7 +41,7 @@ import { createMockFerrumEdge, type MockFerrumEdge } from './mock-ferrum-edge.js
 const FERRUM = /'ferrum'/;
 const DID_NOT_ALLOW_PORTAL = /did not allow this portal/;
 const FERRUM_OR_VERSION_HINT = /FERRUM_|v0\.9/;
-const NO_CIRCUIT_BREAKER = /No circuit breaker/;
+const NO_CIRCUIT_BREAKER = /circuit breaking is (?:on|off)|no circuit breaker/i;
 
 const METRICS_BEARER = 'nexus-test-metrics-bearer-token-0123456789';
 const VIEWER_SECRET = 'nexus-test-admin-viewer-key-0123456789abcd';

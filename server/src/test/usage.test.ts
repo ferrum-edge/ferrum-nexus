@@ -6,9 +6,8 @@ import type { ApiErrorBody, ApiUsageResponse, PublishApiResponse } from '@ferrum
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import { reconcileGateway } from '../ferrum-admin/reconcile.js';
 
-const NO_TRAFFIC_ANY_CASE = /No traffic/i;
+const NO_TRAFFIC = /no traffic/i;
 const NO_REQUEST_METRICS_API = /no request metrics for this API/;
-const NO_TRAFFIC = /No traffic/;
 const CIRCUIT_BREAKER_OPEN = /circuit breaker is open/i;
 const UPSTREAM_TARGET = /10\.0\.5\.7:8080/;
 const NO_CIRCUIT_BREAKER_CONFIGURED = /circuit breaking is off in this API's catalog settings/i;
@@ -140,7 +139,7 @@ describe('api usage', () => {
       assert.equal(usage.requests.total, 0);
       assert.equal(usage.latency_ms, null);
       assert.equal(usage.backend.status, 'unknown');
-      assert.match(String(usage.backend.detail), NO_TRAFFIC_ANY_CASE);
+      assert.match(String(usage.backend.detail), NO_TRAFFIC);
     });
 
     it('reports missing plugin measurements as unavailable through the real scrape', async () => {
@@ -243,11 +242,12 @@ describe('api usage', () => {
         assert.equal(usage.backend.status, 'unknown', label);
         assert.match(String(usage.backend.detail), expected, label);
         if (breaker) {
+          assert.match(String(usage.backend.detail), BREAKER_CONFIGURED_UNOBSERVED, label);
           assert.doesNotMatch(String(usage.backend.detail), NO_CIRCUIT_BREAKER_CONFIGURED, label);
         } else {
           assert.doesNotMatch(String(usage.backend.detail), BREAKER_CONFIGURED_UNOBSERVED, label);
         }
-        assert.equal(NO_TRAFFIC_ANY_CASE.test(String(usage.backend.detail)), traffic === 0, label);
+        assert.equal(NO_TRAFFIC.test(String(usage.backend.detail)), traffic === 0, label);
       }
     });
 
@@ -265,6 +265,7 @@ describe('api usage', () => {
       const usage = await usageFor(provider, apiId);
       assert.equal(usage.requests.total, 12);
       assert.equal(usage.backend.status, 'unknown');
+      assert.match(String(usage.backend.detail), BREAKER_CONFIGURED_UNOBSERVED);
       assert.match(String(usage.backend.detail), BREAKER_STATE_LATER);
       assert.doesNotMatch(String(usage.backend.detail), NO_CIRCUIT_BREAKER_CONFIGURED);
     });

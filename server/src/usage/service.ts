@@ -200,14 +200,14 @@ function unobservedBreaker(breakerConfigured: boolean, hasTraffic: boolean | nul
     }
     return hasTraffic
       ? "Circuit breaking is off in this API's catalog settings, and the gateway reports no backend state."
-      : "The sampled counters show no traffic yet, circuit breaking is off in this API's catalog settings, and the gateway has no backend state to report.";
+      : "The sampled counters show no traffic yet, circuit breaking is off in this API's catalog settings, and the gateway reports no backend state.";
   }
   if (hasTraffic === null) {
     return "Request metrics are unavailable. Circuit breaking is on in this API's catalog settings, but the gateway has reported no breaker state yet.";
   }
   return hasTraffic
-    ? "Circuit breaking is on in this API's catalog settings, but the gateway has reported no breaker state yet. The gateway creates that state when a request reaches the breaker; the request totals can include traffic from before it was enabled, or traffic refused before reaching it."
-    : "Circuit breaking is on in this API's catalog settings, but the sampled counters show no traffic yet, so the gateway has no breaker state to report.";
+    ? "Circuit breaking is on in this API's catalog settings, but the gateway has reported no breaker state yet. The gateway normally creates that state when a request reaches the breaker; the request totals can include traffic from before it was enabled, or traffic refused before reaching it."
+    : "Circuit breaking is on in this API's catalog settings. The sampled counters show no traffic yet, and the gateway has reported no breaker state.";
 }
 
 /**

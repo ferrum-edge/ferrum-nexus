@@ -563,9 +563,11 @@ gateway.
 
 **Backend states:**
 
-- **Unknown**: the gateway has nothing to report, either because nothing has
-  called the API yet or because no circuit breaker is configured. It never
-  means the backend is down.
+- **Unknown**: the gateway has nothing to report. The card says whether
+  circuit breaking is on in the API's settings: with it off there is no
+  breaker to report, and with it on the gateway lists the breaker only once a
+  request has reached it, which can be a while after you turn it on even if
+  the API already had traffic. It never means the backend is down.
 - **Failing**: the circuit breaker has opened, or health checks removed a
   target. The card says since when.
 - **Recovering**: the breaker is letting probe requests through.
