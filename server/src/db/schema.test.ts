@@ -399,7 +399,13 @@ describe('ensureBaseSchema', () => {
           created: true,
         });
       } else {
-        await assert.rejects(ensureBaseSchema(driver, schema, { pollMs: 1 }), NO_UPGRADE_PATH);
+        await assert.rejects(ensureBaseSchema(driver, schema, { pollMs: 1 }), (error) => {
+          assert.ok(isNexusError(error));
+          // Not the recreate advice: the schema is ours, only unconfirmed.
+          assert.match(error.message, /start Ferrum Nexus again/);
+          assert.doesNotMatch(error.message, NO_UPGRADE_PATH);
+          return true;
+        });
       }
     }
   });

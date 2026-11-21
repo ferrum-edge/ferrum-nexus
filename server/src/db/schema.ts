@@ -215,8 +215,11 @@ export async function ensureBaseSchema(
       await sleep(options.pollMs ?? DEFAULT_POLL_MS);
       recorded = await driver.listRecorded();
     }
-    if (!isCurrent(recorded, schema)) throw olderSchemaError(recorded, schema);
-    return { created: true };
+    if (isCurrent(recorded, schema)) return { created: true };
+    if (recorded.length === 0 || isResumable(recorded, schema, driver)) {
+      throw unconfirmedSchemaError(schema);
+    }
+    throw olderSchemaError(recorded, schema);
   }
 }
 
@@ -288,6 +291,21 @@ export function unrecordedSchemaError(tables: readonly string[], schema: BaseSch
       `schema that created them, so this build (schema ${schema.id}) cannot tell what they ` +
       `are. ${WHAT_TO_DO}`,
     { recorded: [], tables: sorted, expected: schema.id },
+  );
+}
+
+/**
+ * The error for a creation the driver reported done but whose record a
+ * read-back cannot yet see (a lagging read during a topology change). The
+ * database is not incompatible, so this asks for a retry, not a recreate.
+ */
+export function unconfirmedSchemaError(schema: BaseSchema): NexusError {
+  return new NexusError(
+    'INTERNAL',
+    `The base schema ${schema.id} was created, but reading the schema ledger back did not ` +
+      'show it yet. Wait for the database to settle, then start Ferrum Nexus again; the next ' +
+      'start finds the schema current or finishes creating it.',
+    { expected: schema.id },
   );
 }
 

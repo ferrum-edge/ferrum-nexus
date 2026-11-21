@@ -1599,11 +1599,13 @@ export async function ensureMongoSchema(
 ): Promise<void> {
   // Schema decisions read and write the ledger with an explicit policy, not
   // whatever the connection string sets: claims and publication wait for a
-  // majority, and reads go to the primary, so a start never decides on a
-  // ledger that lags its own acknowledged write.
+  // majority, and reads go to the primary at `local`, which sees every write
+  // the primary acknowledged (and works where majority reads are disabled,
+  // as MongoDB 4.4 allows), so a start never decides on a ledger that lags
+  // its own acknowledged write.
   const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE, {
     writeConcern: { w: 'majority' },
-    readConcern: { level: 'majority' },
+    readConcern: { level: 'local' },
     readPreference: 'primary',
   });
   const existing = async (base: BaseSchema): Promise<string[]> => {

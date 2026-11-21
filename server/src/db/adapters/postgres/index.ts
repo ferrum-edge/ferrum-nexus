@@ -81,9 +81,14 @@ async function readLedger(queryable: PgQueryable): Promise<string[]> {
 }
 
 async function tablesPresent(queryable: PgQueryable, schema: BaseSchema): Promise<string[]> {
+  // Every relation an unqualified name would resolve to on the connection's
+  // search path, not just its first schema: that is what the store's queries
+  // would read.
   const result = await queryable.query(
-    `SELECT table_name FROM information_schema.tables
-      WHERE table_schema = current_schema() AND table_name = ANY($1::text[])`,
+    `SELECT c.relname AS table_name FROM pg_catalog.pg_class c
+      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+        AND pg_catalog.pg_table_is_visible(c.oid)
+        AND c.relname = ANY($1::text[])`,
     [[...schema.tables]],
   );
   return (result.rows as { table_name: string }[]).map((row) => String(row.table_name));
