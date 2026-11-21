@@ -18,6 +18,7 @@ const RESERVED_PATH_CHARACTER = /[{}*~ ?#;%\\]/;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 const TRAILING_SLASHES = /\/+$/;
 const CLEARTEXT_SCHEME = /^http:\/\//i;
+const SURROUNDING_WHITE_SPACE = /^\p{White_Space}+|\p{White_Space}+$/gu;
 const AUTHORITY_END = /[/?#]/;
 const LOOPBACK_AUTHORITY = /^(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\])(?::\d*)?$/;
 const LOOPBACK_IPV4_HOST = /^127\.\d+\.\d+\.\d+$/;
@@ -141,18 +142,19 @@ export function validatedManifest(body: unknown): Manifest {
     }
   }
   if (gateway.otel_endpoint) {
+    // Edge trims the configured endpoint (Rust `str::trim`: Unicode
+    // White_Space) before it parses and checks it; so does this.
+    const written = gateway.otel_endpoint.replace(SURROUNDING_WHITE_SPACE, '');
     let endpoint: URL;
     try {
-      endpoint = new URL(gateway.otel_endpoint);
+      endpoint = new URL(written);
       if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
         throw new Error();
       }
     } catch {
       throw validationFailed('Manifest telemetry reference must be credential-free');
     }
-    // Edge trims the configured endpoint before it checks it.
-    const written = gateway.otel_endpoint.trim();
-    if (endpoint.protocol === 'http:' && !loopbackLiteral(written, new URL(written))) {
+    if (endpoint.protocol === 'http:' && !loopbackLiteral(written, endpoint)) {
       throw validationFailed(
         'Manifest telemetry reference must use https unless its host is a loopback IP literal',
       );

@@ -149,8 +149,10 @@ describe('published immutable service-manifest consumer', () => {
       'http://127.10.20.30/v1/traces',
       'http://[::1]:4318/v1/traces',
       'http://[::1]',
-      // Edge trims the configured endpoint before checking it.
+      // Edge trims the configured endpoint (Unicode White_Space) first.
       'http://127.0.0.1:4318 ',
+      'http://127.0.0.1:4318\u00a0',
+      'http://127.0.0.1:4318\u0085',
     ]) {
       assert.doesNotThrow(() => validatedManifest(withEndpoint(accepted)), accepted);
     }
@@ -163,6 +165,8 @@ describe('published immutable service-manifest consumer', () => {
       'http://10.0.0.5:4318/v1/traces',
       'http://[::2]:4318/v1/traces',
       'http://128.0.0.1:4318/v1/traces',
+      // Not White_Space, so Edge keeps it in the written authority.
+      'http://127.0.0.1\ufeff',
     ]) {
       assert.throws(() => validatedManifest(withEndpoint(refused)), CLEARTEXT_REFUSED, refused);
     }

@@ -60,8 +60,9 @@ Intentionally narrower than v1: strings the schema leaves unbounded are capped a
 characters; every string refuses C0 control characters and DEL, `upstream.host`
 included (Edge allows tab, LF and CR there); and `gateway.otel_endpoint` refuses user
 information and a non-empty query or fragment, since the preview never echoes it and a
-query is a common place for a token. Leading and trailing whitespace around a loopback
-endpoint is trimmed before the cleartext check, as Edge does.
+query is a common place for a token. As Edge does, the endpoint is trimmed of
+surrounding Unicode white space before it is parsed and checked; the schema still
+requires the submitted string to start with the scheme.
 
 ## Related consumers
 

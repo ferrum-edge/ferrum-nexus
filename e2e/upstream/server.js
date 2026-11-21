@@ -72,6 +72,25 @@ const server = createServer((request, response) => {
   });
 });
 
+// Bytes that are not HTTP at all — a TLS ClientHello sent to this plain-HTTP
+// port, say — are an observation too: a client tried to reach this backend.
+// The gateway and the test client only ever send well-formed HTTP. Only
+// parser errors count; a reset idle keep-alive connection is not a request.
+server.on('clientError', (error, socket) => {
+  if (!String(error?.code ?? '').startsWith('HPE_')) {
+    socket.destroy();
+    return;
+  }
+  observed += 1;
+  const route = 'CLIENT_ERROR';
+  if (servedByRoute.has(route) || servedByRoute.size < MAX_OBSERVED_ROUTES) {
+    servedByRoute.set(route, (servedByRoute.get(route) ?? 0) + 1);
+  } else {
+    overflow = true;
+  }
+  socket.destroy();
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   // The container's only liveness signal.
   console.log(`e2e upstream listening on ${PORT}`);

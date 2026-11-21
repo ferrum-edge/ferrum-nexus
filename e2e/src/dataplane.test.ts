@@ -921,7 +921,9 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         server_ca_path: '/nonexistent/secret-ca.pem',
       },
       // `https://`: the preview refuses a cleartext exporter to a host that is
-      // not a loopback IP literal, as Ferrum Edge drops one (#740).
+      // not a loopback IP literal, as Ferrum Edge drops one (#740). A TLS
+      // attempt at the plain-HTTP upstream still shows in its snapshot, as a
+      // `CLIENT_ERROR` observation.
       gateway: {
         namespace: 'nexus',
         otel_endpoint: `${UPSTREAM_URL.replace(/^http:/, 'https:')}/manifest-must-not-fetch`,
