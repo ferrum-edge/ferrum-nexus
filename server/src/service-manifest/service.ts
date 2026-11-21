@@ -6,11 +6,27 @@ import {
 } from '@ferrum-nexus/shared';
 import type { UserRecord } from '../db/store.js';
 import { forbidden, validationFailed } from '../lib/errors.js';
-import { manifestDefaults, manifestSchema, manifestValidator } from './schema.js';
+import {
+  characterLength,
+  longestManifestString,
+  manifestDefaults,
+  manifestSchema,
+  manifestValidator,
+} from './schema.js';
 
 const RESERVED_PATH_CHARACTER = /[{}*~ ?#;%\\]/;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 const TRAILING_SLASHES = /\/+$/;
+const CLEARTEXT_SCHEME = /^http:\/\//i;
+const AUTHORITY_END = /[/?#]/;
+const LOOPBACK_AUTHORITY = /^(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\])(?::\d*)?$/;
+const LOOPBACK_IPV4_HOST = /^127\.\d+\.\d+\.\d+$/;
+
+/** Edge's resource ID limit and the suffixes Alloy appends to the proxy ID. */
+const EDGE_RESOURCE_ID_MAX_LENGTH = 254;
+const UPSTREAM_ID_SUFFIX = '-upstream';
+const CORRELATION_ID_PLUGIN_ID_SUFFIX = '-correlation-id';
+const OTEL_TRACING_PLUGIN_ID_SUFFIX = '-otel-tracing';
 
 const CONTRACT_COMMIT = '39da322083044c2e92617209e62983c92387f0ad';
 
@@ -43,6 +59,24 @@ function literalPath(value: string): boolean {
   );
 }
 
+/**
+ * Whether a cleartext endpoint names a canonical loopback IP literal: a
+ * dotted-quad `127.d.d.d` or `[::1]`, optionally with a numeric port, as
+ * written. Ferrum Edge v0.9.19 and later drop an `http://` exporter to any
+ * other host unless `allow_plaintext` is set, which Alloy's export never
+ * writes (Edge `is_loopback_ip_literal_endpoint`). `localhost`, `127.1` and
+ * `[0:0:0:0:0:0:0:1]` do not qualify.
+ */
+function loopbackLiteral(endpoint: string, url: URL): boolean {
+  const rest = endpoint.replace(CLEARTEXT_SCHEME, '');
+  const end = rest.search(AUTHORITY_END);
+  const authority = end === -1 ? rest : rest.slice(0, end);
+  return (
+    LOOPBACK_AUTHORITY.test(authority) &&
+    (url.hostname === '[::1]' || LOOPBACK_IPV4_HOST.test(url.hostname))
+  );
+}
+
 /** Bound the tree before recursive validation; do not echo offending data. */
 export function validatedManifest(body: unknown): Manifest {
   const pending = [{ value: body, depth: 0 }];
@@ -53,7 +87,10 @@ export function validatedManifest(body: unknown): Manifest {
       throw validationFailed('Manifest budget exceeded');
     }
     const { value, depth } = entry;
-    if (typeof value === 'string' && (value.length > 2048 || CONTROL_CHARACTER.test(value))) {
+    if (
+      typeof value === 'string' &&
+      (characterLength(value) > longestManifestString || CONTROL_CHARACTER.test(value))
+    ) {
       throw validationFailed('Manifest presentation string is invalid');
     }
     if (value && typeof value === 'object') {
@@ -80,12 +117,17 @@ export function validatedManifest(body: unknown): Manifest {
   ) {
     throw validationFailed('Manifest requires canonical literal paths');
   }
+  // The resource IDs Alloy derives from the proxy ID (qualified against
+  // ferrum-alloy main 2b206a46, `ServiceManifest::validate`). The tracing
+  // plugin is generated for every export, with or without an exporter, since
+  // it neutralizes caller trace context.
   const id = gateway.proxy_id ?? manifest.service.name;
-  if (
-    (health && id.length + 9 > 254) ||
-    (gateway.correlation_id && id.length + 15 > 254) ||
-    (gateway.otel_endpoint && id.length + 13 > 254)
-  ) {
+  const derived = [
+    ...(health ? [UPSTREAM_ID_SUFFIX] : []),
+    ...(gateway.correlation_id ? [CORRELATION_ID_PLUGIN_ID_SUFFIX] : []),
+    OTEL_TRACING_PLUGIN_ID_SUFFIX,
+  ];
+  if (derived.some((suffix) => id.length + suffix.length > EDGE_RESOURCE_ID_MAX_LENGTH)) {
     throw validationFailed('Manifest resource reference exceeds the limit');
   }
   if (agents?.endpoint_path) {
@@ -99,13 +141,19 @@ export function validatedManifest(body: unknown): Manifest {
     }
   }
   if (gateway.otel_endpoint) {
+    let endpoint: URL;
     try {
-      const endpoint = new URL(gateway.otel_endpoint);
+      endpoint = new URL(gateway.otel_endpoint);
       if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
         throw new Error();
       }
     } catch {
       throw validationFailed('Manifest telemetry reference must be credential-free');
+    }
+    if (endpoint.protocol === 'http:' && !loopbackLiteral(gateway.otel_endpoint, endpoint)) {
+      throw validationFailed(
+        'Manifest telemetry reference must use https unless its host is a loopback IP literal',
+      );
     }
   }
   return manifest;

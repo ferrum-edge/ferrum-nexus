@@ -9,9 +9,33 @@ import { buildTestApp } from './helpers.js';
 const CHECKSUM_LINE = /^([a-f0-9]{64})  (.+)$/;
 const MANIFEST_FILE = /service-manifest\/|^fixtures\/invalid-expectations\.json$/;
 
+const CLEARTEXT_REFUSED = /must use https unless its host is a loopback IP literal/;
+const RESOURCE_REFERENCE = /resource reference exceeds the limit/;
+
 const root = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
 function fixture(path: string): unknown {
   return JSON.parse(readFileSync(new URL(path, root), 'utf8'));
+}
+
+type Manifest = Record<string, Record<string, unknown>>;
+
+/**
+ * Shared valid fixtures the pinned `contracts-edge-0.9.20` publishes with a
+ * cleartext `gateway.otel_endpoint` to a host that is not a loopback IP
+ * literal. Ferrum Edge v0.9.19 and later drop that exporter and Alloy main
+ * refuses the manifest, so this preview refuses it too: a deliberate,
+ * narrower-than-the-pin divergence until ferrum-contracts#82 (which moves
+ * these fixtures to `https://`) is published and re-vendored.
+ */
+const CLEARTEXT_VALID_FIXTURES = new Set(['orders-api.json']);
+
+/** `valid/orders-api.json` with the `https://` exporter ferrum-contracts#82 gives it. */
+function ordersApi(): Manifest {
+  const manifest = fixture('fixtures/service-manifest/valid/orders-api.json') as Manifest;
+  return {
+    ...manifest,
+    gateway: { ...manifest.gateway, otel_endpoint: 'https://otel-collector:4318/v1/traces' },
+  };
 }
 
 describe('published immutable service-manifest consumer', () => {
@@ -61,7 +85,18 @@ describe('published immutable service-manifest consumer', () => {
         assert.ok(pin.includes(`  ${base}${name}\n`), 'every shared fixture must be pinned');
         const value = fixture(base + name);
         assert.equal(manifestValidator.safeParse(value).success, kind === 'valid', name);
-        if (kind === 'valid') assert.doesNotThrow(() => validatedManifest(value), name);
+        if (kind === 'valid' && CLEARTEXT_VALID_FIXTURES.has(name)) {
+          assert.throws(() => validatedManifest(value), CLEARTEXT_REFUSED, name);
+          const manifest = value as Manifest;
+          const secured = {
+            ...manifest,
+            gateway: {
+              ...manifest.gateway,
+              otel_endpoint: String(manifest.gateway?.otel_endpoint).replace('http:', 'https:'),
+            },
+          };
+          assert.doesNotThrow(() => validatedManifest(secured), name);
+        } else if (kind === 'valid') assert.doesNotThrow(() => validatedManifest(value), name);
         else {
           assert.ok(expectations[`service-manifest/invalid/${name}`], name);
           assert.throws(() => validatedManifest(value), name);
@@ -71,10 +106,8 @@ describe('published immutable service-manifest consumer', () => {
   });
 
   it('rejects explicit nulls, unknown nested keys, unsupported schemas/protocols and unbounded references', () => {
-    const original = fixture('fixtures/service-manifest/valid/orders-api.json') as Record<
-      string,
-      Record<string, unknown>
-    >;
+    const original = ordersApi();
+    assert.doesNotThrow(() => validatedManifest(original));
     for (const [key, value] of Object.entries(original)) {
       assert.throws(() => validatedManifest({ ...original, [key]: null }));
       if (value && typeof value === 'object') {
@@ -103,17 +136,155 @@ describe('published immutable service-manifest consumer', () => {
     assert.throws(() => validatedManifest(deep));
   });
 
+  it('admits cleartext telemetry only to a canonical loopback IP literal, as Ferrum Edge does', () => {
+    const original = ordersApi();
+    const withEndpoint = (otel_endpoint: string): Manifest => ({
+      ...original,
+      gateway: { ...original.gateway, otel_endpoint },
+    });
+    for (const accepted of [
+      'https://otel-collector:4318/v1/traces',
+      'https://otel.example.com/v1/traces',
+      'http://127.0.0.1:4318/v1/traces',
+      'http://127.10.20.30/v1/traces',
+      'http://[::1]:4318/v1/traces',
+      'http://[::1]',
+    ]) {
+      assert.doesNotThrow(() => validatedManifest(withEndpoint(accepted)), accepted);
+    }
+    for (const refused of [
+      'http://otel-collector:4318/v1/traces',
+      'http://localhost:4318/v1/traces',
+      'http://otel.localhost:4318/v1/traces',
+      'http://127.1:4318/v1/traces',
+      'http://[0:0:0:0:0:0:0:1]:4318/v1/traces',
+      'http://10.0.0.5:4318/v1/traces',
+      'http://[::2]:4318/v1/traces',
+      'http://128.0.0.1:4318/v1/traces',
+    ]) {
+      assert.throws(() => validatedManifest(withEndpoint(refused)), CLEARTEXT_REFUSED, refused);
+    }
+  });
+
+  it('bounds the tracing resource ID Alloy derives for every export, with or without an exporter', () => {
+    // plain-http.json with no exporter, no health check and correlation off:
+    // Alloy still writes `<proxy_id>-otel-tracing` (13 characters), and Edge
+    // caps resource IDs at 254, so a 241-character proxy ID is the longest.
+    const plain = fixture('fixtures/service-manifest/valid/plain-http.json') as Manifest;
+    const {
+      otel_endpoint: _endpoint,
+      otel_root_sampling_ratio: _ratio,
+      ...gateway
+    } = plain.gateway ?? {};
+    const bare: Manifest = { ...plain, gateway: { ...gateway, correlation_id: false } };
+    assert.equal('health' in bare, false);
+    const withId = (proxy_id: string): Manifest => ({
+      ...bare,
+      gateway: { ...bare.gateway, proxy_id },
+    });
+    for (const length of [8, 241]) {
+      assert.doesNotThrow(() => validatedManifest(withId('p'.repeat(length))), String(length));
+    }
+    assert.throws(() => validatedManifest(withId('p'.repeat(242))), RESOURCE_REFERENCE);
+    // With an exporter the bound is the same.
+    const exporting = (proxy_id: string): Manifest => ({
+      ...bare,
+      gateway: { ...bare.gateway, proxy_id, otel_endpoint: 'http://127.0.0.1:4318/v1/traces' },
+    });
+    assert.doesNotThrow(() => validatedManifest(exporting('p'.repeat(241))));
+    assert.throws(() => validatedManifest(exporting('p'.repeat(242))), RESOURCE_REFERENCE);
+    // Correlation's `-correlation-id` (15) is the longest suffix when enabled.
+    const correlated = (proxy_id: string): Manifest => ({
+      ...bare,
+      gateway: { ...bare.gateway, proxy_id, correlation_id: true },
+    });
+    assert.doesNotThrow(() => validatedManifest(correlated('p'.repeat(239))));
+    assert.throws(() => validatedManifest(correlated('p'.repeat(240))), RESOURCE_REFERENCE);
+    // A defaulted proxy ID is service.name, which the schema caps at 63
+    // characters, so it always fits.
+    const { proxy_id: _proxyId, ...unnamed } = bare.gateway ?? {};
+    const defaulted: Manifest = {
+      ...bare,
+      service: { ...bare.service, name: `a${'b'.repeat(62)}` },
+      gateway: unnamed,
+    };
+    assert.doesNotThrow(() => validatedManifest(defaulted));
+    assert.throws(() =>
+      validatedManifest({ ...defaulted, service: { name: `a${'b'.repeat(63)}` } }),
+    );
+  });
+
+  it("enforces Ferrum Edge's bounds on exported fields, honouring service_base_path's 2049", () => {
+    const original = ordersApi();
+    const patched = (section: string, field: string, value: unknown): Manifest => ({
+      ...original,
+      [section]: { ...(original[section] ?? {}), [field]: value },
+    });
+    const health = { path: '/healthz', interval_seconds: 10, timeout_ms: 2000 };
+    const withHealth = (field: string, value: unknown): Manifest => ({
+      ...original,
+      health: { ...health, [field]: value },
+    });
+    const cases: [string, Manifest, Manifest][] = [
+      [
+        'api.public_path (500)',
+        patched('api', 'public_path', `/${'o'.repeat(499)}`),
+        patched('api', 'public_path', `/${'o'.repeat(500)}`),
+      ],
+      [
+        'api.service_base_path (2049 with the trailing /)',
+        patched('api', 'service_base_path', `/${'b'.repeat(2047)}/`),
+        patched('api', 'service_base_path', `/${'b'.repeat(2048)}/`),
+      ],
+      [
+        'upstream.host (255)',
+        patched('upstream', 'host', `${'h'.repeat(251)}.net`),
+        patched('upstream', 'host', `${'h'.repeat(252)}.net`),
+      ],
+      [
+        'health.path (2048)',
+        withHealth('path', `/${'r'.repeat(2047)}`),
+        withHealth('path', `/${'r'.repeat(2048)}`),
+      ],
+      [
+        'health.interval_seconds (3600)',
+        withHealth('interval_seconds', 3600),
+        withHealth('interval_seconds', 3601),
+      ],
+      [
+        'health.timeout_ms (86400000)',
+        withHealth('timeout_ms', 86_400_000),
+        withHealth('timeout_ms', 86_400_001),
+      ],
+      ...(['connect_ms', 'read_ms', 'write_ms'] as const).map(
+        (field): [string, Manifest, Manifest] => [
+          `timeouts.${field} (86400000)`,
+          patched('timeouts', field, 86_400_000),
+          patched('timeouts', field, 86_400_001),
+        ],
+      ),
+    ];
+    for (const [label, atLimit, overLimit] of cases) {
+      assert.doesNotThrow(() => validatedManifest(atLimit), label);
+      assert.equal(manifestValidator.safeParse(overLimit).success, false, label);
+      assert.throws(() => validatedManifest(overLimit), label);
+    }
+    // Control characters stay refused in every string, the host included.
+    assert.throws(() => validatedManifest(patched('upstream', 'host', 'orders\u0001.internal')));
+    // Characters, not UTF-16 code units, are what a length counts.
+    assert.doesNotThrow(() =>
+      validatedManifest(patched('api', 'public_path', `/${'\u{1F600}'.repeat(499)}`)),
+    );
+  });
+
   it('requires a session, provider role, CSRF and the configured namespace; returns only redacted preview data', async () => {
     const harness = await buildTestApp();
     try {
       await harness.registerUser();
       const provider = await harness.registerUser({ role: 'provider' });
       const client = await harness.registerUser({ role: 'client' });
-      const manifest = fixture('fixtures/service-manifest/valid/orders-api.json') as Record<
-        string,
-        unknown
-      >;
-      manifest.gateway = { ...(manifest.gateway as Record<string, unknown>), namespace: 'nexus' };
+      const manifest = ordersApi();
+      manifest.gateway = { ...manifest.gateway, namespace: 'nexus' };
       const payload = { namespace: 'nexus', manifest };
       const before = harness.edge.requests.length;
       const url = '/api/service-manifests/preview';

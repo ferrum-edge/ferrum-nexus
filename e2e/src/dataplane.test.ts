@@ -920,7 +920,12 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         gateway_client_key_path: '/nonexistent/secret-client.key',
         server_ca_path: '/nonexistent/secret-ca.pem',
       },
-      gateway: { namespace: 'nexus', otel_endpoint: `${UPSTREAM_URL}/manifest-must-not-fetch` },
+      // `https://`: the preview refuses a cleartext exporter to a host that is
+      // not a loopback IP literal, as Ferrum Edge drops one (#740).
+      gateway: {
+        namespace: 'nexus',
+        otel_endpoint: `${UPSTREAM_URL.replace(/^http:/, 'https:')}/manifest-must-not-fetch`,
+      },
     };
     const response = await portalRaw('POST', '/api/service-manifests/preview', {
       session: provider,

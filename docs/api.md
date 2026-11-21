@@ -3524,7 +3524,10 @@ configured portal namespace (`403 FORBIDDEN` otherwise). The contract defaults a
 omitted gateway namespace to `ferrum`; it does not inherit the caller's selection.
 Maximum body is 32 KiB; a larger one answers `400 VALIDATION_FAILED` ("Request
 body is too large"). Nesting, strings and references are bounded and the schema
-is validated strictly (`400 VALIDATION_FAILED`). Unknown/null fields are not stripped
+is validated strictly (`400 VALIDATION_FAILED`), together with what Alloy or Ferrum
+Edge refuses: cleartext `gateway.otel_endpoint` to a host that is not a loopback IP
+literal, derived resource IDs over 254 characters, and Edge's field bounds (see
+[`service-manifest-preview.md`](service-manifest-preview.md#checks-beyond-the-pinned-contract)). Unknown/null fields are not stripped
 or coerced. The result has `preview_only: true`, `contract_status: "implemented"`, the
 immutable contract commit, service/public-path/protocol/auth/agent hints and redacted
 reference-presence flags. No upstream/file/TLS/telemetry values or free-form text
