@@ -2327,7 +2327,11 @@ IP.
 | `backend.since`          | present only for an ejected target                                                                                                                                                                                |
 
 `unknown` does not mean the backend is down: Edge lists a breaker only for a
-proxy that has one and has been called; `detail` says which. Backend state is
+proxy that has one and has been called since. `detail` says which, in terms of
+the API's own `circuit_breaker` setting: none configured, configured but not yet
+observed (Edge creates the breaker's state on the first request after it is
+enabled, so the cumulative counters can predate it), or request metrics
+unavailable. Backend state is
 read independently — it may be filled while `available` is `false`, and
 `unavailable` when only it failed.
 

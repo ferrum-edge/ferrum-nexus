@@ -182,13 +182,44 @@ function scopeOf(target: string | undefined): string {
 }
 
 /**
+ * Why the gateway lists no breaker for this proxy, in the catalog's terms.
+ *
+ * Edge creates a breaker's runtime state lazily, on the first request after
+ * the proxy has one, and lists only instantiated entries. The cumulative
+ * request counters can predate the setting, so traffic alone does not mean an
+ * enabled breaker should already be listed: until the next request reaches
+ * it, an enabled breaker is configured but unobserved, not absent.
+ */
+function unobservedBreaker(breakerConfigured: boolean, hasTraffic: boolean | null): string {
+  if (!breakerConfigured) {
+    if (hasTraffic === null) {
+      return 'Request metrics are unavailable, no circuit breaker is configured for this API, and the gateway reports no backend state.';
+    }
+    return hasTraffic
+      ? 'No circuit breaker is configured for this API, so the gateway reports no backend state.'
+      : 'No traffic has reached this API yet and no circuit breaker is configured for it, so the gateway has no backend state to report.';
+  }
+  if (hasTraffic === null) {
+    return 'Request metrics are unavailable. A circuit breaker is configured for this API, but the gateway reports no state for it yet.';
+  }
+  return hasTraffic
+    ? 'A circuit breaker is configured for this API, but the gateway reports no state for it yet. The gateway creates that state on the first request after the breaker is enabled, and the request counts can predate it.'
+    : 'A circuit breaker is configured for this API, but no traffic has reached it yet, so the gateway has no breaker state to report.';
+}
+
+/**
  * Turn Edge's breaker and health-check state into one verdict.
  *
  * The mapping is deliberately conservative about `unknown`: Edge lists a
  * circuit breaker only for a proxy that both *has* one configured and *has been
- * called*, so silence means "nothing to report", never "healthy".
+ * called* since, so silence means "nothing to report", never "healthy". The
+ * catalog's own `circuit_breaker` setting says which kind of silence it is.
  */
-function backendFrom(state: EdgeBackendState, hasTraffic: boolean | null): ApiUsageBackend {
+function backendFrom(
+  state: EdgeBackendState,
+  hasTraffic: boolean | null,
+  breakerConfigured: boolean,
+): ApiUsageBackend {
   if (!state.available) {
     return {
       status: 'unavailable',
@@ -234,15 +265,7 @@ function backendFrom(state: EdgeBackendState, hasTraffic: boolean | null): ApiUs
     };
   }
 
-  return {
-    status: 'unknown',
-    detail:
-      hasTraffic === null
-        ? 'Request metrics are unavailable and the gateway reports no backend state.'
-        : hasTraffic
-          ? 'No circuit breaker is configured for this API, so the gateway reports no backend state.'
-          : 'No traffic has reached this API yet, so the gateway has no backend state to report.',
-  };
+  return { status: 'unknown', detail: unobservedBreaker(breakerConfigured, hasTraffic) };
 }
 
 /* ── Service ────────────────────────────────────────────────────────────── */
@@ -290,7 +313,11 @@ export function createUsageService(deps: UsageServiceDeps): UsageService {
       ]);
 
       const requests = metrics.available ? requestsFrom(metrics) : emptyRequests();
-      const backend = backendFrom(backendState, metrics.available ? requests.total > 0 : null);
+      const backend = backendFrom(
+        backendState,
+        metrics.available ? requests.total > 0 : null,
+        api.circuit_breaker,
+      );
 
       return {
         // Availability describes the counters; independent backend state must
