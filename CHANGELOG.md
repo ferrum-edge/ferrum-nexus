@@ -539,6 +539,30 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Security
 
+- Turning the login policy to `local_only` now ends the sessions of every
+  account linked at a provider it shuts out, in the same transaction, like
+  removing or disabling the provider does (#591)
+  ([GHSA-627m-vcp5-v2p7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-627m-vcp5-v2p7)).
+  It covers `NEXUS_OIDC_PROVIDERS` providers, whose `enabled` flag cannot be
+  edited through the API, so the policy is the runtime switch that cuts them
+  off. The `admin.settings_update` entry records `providers_cut_off` and
+  `sessions_revoked`.
+
+- A returning single sign-on now commits under the provider's
+  `sso:provider:<id>` lease, as first-time links and provisioning already did
+  ([GHSA-2343-7j5f-mjcv](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-2343-7j5f-mjcv)).
+  A settings save on another instance that removed, disabled or shut out the
+  provider could commit between the callback's settings re-read and its
+  commit, and its revocation could not see the session the callback then
+  issued. The lease spans only the commit transaction, not the token exchange.
+
+- Unlinking a user's single sign-on identity takes the account's
+  `users:lifecycle` lease and re-checks the account's role inside its
+  transaction
+  ([GHSA-3qj2-5wrm-hgr4](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-3qj2-5wrm-hgr4)).
+  An `admin` could unlink an account promoted to `admin` after the first check;
+  the unlink now answers `403` and leaves the identity and sessions in place.
+
 - A grant revocation or an access approval that stops between its decision
   and its Edge write is now finished, not stranded (#651). A targeted revoke
   committed `revoked` and its `access.revoke` row before taking the

@@ -2867,33 +2867,29 @@ taken inside it, by the reset. During a mixed-version rollout, an older
 instance redeems resets without this key, so the race it closes stays open
 until every instance runs the lease-aware version.
 
-Single sign-on uses four of these keys. A callback that writes one of a
-provider's links (a first-time link or a provisioned account) and every save of
-the single sign-on settings take `sso:provider:<id>`; returning sign-ins do not.
-Every settings save first takes the deployment-wide `sso:settings` key, then
-the affected provider keys in sorted order, and commits under
-`auth:registration-policy` (the key registration, password sign-in sessions
-and reset redemptions commit under, so `sso_only` or a provider's
-`disable_local_password_for_linked` cannot land between their final policy
-read and their commit). A password sign-in also commits its session under the
-account's `users:lifecycle:<user_id>` key, taken inside its password-change
-lease, so an identity link, role change or disable is ordered against it. A sign-in into an existing account
-takes its `users:lifecycle:<user_id>` key; a callback that also writes a new
-link takes the provider key first, so a claims promotion and an automatic link
-at another provider never miss each other's write.
+Single sign-on uses four of these keys. Every callback that commits a sign-in
+(returning, a first-time link or a provisioned account) and every save of the
+single sign-on settings take `sso:provider:<id>`; the callback holds it only
+around its commit transaction, not across the token exchange. Every settings
+save first takes the deployment-wide `sso:settings` key, then the affected
+provider keys in sorted order, and commits under `auth:registration-policy`
+(the key registration, password sign-in sessions and reset redemptions commit
+under, so `sso_only` or a provider's `disable_local_password_for_linked` cannot
+land between their final policy read and their commit). A password sign-in also
+commits its session under the account's `users:lifecycle:<user_id>` key, taken
+inside its password-change lease, so an identity link, role change or disable is
+ordered against it. A sign-in into an existing account takes its
+`users:lifecycle:<user_id>` key inside the provider key, so a claims promotion
+and an automatic link at another provider never miss each other's write.
+Unlinking an identity takes the account's lifecycle key too, and re-checks the
+account's role inside its transaction, so a concurrent promotion to `admin`
+leaves the unlink to a `super_admin`.
 
-Returning callbacks authorize at their transaction's settings re-read. In the
-supported topology below, production services share one store object and all
-four adapters serialize its transaction bodies. A settings-save transaction
-cannot commit between that re-read and the callback's commit. Independent store
-objects have independent queues: a PostgreSQL, MySQL or replica-set MongoDB
-peer can disable a provider in that interval, and the already-authorized
-returning callback can still commit. SQLite's `BEGIN IMMEDIATE` blocks that
-ordering; provider removal also conflicts with the returning callback's write
-to its existing identity. A future multi-active-instance feature needs an
-explicitly qualified and tested retirement boundary across independent stores,
-or provider-level returning-callback fencing. See
-[the security contract](security.md#single-sign-on-openid-connect).
+Because a returning callback commits under the provider key, a save that cuts
+the provider off (removal, disable, or `local_only`) on any instance either
+commits before the callback's transactional settings re-read, which refuses the
+attempt, or waits for the callback to commit and then revokes the session it
+issued. See [the security contract](security.md#single-sign-on-openid-connect).
 
 Manual role changes take the account lifecycle key as well. A promotion from
 below `admin` to an elevated role is refused while the account has an identity
