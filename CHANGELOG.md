@@ -258,7 +258,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
-- The service-manifest preview now refuses what Alloy and Ferrum Edge refuse
+- The service-manifest preview now applies Alloy's and Ferrum Edge's refusals
+  for cleartext telemetry, derived resource IDs and exported field bounds
   (#740, #734). A cleartext `gateway.otel_endpoint` must name a canonical
   loopback IP literal (`127.d.d.d` or `[::1]`), as Edge v0.9.19 and later
   require; `https://` is accepted for any host. The derived

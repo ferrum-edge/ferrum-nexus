@@ -953,6 +953,23 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       body: { namespace: 'nexus', manifest: { ...manifest, auth: null } },
     });
     assert.equal(invalid.status, 400);
+    // A cleartext exporter to the upstream (a named host) is refused, and the
+    // refusal fetches nothing either: the snapshot below would count a plain
+    // HTTP request to it.
+    const cleartext = await portalRaw('POST', '/api/service-manifests/preview', {
+      session: provider,
+      body: {
+        namespace: 'nexus',
+        manifest: {
+          ...manifest,
+          gateway: {
+            namespace: 'nexus',
+            otel_endpoint: `${UPSTREAM_URL}/manifest-must-not-fetch`,
+          },
+        },
+      },
+    });
+    assert.equal(cleartext.status, 400);
     assert.deepEqual(await upstreamSnapshot(), before, 'preview performs no upstream request');
   });
 

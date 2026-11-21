@@ -185,14 +185,14 @@ export const manifestValidator = compile(manifestSchema);
 /** The longest string any manifest field accepts: the pre-validation budget. */
 export const longestManifestString: number = (() => {
   let longest = DEFAULT_STRING_MAX_LENGTH;
-  const visit = (node: unknown): void => {
-    if (Array.isArray(node)) node.forEach(visit);
-    else if (node && typeof node === 'object') {
-      for (const [key, value] of Object.entries(node)) {
-        if (key === 'maxLength' && typeof value === 'number') longest = Math.max(longest, value);
-        else visit(value);
-      }
-    }
+  // Schema keywords only: annotations such as `x-contract` never raise it.
+  const visit = (node: SchemaNode): void => {
+    if (node.maxLength !== undefined) longest = Math.max(longest, node.maxLength);
+    for (const child of Object.values(node.properties ?? {})) visit(child);
+    if (node.items) visit(node.items);
+    for (const child of [...(node.allOf ?? []), ...(node.anyOf ?? [])]) visit(child);
+    if (node.if) visit(node.if);
+    if (node.then) visit(node.then);
   };
   visit(manifestSchema);
   for (const bound of Object.values(EDGE_FIELD_BOUNDS)) {

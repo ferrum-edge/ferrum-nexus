@@ -150,7 +150,9 @@ export function validatedManifest(body: unknown): Manifest {
     } catch {
       throw validationFailed('Manifest telemetry reference must be credential-free');
     }
-    if (endpoint.protocol === 'http:' && !loopbackLiteral(gateway.otel_endpoint, endpoint)) {
+    // Edge trims the configured endpoint before it checks it.
+    const written = gateway.otel_endpoint.trim();
+    if (endpoint.protocol === 'http:' && !loopbackLiteral(written, new URL(written))) {
       throw validationFailed(
         'Manifest telemetry reference must use https unless its host is a loopback IP literal',
       );

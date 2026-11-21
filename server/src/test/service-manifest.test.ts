@@ -149,6 +149,8 @@ describe('published immutable service-manifest consumer', () => {
       'http://127.10.20.30/v1/traces',
       'http://[::1]:4318/v1/traces',
       'http://[::1]',
+      // Edge trims the configured endpoint before checking it.
+      'http://127.0.0.1:4318 ',
     ]) {
       assert.doesNotThrow(() => validatedManifest(withEndpoint(accepted)), accepted);
     }

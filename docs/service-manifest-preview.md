@@ -27,7 +27,7 @@ No manifest, diagnostic report, trace or secret is stored.
 
 ## Checks beyond the pinned contract
 
-The preview also refuses what the producer or Ferrum Edge refuses, qualified against
+The preview also applies these producer and Ferrum Edge checks, qualified against
 ferrum-alloy `main` at `2b206a4616586b6193d25958b646e2478fc40a94`
 (`ServiceManifest::validate`) and Ferrum Edge `main` at
 `812bbd1a01677525d7b664ba46ba574f546efe6b`:
@@ -50,13 +50,18 @@ ferrum-alloy `main` at `2b206a4616586b6193d25958b646e2478fc40a94`
   `health.path` 2048, `health.interval_seconds` 3600, and `health.timeout_ms` and every
   `timeouts.*` 86400000. ferrum-contracts `main` publishes the same bounds in the v1
   schema (ferrum-contracts#74) but no tag carries them yet; a bound the vendored schema
-  declares itself always wins, and it is never clipped.
+  declares itself always wins, and it is never clipped. Like the schema's `maxLength`,
+  the lengths count characters; Edge counts UTF-8 bytes, so a non-ASCII value within the
+  character bound can still exceed Edge's byte limit. The pinned Alloy revision caps
+  `api.service_base_path` at 2048 bytes including the `/`, one below v1 and Edge;
+  ferrum-alloy#319 tracks aligning it.
 
 Intentionally narrower than v1: strings the schema leaves unbounded are capped at 2048
 characters; every string refuses C0 control characters and DEL, `upstream.host`
 included (Edge allows tab, LF and CR there); and `gateway.otel_endpoint` refuses user
-information, a query and a fragment, since the preview never echoes it and a query is a
-common place for a token.
+information and a non-empty query or fragment, since the preview never echoes it and a
+query is a common place for a token. Leading and trailing whitespace around a loopback
+endpoint is trimmed before the cleartext check, as Edge does.
 
 ## Related consumers
 
