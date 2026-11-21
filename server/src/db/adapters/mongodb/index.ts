@@ -2206,18 +2206,20 @@ class MongoStore implements NexusStore {
         this.opts,
       ),
 
-    listUserIdsByProvider: async (providerId, issuer) =>
-      (
-        await this.col(COLLECTIONS.userIdentities).distinct(
-          'user_id',
-          (issuer === undefined
-            ? { provider_id: providerId }
-            : { provider_id: providerId, issuer }) as Filter<NexusDoc>,
-          this.opts,
-        )
-      )
-        .map((value) => String(value))
-        .sort(),
+    // A projected cursor, not `distinct`: `distinct` returns one document,
+    // which the 16 MiB BSON limit caps at a few hundred thousand accounts.
+    // `(user_id, provider_id)` is unique, so each account appears once.
+    listUserIdsByProvider: async (providerId, issuer) => {
+      const ids = new Set<string>();
+      const cursor = this.col(COLLECTIONS.userIdentities).find(
+        (issuer === undefined
+          ? { provider_id: providerId }
+          : { provider_id: providerId, issuer }) as Filter<NexusDoc>,
+        { ...this.opts, projection: { _id: 0, user_id: 1 } },
+      );
+      for await (const row of cursor) ids.add(String(row.user_id));
+      return [...ids].sort();
+    },
 
     touchLogin: async (id, email, at) => {
       const result = await this.col(COLLECTIONS.userIdentities).updateOne(

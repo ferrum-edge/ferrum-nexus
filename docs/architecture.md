@@ -209,7 +209,8 @@ services over one store. Ordering that must hold across independent stores
 (two instances, or a rolling deploy) comes from the database leases instead:
 every SSO callback commits under its provider's `sso:provider:<id>` lease,
 which a settings save also holds, so a provider cut-off is ordered against a
-returning sign-in's commit on every store. See
+returning sign-in's commit on every store once every instance runs a version
+that takes it (an older instance draining during a rolling deploy does not). See
 [the SSO authorization boundary](security.md#single-sign-on-openid-connect) and
 [supported topologies](operations.md#supported-topologies).
 

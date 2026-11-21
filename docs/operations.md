@@ -2889,7 +2889,10 @@ Because a returning callback commits under the provider key, a save that cuts
 the provider off (removal, disable, or `local_only`) on any instance either
 commits before the callback's transactional settings re-read, which refuses the
 attempt, or waits for the callback to commit and then revokes the session it
-issued. See [the security contract](security.md#single-sign-on-openid-connect).
+issued. During a mixed-version rollout, an older instance commits returning
+callbacks without the provider key, so the ordering holds only once every
+instance runs this version; drain older instances before relying on a cut-off
+during an upgrade. See [the security contract](security.md#single-sign-on-openid-connect).
 
 Manual role changes take the account lifecycle key as well. A promotion from
 below `admin` to an elevated role is refused while the account has an identity

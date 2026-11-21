@@ -802,11 +802,15 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       });
       assert.equal(await store.sessions.deleteForUser(user.id), 1);
 
-      // Set-based termination for several accounts at once, across batches.
+      // Set-based termination for several accounts at once, across batches:
+      // live accounts sit in the first batch, at its boundary and in the last.
       const others = [await makeUser(), await makeUser()];
+      const tokens = new Map<string, string>();
       for (const account of [user, ...others]) {
+        const token = `many-${newId()}`;
+        tokens.set(account.id, token);
         await store.sessions.create({
-          token_hash: `many-${newId()}`,
+          token_hash: token,
           user_id: account.id,
           csrf_token: 'csrf',
           expires_at: isoInSeconds(600),
@@ -819,11 +823,15 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         csrf_token: 'csrf',
         expires_at: isoInSeconds(600),
       });
-      const absent = Array.from({ length: 600 }, () => newId());
-      assert.equal(
-        await store.sessions.deleteForUsers([...absent, user.id, ...others.map((o) => o.id)]),
-        3,
-      );
+      const absent = (count: number): string[] => Array.from({ length: count }, () => newId());
+      const [first, second] = others;
+      assert.ok(first && second);
+      const ids = [user.id, ...absent(498), first.id, ...absent(300), second.id];
+      assert.equal(ids.indexOf(first.id), 499, 'the last id of the first batch of 500');
+      assert.equal(await store.sessions.deleteForUsers(ids), 3);
+      for (const token of tokens.values()) {
+        assert.equal(await store.sessions.findByTokenHash(token), null);
+      }
       assert.equal(await store.sessions.deleteForUsers([]), 0);
       assert.equal(await store.sessions.deleteForUser(bystander.id), 1);
     });
