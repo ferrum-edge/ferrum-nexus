@@ -6,12 +6,13 @@ import type { ApiErrorBody, ApiUsageResponse, PublishApiResponse } from '@ferrum
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import { reconcileGateway } from '../ferrum-admin/reconcile.js';
 
-const NO_TRAFFIC_ANY_CASE = /No traffic/i;
+const NO_TRAFFIC = /no traffic/i;
 const NO_REQUEST_METRICS_API = /no request metrics for this API/;
-const NO_TRAFFIC = /No traffic/;
 const CIRCUIT_BREAKER_OPEN = /circuit breaker is open/i;
 const UPSTREAM_TARGET = /10\.0\.5\.7:8080/;
-const NO_CIRCUIT_BREAKER_CONFIGURED = /No circuit breaker is configured/i;
+const NO_CIRCUIT_BREAKER_CONFIGURED = /circuit breaking is off in this API's catalog settings/i;
+const BREAKER_CONFIGURED_UNOBSERVED = /Circuit breaking is on in this API's catalog settings/;
+const BREAKER_STATE_LATER = /when a request reaches the breaker/;
 const COULD_NOT_REACHED = /could not be reached/;
 const REQUEST_METRICS_UNAVAILABLE = /Request metrics are unavailable/;
 const HTTP_503 = /HTTP 503/;
@@ -29,7 +30,10 @@ describe('api usage', () => {
   let client: TestSession;
 
   /** Publish an API as `provider` and return its Nexus id and Edge proxy id. */
-  async function publishApi(slug: string): Promise<{ apiId: string; proxyId: string }> {
+  async function publishApi(
+    slug: string,
+    options: { circuitBreaker?: boolean } = {},
+  ): Promise<{ apiId: string; proxyId: string }> {
     const response = await harness.authed(provider, {
       method: 'POST',
       url: '/api/apis',
@@ -41,6 +45,9 @@ describe('api usage', () => {
         auth_plugin: 'key_auth',
         requestable: true,
         visibility: 'public',
+        ...(options.circuitBreaker === undefined
+          ? {}
+          : { circuit_breaker: options.circuitBreaker }),
       },
     });
     assert.equal(response.statusCode, 201);
@@ -132,7 +139,7 @@ describe('api usage', () => {
       assert.equal(usage.requests.total, 0);
       assert.equal(usage.latency_ms, null);
       assert.equal(usage.backend.status, 'unknown');
-      assert.match(String(usage.backend.detail), NO_TRAFFIC_ANY_CASE);
+      assert.match(String(usage.backend.detail), NO_TRAFFIC);
     });
 
     it('reports missing plugin measurements as unavailable through the real scrape', async () => {
@@ -204,6 +211,88 @@ describe('api usage', () => {
       assert.equal(usage.backend.status, 'unknown');
       assert.match(String(usage.backend.detail), NO_CIRCUIT_BREAKER_CONFIGURED);
     });
+
+    it('describes the catalog setting when the gateway lists no breaker', async () => {
+      // Edge lists a breaker only once a request has instantiated it, so the
+      // cumulative counters can show traffic an enabled breaker never saw.
+      // Everything is seeded before the first read: the client caches scrapes.
+      const cases = [
+        { breaker: false, traffic: 0, expected: NO_CIRCUIT_BREAKER_CONFIGURED },
+        { breaker: false, traffic: 12, expected: NO_CIRCUIT_BREAKER_CONFIGURED },
+        { breaker: true, traffic: 0, expected: BREAKER_CONFIGURED_UNOBSERVED },
+        { breaker: true, traffic: 12, expected: BREAKER_STATE_LATER },
+      ];
+      const published = [];
+      for (const entry of cases) {
+        const { apiId, proxyId } = await publishApi(`usage-cb-${entry.breaker}-${entry.traffic}`, {
+          circuitBreaker: entry.breaker,
+        });
+        harness.edge.recordRequests(proxyId, {
+          method: 'GET',
+          status: 200,
+          count: entry.traffic,
+        });
+        published.push({ ...entry, apiId });
+      }
+      for (const { breaker, traffic, expected, apiId } of published) {
+        const usage = await usageFor(provider, apiId);
+
+        const label = `breaker=${breaker} traffic=${traffic}`;
+        assert.equal(usage.requests.total, traffic, label);
+        assert.equal(usage.backend.status, 'unknown', label);
+        assert.match(String(usage.backend.detail), expected, label);
+        if (breaker) {
+          assert.match(String(usage.backend.detail), BREAKER_CONFIGURED_UNOBSERVED, label);
+          assert.doesNotMatch(String(usage.backend.detail), NO_CIRCUIT_BREAKER_CONFIGURED, label);
+        } else {
+          assert.doesNotMatch(String(usage.backend.detail), BREAKER_CONFIGURED_UNOBSERVED, label);
+        }
+        assert.equal(NO_TRAFFIC.test(String(usage.backend.detail)), traffic === 0, label);
+      }
+    });
+
+    it('calls a breaker enabled on an active API configured but unobserved', async () => {
+      const { apiId, proxyId } = await publishApi('usage-cb-enabled-later');
+      harness.edge.recordRequests(proxyId, { method: 'GET', status: 200, count: 12 });
+      const enabled = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { circuit_breaker: true },
+      });
+      assert.equal(enabled.statusCode, 200, enabled.body);
+
+      // The first refresh after enabling: 12 earlier requests, no breaker row.
+      const usage = await usageFor(provider, apiId);
+      assert.equal(usage.requests.total, 12);
+      assert.equal(usage.backend.status, 'unknown');
+      assert.match(String(usage.backend.detail), BREAKER_CONFIGURED_UNOBSERVED);
+      assert.match(String(usage.backend.detail), BREAKER_STATE_LATER);
+      assert.doesNotMatch(String(usage.backend.detail), NO_CIRCUIT_BREAKER_CONFIGURED);
+    });
+
+    it('keeps observed breaker states whatever the catalog says', async () => {
+      const states = [
+        ['open', 'failing'],
+        ['half_open', 'recovering'],
+        ['closed', 'healthy'],
+      ] as const;
+      const published = [];
+      for (const [state, status] of states) {
+        for (const circuitBreaker of [true, false]) {
+          const { apiId, proxyId } = await publishApi(
+            `usage-cb-observed-${state.replace('_', '-')}-${circuitBreaker}`,
+            { circuitBreaker },
+          );
+          harness.edge.recordRequests(proxyId, { method: 'GET', status: 200, count: 3 });
+          harness.edge.setBackendState(proxyId, { breaker: state });
+          published.push({ apiId, state, status, circuitBreaker });
+        }
+      }
+      for (const { apiId, state, status, circuitBreaker } of published) {
+        const usage = await usageFor(provider, apiId);
+        assert.equal(usage.backend.status, status, `${state} breaker=${circuitBreaker}`);
+      }
+    });
   });
 
   describe('gateway failures', () => {
@@ -245,6 +334,25 @@ describe('api usage', () => {
       assert.equal(usage.gateway_uptime_seconds, 3_600);
       assert.equal(usage.backend.status, 'unknown');
       assert.match(String(usage.backend.detail), REQUEST_METRICS_UNAVAILABLE);
+      assert.match(String(usage.backend.detail), NO_CIRCUIT_BREAKER_CONFIGURED);
+      assert.doesNotMatch(String(usage.backend.detail), NO_TRAFFIC);
+    });
+
+    it('names a configured breaker when request metrics are unavailable', async () => {
+      const { apiId, proxyId } = await publishApi('usage-partial-breaker', {
+        circuitBreaker: true,
+      });
+      harness.edge.recordRequests(proxyId, { method: 'GET', status: 200, count: 42 });
+      harness.edgeClient.metrics.scrapeProxy = async () => ({
+        available: false,
+        requests: { byMethod: {}, byStatus: {}, total: 0 },
+        latency: { buckets: [], count: null, sum: null },
+      });
+      const usage = await usageFor(provider, apiId);
+      assert.equal(usage.available, false);
+      assert.equal(usage.backend.status, 'unknown');
+      assert.match(String(usage.backend.detail), REQUEST_METRICS_UNAVAILABLE);
+      assert.match(String(usage.backend.detail), BREAKER_CONFIGURED_UNOBSERVED);
       assert.doesNotMatch(String(usage.backend.detail), NO_TRAFFIC);
     });
 
