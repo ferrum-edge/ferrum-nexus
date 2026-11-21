@@ -68,10 +68,12 @@ export function Select<T extends string = string>({
         </SelectPrimitive.Icon>
       </SelectPrimitive.Trigger>
       <SelectPrimitive.Portal>
+        {/* As wide as the trigger, never wider: a long label or description
+            wraps inside the menu instead of stretching it across the page. */}
         <SelectPrimitive.Content
           position="popper"
           sideOffset={6}
-          className="fx-pop animate-pop-in z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-hidden"
+          className="fx-pop animate-pop-in z-50 max-h-72 w-[var(--radix-select-trigger-width)] overflow-hidden"
         >
           <SelectPrimitive.Viewport nonce={cspNonce()} className="p-1">
             {options.map((option) => (
@@ -80,7 +82,7 @@ export function Select<T extends string = string>({
                 value={option.value}
                 disabled={option.disabled}
                 className={cn(
-                  'relative flex cursor-pointer flex-col rounded-sm py-1.5 pr-3 pl-7 text-sm text-fg outline-none select-none',
+                  'relative flex cursor-pointer flex-col rounded-sm py-1.5 pr-3 pl-7 text-sm break-words text-fg outline-none select-none',
                   'data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent-text',
                   'data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50',
                 )}

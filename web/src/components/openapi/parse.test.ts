@@ -355,6 +355,45 @@ describe('parseSpecText', () => {
     expect(result.spec.doc['x-merged']).toEqual({ '<<': { a: 1 } });
   });
 
+  it('refuses a Swagger 2.0 document as the server does', () => {
+    const json = parseSpecText(
+      '{"swagger":"2.0","info":{"title":"Test Swagger","version":"1.0"},"paths":{}}',
+    );
+    const yaml = parseSpecText("swagger: '2.0'\ninfo:\n  title: Test Swagger\npaths: {}\n");
+    // A `swagger` field wins even beside a 3.x `openapi`, as on the server.
+    const both = parseSpecText('{"swagger":"2.0","openapi":"3.0.3","paths":{}}');
+
+    for (const result of [json, yaml, both]) {
+      expect(result).toEqual({
+        ok: false,
+        error: 'Swagger 2.0 documents are not supported; upload an OpenAPI 3.x document.',
+      });
+    }
+  });
+
+  it('requires a 3.x `openapi` version string, as the server does', () => {
+    const missing = "The document is missing the 'openapi' version field.";
+    const unsupported = 'Only OpenAPI 3.x documents are supported.';
+
+    expect(parseSpecText('{"paths":{}}')).toEqual({ ok: false, error: missing });
+    expect(parseSpecText('{"openapi":"  ","paths":{}}')).toEqual({ ok: false, error: missing });
+    // YAML reads an unquoted 3.0 as a number, which the server refuses too.
+    expect(parseSpecText('openapi: 3.0\npaths: {}\n')).toEqual({ ok: false, error: missing });
+    expect(parseSpecText('{"openapi":"2.0","paths":{}}')).toEqual({
+      ok: false,
+      error: unsupported,
+    });
+    expect(parseSpecText('{"openapi":"4.0.0","paths":{}}')).toEqual({
+      ok: false,
+      error: unsupported,
+    });
+
+    const accepted = parseSpecText('{"openapi":" 3.1.0 ","paths":{}}');
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+    expect(accepted.spec.specVersion).toBe(' 3.1.0 ');
+  });
+
   it('reports a JSON syntax error as one instead of retrying it as YAML', () => {
     vi.mocked(parseYaml).mockClear();
 
