@@ -27,9 +27,24 @@ No manifest, diagnostic report, trace or secret is stored.
 
 ## Related consumers
 
-[Anvil #312](https://github.com/ferrum-edge/ferrum-anvil/pull/312), merged on
-2026-10-04 as `c19c0a6abba896bfec972b3e083179c55ef8e38c`, implements a diagnostic
-JSON preview consumer of the same shared contract and covers all 27 canonical fixtures.
+Choose the preview by what you have:
+
+- **A service manifest** (the JSON data model of `ferrum.service_manifest` v1): this Nexus
+  preview, or Foundry's Settings → Alloy Service Manifest card, documented in the
+  [Foundry manifest preview guide](https://github.com/ferrum-edge/ferrum-foundry/blob/main/docs/alloy-manifest-preview.md).
+  Both consume the same shared service-manifest schema and fixtures.
+- **A diagnostic report**: Anvil's desktop Import → Diagnostic preview. It consumes the
+  separate shared diagnostic contract, not service manifests, and refuses a manifest as
+  "Cannot preview this input." Its accepted inputs are a `ferrum.diagnostic_report` 1.x
+  report, a standalone `DiagnosticFinding`, a `ferrum.diagnostic_ref.v1` reference and the
+  Alloy `diagnose --format json` envelope, as listed in Anvil's
+  [shared diagnostic import](https://github.com/ferrum-edge/ferrum-anvil/blob/main/docs/architecture/shared-diagnostics-import.md)
+  guide. [Anvil #312](https://github.com/ferrum-edge/ferrum-anvil/pull/312), merged on
+  2026-10-04 as `c19c0a6abba896bfec972b3e083179c55ef8e38c`, introduced it against
+  `contracts-edge-0.9.9-r2` and covered all 27 canonical diagnostic fixtures of that
+  publication; that count describes the diagnostic contract at that revision, not the
+  manifest fixtures.
+
 Alloy's own producer and any apply path are tracked in Alloy #27 and are not part of
 Nexus: the preview never publishes, applies or stores a manifest.
 
