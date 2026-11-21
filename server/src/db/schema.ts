@@ -171,13 +171,23 @@ async function classify(
   driver: SchemaDriver,
   schema: BaseSchema,
 ): Promise<'current' | { resume: boolean }> {
-  const recorded = await driver.listRecorded();
-  if (isCurrent(recorded, schema)) return 'current';
-  if (isResumable(recorded, schema, driver)) return { resume: true };
-  if (recorded.length > 0) throw olderSchemaError(recorded, schema);
+  const decide = (recorded: readonly string[]): 'current' | { resume: true } | null => {
+    if (isCurrent(recorded, schema)) return 'current';
+    if (isResumable(recorded, schema, driver)) return { resume: true };
+    if (recorded.length > 0) throw olderSchemaError(recorded, schema);
+    return null;
+  };
+  const first = decide(await driver.listRecorded());
+  if (first !== null) return first;
   const existing = await driver.existingTables(schema);
-  if (existing.length > 0) throw unrecordedSchemaError(existing, schema);
-  return { resume: false };
+  if (existing.length === 0) return { resume: false };
+  // The two reads are not one snapshot: a peer may have created (or begun
+  // creating) the schema between them. Its tables never appear before its
+  // record or claim does, so a second look at the ledger tells them apart
+  // from tables nobody recorded.
+  const second = decide(await driver.listRecorded());
+  if (second !== null) return second;
+  throw unrecordedSchemaError(existing, schema);
 }
 
 /**

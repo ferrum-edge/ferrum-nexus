@@ -1693,14 +1693,18 @@ in production.
 Indexes are created by `migrate()` from `BASE_INDEXES`, and the schema's
 fingerprint (over that list and the SQLite base schema, which stands for the
 logical schema) is recorded in `schema_migrations` like the SQL backends'.
-Collections are created by their first insert. Index builds are not
-transactional, so a start first claims the fixed ledger key `creating` (the
-document names the schema being created), which every release contends on. It
-then builds the indexes, records the fingerprint and removes the claim.
+Collections are created by their first insert. The ledger is one document,
+`_id: "schema"`, that every release contends on. Index builds are not
+transactional, so a start first inserts that document in state `creating`
+(naming the schema being created), then builds the indexes, then turns the same
+document to `ready` with one conditional update. The key is never freed, so a
+start that arrives late cannot record a second schema beside a published one.
 `createIndex` is a no-op for an existing identical index, so a later start of
-the same release finishes an interrupted one. A claim younger than 30 seconds
-belongs to a peer still at work, so the start waits for it. Do not delete the
-claim; without it the existing collections are refused.
+the same release takes over an interrupted claim and finishes. A claim younger
+than 30 seconds belongs to a peer still at work, so the start waits for it (up
+to a minute) before taking it over. Do not delete the document; without it the
+existing collections are refused. An index build interrupted by a replica-set
+election is retried once a primary is back.
 
 ### Transactions and contention retries
 

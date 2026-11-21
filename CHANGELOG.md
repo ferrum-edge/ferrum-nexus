@@ -23,9 +23,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   migration chain, a base-schema fingerprint other than its own, or Nexus
   tables with no record make it exit non-zero without changing the schema or
   data, with an error that says to start
-  against a new, empty database. Back up the old database (it is the rollback
-  to `v0.5.2`), recreate it, deal with the old portal's resources in the Edge
-  namespace, and register the first administrator again; see
+  against a new, empty database. Stop Nexus and take a paired Nexus and Edge
+  backup, with their secrets, before changing either side (it is the rollback
+  to `v0.5.2` and its Edge release), then recreate the database, deal with the
+  old portal's resources in the Edge namespace, and register the first
+  administrator again; see
   [schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10)
   and [moving to a new release](docs/operations.md#moving-to-a-new-release).
   The ledger now holds one row: the base schema's fingerprint (`base_` and 16

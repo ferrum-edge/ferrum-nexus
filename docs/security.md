@@ -1396,10 +1396,13 @@ delete is the one window left, closed by ferrum-edge#7393.
   settles those rows with it. With active rows remaining, the owner can clear
   the whole type explicitly (`clear_type=true`, refused for a non-admin when
   the consumer holds another account's row), or an admin reconciles the
-  consumer. On upgrade, appends earlier releases recorded as not taken back get
-  a `retiring` placeholder (`credential.legacy_placeholder`). That scan runs
-  once and does not cover a Nexus database restored on its own; after such a
-  restore, reconcile `basicauth` for every consumer.
+  consumer. On a database written by `v0.2.0` or earlier, a one-time scan gave
+  appends those releases recorded as not taken back a `retiring` placeholder
+  (`credential.legacy_placeholder`). Since `v0.6.0` such a database is refused
+  rather than upgraded, so a database created at the base schema has no such
+  history and the scan finds nothing. The scan never covered a Nexus database
+  restored on its own; after such a restore, reconcile `basicauth` for every
+  consumer.
 
 The procedures are in
 [`operations.md` §12](operations.md#12-the-credential-mirror) and

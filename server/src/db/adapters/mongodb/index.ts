@@ -1530,28 +1530,66 @@ export function latestMessagesPipeline(threadIds: readonly string[]): Document[]
   ];
 }
 
-/** The one ledger key every build's claim contends on. */
-const CLAIM_ID = 'creating';
+/**
+ * The one ledger document every build's schema creation contends on. It
+ * holds `state: 'creating'` (with the schema being created and its creator's
+ * `owner` token) while a start builds the schema, and `state: 'ready'` once
+ * it is published. The key is never freed, so a start that arrives late can
+ * never record a second schema beside a published one.
+ */
+const SCHEMA_DOC_ID = 'schema';
 /** A claim younger than this is a peer still at work, not an interrupted start. */
 const FRESH_CLAIM_MS = 30_000;
 /**
  * Index-build errors another builder running at the same moment can cause:
- * IndexBuildAlreadyInProgress, BackgroundOperationInProgressForNamespace and
- * ForDatabase, WriteConflict, NamespaceExists, IndexBuildAborted.
+ * IndexBuildAlreadyInProgress, IndexBuildAborted,
+ * BackgroundOperationInProgressForDatabase and ForNamespace, WriteConflict,
+ * NamespaceExists.
  */
-const CONCURRENT_INDEX_ERRORS = new Set([276, 12587, 12586, 112, 48, 11602]);
+const CONCURRENT_INDEX_ERRORS = new Set([285, 276, 12586, 12587, 112, 48]);
+/**
+ * Errors a replica-set election causes: InterruptedDueToReplStateChange,
+ * PrimarySteppedDown, NotWritablePrimary, NotPrimaryNoSecondaryOk. The same
+ * start retries the index build once a primary is back.
+ */
+const REPL_STATE_ERRORS = new Set([11602, 189, 10107, 13435]);
+const REPL_RETRIES = 5;
+
+const errorCode = (error: unknown): unknown => (error as { code?: unknown }).code;
+
+/** Build the indexes, riding out a primary election. */
+async function createIndexesRetryingElections(
+  db: Db,
+  indexes: readonly IndexDefinition[],
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await createIndexes(db, indexes);
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      if (typeof code === 'number' && REPL_STATE_ERRORS.has(code) && attempt < REPL_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+        continue;
+      }
+      if (typeof code === 'number' && CONCURRENT_INDEX_ERRORS.has(code)) {
+        throw new SchemaBusyError('A concurrent index build interfered', { cause: error });
+      }
+      throw error;
+    }
+  }
+}
 
 /**
  * Create the base schema in an empty database, accept one already at it, and
  * refuse any other, under the same protocol as the SQL adapters. Index builds
- * are not transactional, so a start first claims the fixed ledger key
- * `creating` (recording which schema it is creating), which every build
- * contends on: one creator at a time. It then checks that nobody finished in
- * the meantime, creates the indexes (`createIndex` is a no-op for an
- * identical index), records the fingerprint and removes the claim. A start
+ * are not transactional, so a start first inserts the ledger document
+ * `schema` in state `creating` (the claim), builds the indexes, then turns
+ * the same document to `ready` with one conditional update. A start
  * interrupted part-way leaves the claim, and a later start of the same build
- * finishes the job; a claim younger than {@link FRESH_CLAIM_MS} belongs to a
- * peer still at work, so a start waits for it instead.
+ * takes it over (once it is older than {@link FRESH_CLAIM_MS}, with a
+ * conditional update so only one start does) and finishes; a younger claim
+ * belongs to a peer still at work, so a start waits for it instead.
  */
 export async function ensureMongoSchema(
   db: Db,
@@ -1565,60 +1603,82 @@ export async function ensureMongoSchema(
     const collections = await db.listCollections({}, { nameOnly: true }).toArray();
     return collections.map((collection) => collection.name).filter((name) => names.has(name));
   };
-  const claimDoc = async (): Promise<Row | null> =>
-    (await ledger.findOne({ _id: CLAIM_ID })) as Row | null;
+  const schemaDoc = async (): Promise<Row | null> =>
+    (await ledger.findOne({ _id: SCHEMA_DOC_ID })) as Row | null;
   const driver: SchemaDriver = {
     writesClaims: true,
     listRecorded: async (): Promise<string[]> => {
       const docs = (await ledger.find({}).toArray()) as Row[];
-      return docs.map((doc) =>
-        str(doc._id) === CLAIM_ID ? `${CLAIM_ID}:${str(doc.schema)}` : str(doc._id),
-      );
+      return docs.map((doc) => mongoLedgerEntry(doc));
     },
     existingTables: existing,
     createBaseSchema: async (base: BaseSchema, { resume }): Promise<void> => {
+      const owner = newId();
       if (resume) {
-        const claim = await claimDoc();
-        if (!claim || str(claim.schema) !== base.id) throw new SchemaRaceError();
-        if (Date.now() - Date.parse(str(claim.applied_at)) < FRESH_CLAIM_MS) {
+        const doc = await schemaDoc();
+        if (!doc || str(doc.state) !== 'creating' || str(doc.schema) !== base.id) {
+          throw new SchemaRaceError();
+        }
+        if (Date.now() - Date.parse(str(doc.applied_at)) < FRESH_CLAIM_MS) {
           throw new SchemaBusyError();
         }
+        // Take the stale claim over; of several starts, one wins.
+        const taken = await ledger.updateOne(
+          {
+            _id: SCHEMA_DOC_ID,
+            state: 'creating',
+            schema: base.id,
+            owner: doc.owner,
+            applied_at: doc.applied_at,
+          },
+          { $set: { owner, applied_at: nowIso() } },
+        );
+        if (taken.matchedCount !== 1) throw new SchemaBusyError();
       } else {
         try {
-          await ledger.insertOne({ _id: CLAIM_ID, schema: base.id, applied_at: nowIso() });
+          await ledger.insertOne({
+            _id: SCHEMA_DOC_ID,
+            state: 'creating',
+            schema: base.id,
+            owner,
+            applied_at: nowIso(),
+          });
         } catch (error) {
-          if ((error as { code?: unknown }).code !== 11000) throw error;
-          const claim = await claimDoc();
-          if (claim && str(claim.schema) === base.id) throw new SchemaBusyError();
+          if (errorCode(error) !== 11000) throw error;
+          const doc = await schemaDoc();
+          if (doc && str(doc.state) === 'creating' && str(doc.schema) === base.id) {
+            throw new SchemaBusyError();
+          }
           throw new SchemaRaceError();
         }
-        // A start that classified the database before another finished must
-        // not build over it: give the claim back and look again.
-        const finished = await ledger.countDocuments({ _id: { $ne: CLAIM_ID } });
-        if (finished > 0 || (await existing(base)).length > 0) {
-          await ledger.deleteOne({ _id: CLAIM_ID, schema: base.id });
+        // Anything another version left since the database was classified
+        // means it is not empty after all: give the claim back.
+        const others = await ledger.countDocuments({ _id: { $ne: SCHEMA_DOC_ID } });
+        if (others > 0 || (await existing(base)).length > 0) {
+          await ledger.deleteOne({ _id: SCHEMA_DOC_ID, owner });
           throw new SchemaRaceError();
         }
       }
-      try {
-        await createIndexes(db, indexes);
-      } catch (error) {
-        const code = (error as { code?: unknown }).code;
-        if (typeof code === 'number' && CONCURRENT_INDEX_ERRORS.has(code)) {
-          throw new SchemaBusyError('A concurrent index build interfered', { cause: error });
-        }
-        throw error;
-      }
-      try {
-        await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
-      } catch (error) {
-        // Already published by an earlier, interrupted run of this build.
-        if ((error as { code?: unknown }).code !== 11000) throw error;
-      }
-      await ledger.deleteOne({ _id: CLAIM_ID, schema: base.id });
+      await createIndexesRetryingElections(db, indexes);
+      const published = await ledger.updateOne(
+        { _id: SCHEMA_DOC_ID, state: 'creating', schema: base.id, owner },
+        { $set: { state: 'ready', applied_at: nowIso() }, $unset: { owner: '' } },
+      );
+      // Another start took the claim over meanwhile; it publishes instead.
+      if (published.matchedCount !== 1) throw new SchemaBusyError();
     },
   };
   await ensureBaseSchema(driver, schema, options);
+}
+
+/**
+ * How a MongoDB ledger document reads in the shared ledger vocabulary: the
+ * `schema` document as the fingerprint (`ready`) or its claim (`creating`),
+ * and any other document (a pre-0.6 migration id) as its `_id`.
+ */
+export function mongoLedgerEntry(doc: Row): string {
+  if (str(doc._id) !== SCHEMA_DOC_ID) return str(doc._id);
+  return str(doc.state) === 'ready' ? str(doc.schema) : `creating:${str(doc.schema)}`;
 }
 
 /* ── Shared connection state ────────────────────────────────────────────── */

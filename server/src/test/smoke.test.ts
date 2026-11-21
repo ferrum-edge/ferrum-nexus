@@ -68,6 +68,7 @@ import {
   ensureMongoSchema,
   latestMessagesPipeline,
   mongoBaseSchema,
+  mongoLedgerEntry,
 } from '../db/adapters/mongodb/index.js';
 import { ensureMysqlSchema } from '../db/adapters/mysql/schema.js';
 import { createPostgresSchemaDriver } from '../db/adapters/postgres/index.js';
@@ -6088,9 +6089,13 @@ async function olderPostgres(adminUrl: string, ledger: string[] | null): Promise
   await client.connect();
   try {
     if (ledger !== null) {
-      await client.query(
-        'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
-      );
+      // With no entries there is no ledger at all, as an earlier version's
+      // first start leaves it when it stops before recording anything.
+      if (ledger.length > 0) {
+        await client.query(
+          'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
+        );
+      }
       await client.query('CREATE TABLE users (id TEXT PRIMARY KEY)');
       for (const id of ledger) {
         await client.query("INSERT INTO schema_migrations VALUES ($1, 'then')", [id]);
@@ -6105,15 +6110,15 @@ async function olderPostgres(adminUrl: string, ledger: string[] | null): Promise
       const reader = new pg.Client({ connectionString: url });
       await reader.connect();
       try {
-        const ids = await reader.query('SELECT id FROM schema_migrations ORDER BY id');
         const tables = await reader.query(
           "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' " +
             'ORDER BY table_name',
         );
-        return {
-          ledger: ids.rows.map((row: { id: string }) => row.id),
-          tables: tables.rows.map((row: { table_name: string }) => row.table_name),
-        };
+        const names = tables.rows.map((row: { table_name: string }) => row.table_name);
+        const ids = names.includes('schema_migrations')
+          ? (await reader.query('SELECT id FROM schema_migrations ORDER BY id')).rows
+          : [];
+        return { ledger: ids.map((row: { id: string }) => row.id), tables: names };
       } finally {
         await reader.end();
       }
@@ -6136,10 +6141,12 @@ async function olderMysql(adminUrl: string, ledger: string[] | null): Promise<Ol
   const connection = await mysql.createConnection(url);
   try {
     if (ledger !== null) {
-      await connection.query(
-        'CREATE TABLE schema_migrations (id VARCHAR(191) NOT NULL PRIMARY KEY, ' +
-          'applied_at VARCHAR(32) NOT NULL)',
-      );
+      if (ledger.length > 0) {
+        await connection.query(
+          'CREATE TABLE schema_migrations (id VARCHAR(191) NOT NULL PRIMARY KEY, ' +
+            'applied_at VARCHAR(32) NOT NULL)',
+        );
+      }
       await connection.query('CREATE TABLE users (id VARCHAR(64) NOT NULL PRIMARY KEY)');
       for (const id of ledger) {
         await connection.execute("INSERT INTO schema_migrations VALUES (?, 'then')", [id]);
@@ -6153,17 +6160,19 @@ async function olderMysql(adminUrl: string, ledger: string[] | null): Promise<Ol
     inspect: async () => {
       const reader = await mysql.createConnection(url);
       try {
-        const [ids] = await reader.query<mysql.RowDataPacket[]>(
-          'SELECT id FROM schema_migrations ORDER BY id',
-        );
         const [tables] = await reader.query<mysql.RowDataPacket[]>(
           'SELECT TABLE_NAME AS name FROM information_schema.TABLES ' +
             'WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME',
         );
-        return {
-          ledger: ids.map((row) => String(row.id)),
-          tables: tables.map((row) => String(row.name)),
-        };
+        const names = tables.map((row) => String(row.name));
+        const ids = names.includes('schema_migrations')
+          ? (
+              await reader.query<mysql.RowDataPacket[]>(
+                'SELECT id FROM schema_migrations ORDER BY id',
+              )
+            )[0]
+          : [];
+        return { ledger: ids.map((row) => String(row.id)), tables: names };
       } finally {
         await reader.end();
       }
@@ -6205,7 +6214,7 @@ async function olderMongo(baseUrl: string, ledger: string[] | null): Promise<Old
         const collections = await db.listCollections({}, { nameOnly: true }).toArray();
         const users = await db.collection('users').indexes();
         return {
-          ledger: ids.map((doc) => String(doc._id)),
+          ledger: ids.map((doc) => mongoLedgerEntry(doc)),
           // Collections, plus any index beyond `_id` the refused start created.
           tables: [
             ...collections.map((collection) => collection.name),

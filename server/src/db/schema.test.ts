@@ -286,30 +286,87 @@ describe('ensureBaseSchema', () => {
 
   it('accepts the record a peer wrote while this start lost the creation race', async () => {
     const schema = loadBaseSchema('sqlite');
-    for (const busy of [false, true]) {
-      const recorded: string[] = [];
+    const recorded: string[] = [];
+    const driver: SchemaDriver = {
+      writesClaims: false,
+      async listRecorded() {
+        return [...recorded];
+      },
+      async existingTables() {
+        return [];
+      },
+      async createBaseSchema() {
+        // The peer committed first, and this start's own insert collided.
+        recorded.push(schema.id);
+        throw new Error('duplicate key');
+      },
+    };
+    assert.deepEqual(await ensureBaseSchema(driver, schema), { created: false });
+  });
+
+  it('waits while a peer of this build holds the claim, until it publishes', async () => {
+    const schema = loadBaseSchema('sqlite');
+    let recorded: string[] = [];
+    let creates = 0;
+    let polls = 0;
+    const driver: SchemaDriver = {
+      writesClaims: true,
+      async listRecorded() {
+        if (creates > 0) {
+          polls += 1;
+          // The peer holds its claim for a few polls, then publishes.
+          recorded = polls >= 6 ? [schema.id] : [schemaClaim(schema)];
+        }
+        return [...recorded];
+      },
+      async existingTables() {
+        return [];
+      },
+      async createBaseSchema() {
+        creates += 1;
+        throw new SchemaBusyError();
+      },
+    };
+    assert.deepEqual(await ensureBaseSchema(driver, schema, { pollMs: 1 }), {
+      created: false,
+    });
+    assert.equal(creates, 1, 'the start waited instead of creating again');
+    assert.ok(polls >= 6);
+  });
+
+  it('looks at the ledger again before refusing tables a peer just created', async () => {
+    const schema = loadBaseSchema('sqlite');
+    for (const [peer, writesClaims, expected] of [
+      // A transactional peer committed its tables and record together.
+      [schema.id, false, 'current'],
+      // A non-transactional peer claimed, then created its first table.
+      [schemaClaim(schema), true, 'resume'],
+    ] as const) {
       let reads = 0;
+      const resumes: boolean[] = [];
       const driver: SchemaDriver = {
-        writesClaims: false,
+        writesClaims,
         async listRecorded() {
           reads += 1;
-          // The peer finishes on the third read after this start failed.
-          if (busy && reads >= 4) return [schema.id];
-          return [...recorded];
+          return reads === 1 ? [] : [peer];
         },
         async existingTables() {
-          return [];
+          return ['organizations'];
         },
-        async createBaseSchema() {
-          if (busy) throw new SchemaBusyError();
-          // The peer committed first, and this start's own insert collided.
-          recorded.push(schema.id);
-          throw new Error('duplicate key');
+        async createBaseSchema(_base, { resume }) {
+          resumes.push(resume);
+          throw new SchemaRaceError();
         },
       };
-      assert.deepEqual(await ensureBaseSchema(driver, schema, { pollMs: 1 }), {
-        created: false,
-      });
+      if (expected === 'current') {
+        assert.deepEqual(await ensureBaseSchema(driver, schema), { created: false });
+        assert.deepEqual(resumes, []);
+      } else {
+        // Resuming a claim it found; the stub's race then ends in a refusal
+        // only after MAX_RACES, which proves it never refused the tables.
+        await assert.rejects(ensureBaseSchema(driver, schema));
+        assert.ok(resumes.length > 0 && resumes.every((resume) => resume));
+      }
     }
   });
 
