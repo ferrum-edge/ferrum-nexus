@@ -170,6 +170,13 @@ describe('published immutable service-manifest consumer', () => {
     ]) {
       assert.throws(() => validatedManifest(withEndpoint(refused)), CLEARTEXT_REFUSED, refused);
     }
+    // The pinned schema pattern runs first: `.` stops at a line terminator, so
+    // a separator after a path is refused before Edge's trim could apply.
+    for (const separator of ['\u2028', '\u2029']) {
+      const endpoint = `http://127.0.0.1:4318/v1/traces${separator}`;
+      assert.equal(manifestValidator.safeParse(withEndpoint(endpoint)).success, false);
+      assert.throws(() => validatedManifest(withEndpoint(endpoint)));
+    }
   });
 
   it('bounds the tracing resource ID Alloy derives for every export, with or without an exporter', () => {

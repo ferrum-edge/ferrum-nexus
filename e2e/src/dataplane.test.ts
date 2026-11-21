@@ -955,9 +955,15 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       body: { namespace: 'nexus', manifest: { ...manifest, auth: null } },
     });
     assert.equal(invalid.status, 400);
-    // A cleartext exporter to the upstream (a named host) is refused, and the
-    // refusal fetches nothing either: the snapshot below would count a plain
-    // HTTP request to it.
+    // A cleartext exporter to the upstream by name is refused, and the refusal
+    // fetches nothing either: the snapshot below would count a plain HTTP
+    // request to it. A loopback-literal override (`E2E_UPSTREAM_URL`) is
+    // spelled `localhost`, which reaches the same fixture and does not qualify.
+    const named = new URL(UPSTREAM_URL);
+    named.protocol = 'http:';
+    if (named.hostname === '[::1]' || named.hostname.startsWith('127.')) {
+      named.hostname = 'localhost';
+    }
     const cleartext = await portalRaw('POST', '/api/service-manifests/preview', {
       session: provider,
       body: {
@@ -966,7 +972,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
           ...manifest,
           gateway: {
             namespace: 'nexus',
-            otel_endpoint: `${UPSTREAM_URL}/manifest-must-not-fetch`,
+            otel_endpoint: `${named.origin}/manifest-must-not-fetch`,
           },
         },
       },

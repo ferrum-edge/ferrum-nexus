@@ -35,8 +35,11 @@ ferrum-alloy `main` at `2b206a4616586b6193d25958b646e2478fc40a94`
 - **Cleartext telemetry.** `gateway.otel_endpoint` must use `https://`, or `http://` to a
   canonical loopback IP literal (`127.d.d.d` or `[::1]`, optionally with a numeric port).
   Edge v0.9.19 and later drop a cleartext exporter to any other host, `localhost`
-  included, unless `allow_plaintext` is set, which Alloy's export never writes; Alloy
-  refuses the manifest. The pinned `contracts-edge-0.9.20` still publishes
+  included, unless `allow_plaintext` is set, which Alloy's export never writes. Alloy
+  refuses cleartext to a named host such as `otel-collector`, but still accepts some
+  loopback spellings Edge refuses, such as `[0:0:0:0:0:0:0:1]`
+  ([ferrum-alloy#319](https://github.com/ferrum-edge/ferrum-alloy/issues/319)); the
+  canonical-spelling rule here is Edge's. The pinned `contracts-edge-0.9.20` still publishes
   `valid/orders-api.json` with `http://otel-collector:4318/v1/traces`, so the preview
   refuses that one shared valid fixture until ferrum-contracts#82 (which moves it to
   `https://`) is published and re-vendored.
@@ -61,8 +64,10 @@ characters; every string refuses C0 control characters and DEL, `upstream.host`
 included (Edge allows tab, LF and CR there); and `gateway.otel_endpoint` refuses user
 information and a non-empty query or fragment, since the preview never echoes it and a
 query is a common place for a token. As Edge does, the endpoint is trimmed of
-surrounding Unicode white space before it is parsed and checked; the schema still
-requires the submitted string to start with the scheme.
+surrounding Unicode white space before it is parsed and checked, but the pinned schema
+pattern runs first on the submitted string: it requires the string to start with the
+scheme, and it refuses a line or paragraph separator (U+2028, U+2029) after a path,
+which Edge would trim.
 
 ## Related consumers
 
