@@ -1002,7 +1002,7 @@ is needed. What changes for Nexus:
 Procedure:
 
 1. **Check the gateway** with the Edge guide's list, set
-   `FERRUM_METRICS_BEARER_TOKEN` on Nexus to the gateway's metrics Bearer [REDACTED]
+   `FERRUM_METRICS_BEARER_TOKEN` on Nexus to the gateway's metrics Bearer token
    if the Usage card matters, keep `FERRUM_MAX_PROXY_HOPS` above `0`, and
    rename any `correlation_id` `header_name` set to `X-Ferrum-Hops`.
 2. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.15

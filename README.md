@@ -138,7 +138,29 @@ npm install
 cp .env.example .env
 # edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_JWT_SECRET
 # (both at least 32 characters; FERRUM_ADMIN_URL defaults to http://127.0.0.1:9000)
+```
 
+`.env.example` ships production defaults. For a local stack over plain
+`http://`, also change these keys in `.env` (they already exist in the file);
+[Getting started, step 3](docs/getting-started.md#3-set-up-ferrum-nexus) explains
+each one:
+
+```bash
+# The session cookies are Secure unless NEXUS_COOKIE_SECURE=false, and curl and
+# some browsers do not send Secure cookies over plain http. Production keeps
+# them Secure and serves https.
+NEXUS_ENV=development
+NEXUS_COOKIE_SECURE=false
+# Publishing refuses loopback and private-range upstreams unless this is true.
+# Leave it false wherever providers are not fully trusted.
+NEXUS_ALLOW_PRIVATE_UPSTREAMS=true
+# The gateway's proxy listener; without it every API's invoke_url is null.
+FERRUM_GATEWAY_PUBLIC_URL=http://127.0.0.1:8000
+```
+
+Then migrate and start:
+
+```bash
 npm run migrate   # builds shared, then migrates the database
 npm run dev       # backend :8787, web :5173
 ```
