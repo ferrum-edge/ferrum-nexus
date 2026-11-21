@@ -37,13 +37,14 @@ Since `v0.4.0` the supported Node range is `^22.22.2 || ^24.15.0 || >=26.0.0`.
 Node 22 remains supported; older Node 22/24 patches and Node 23/25 are excluded.
 Releases before `v0.4.0` supported Node 22.14 or later.
 
-- **Production upgrades.** Schema changes ship as forward migrations that
-  upgrade a released database in place; upgrades never require a reset. See
-  [schema versioning and upgrades](docs/operations.md#schema-versioning-and-upgrades)
-  and [backup and restore](docs/operations.md#5-backup-and-restore).
-- **Development databases.** A disposable database created before `v0.1.0` must
-  be recreated with the [development reset](docs/operations.md#buildout-schema-policy).
-  Never apply that reset to a database you need to keep.
+- **No upgrade path before 1.0.** Nexus is in buildout. Each backend has one base
+  schema that new databases are created at, and no upgrade paths will be designed
+  until 1.0. A database created by an earlier version is refused at startup,
+  never migrated, and must be recreated (from `v0.6.0`, which folded the earlier
+  migrations into the base schema). See
+  [schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10),
+  [moving to a new release](docs/operations.md#moving-to-a-new-release) and
+  [backup and restore](docs/operations.md#5-backup-and-restore).
 
 ## Features
 
@@ -139,7 +140,7 @@ cp .env.example .env
 # edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_JWT_SECRET
 # (both at least 32 characters; FERRUM_ADMIN_URL defaults to http://127.0.0.1:9000)
 
-npm run migrate   # builds shared, then migrates the database
+npm run migrate   # builds shared, then creates the database schema
 npm run dev       # backend :8787, web :5173
 ```
 

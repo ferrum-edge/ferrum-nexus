@@ -2137,7 +2137,11 @@ export interface NexusStore {
 
   /** Open connections and validate the deployment (e.g. Mongo replica-set check). */
   init(): Promise<void>;
-  /** Apply every pending migration; idempotent, safe to call on every boot. */
+  /**
+   * Create the base schema in an empty database, or confirm an existing one is
+   * at it; idempotent, safe to call on every boot. Never upgrades: a database
+   * created by an earlier version is refused (`db/schema.ts`).
+   */
   migrate(): Promise<void>;
   /** Close pools/handles. Safe to call more than once. */
   close(): Promise<void>;

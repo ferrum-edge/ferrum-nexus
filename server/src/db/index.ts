@@ -14,7 +14,8 @@ import type { NexusStore } from './store.js';
  * Build the {@link NexusStore} for a configuration.
  *
  * The caller is responsible for `await store.init()` and `await store.migrate()`
- * before handing the store to services. `init()` is also where a driver
+ * (which creates or verifies the base schema; see `schema.ts`) before handing
+ * the store to services. `init()` is also where a driver
  * validates its deployment — notably the MongoDB replica-set check.
  */
 export function createStore(config: NexusConfig): NexusStore {

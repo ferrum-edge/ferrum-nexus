@@ -1,8 +1,13 @@
--- Ferrum Nexus initial schema — PostgreSQL dialect.
+-- Ferrum Nexus base schema — PostgreSQL dialect.
 --
--- Buildout baseline: edit this schema directly; recreate development databases.
+-- Until Ferrum Nexus 1.0 this file is the whole schema: there are no
+-- migrations and no upgrade path between releases. Change the schema by
+-- editing this file (and its other dialect variants) directly. A database
+-- created by an earlier version of the schema is refused at startup, never
+-- migrated, and must be recreated (server/src/db/schema.ts; docs/operations.md,
+-- "Schema and upgrades before 1.0").
 --
--- Mirrors 001_initial.sql table for table, column for column and index for
+-- Mirrors base.sql table for table, column for column and index for
 -- index. The conventions are identical to the SQLite variant:
 --   * every id is a TEXT string UUID;
 --   * every timestamp is a TEXT ISO-8601 string (UTC, millisecond precision) —
@@ -39,7 +44,8 @@ CREATE TABLE IF NOT EXISTS users (
   email_verified SMALLINT NOT NULL DEFAULT 0 CHECK (email_verified IN (0, 1)),
   last_login_at  TEXT,
   created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL
+  updated_at     TEXT NOT NULL,
+  email_lifecycle_fence TEXT NOT NULL DEFAULT ''
 );
 
 -- Email uniqueness is case-insensitive; the adapter also lowercases on write.
@@ -91,7 +97,8 @@ CREATE TABLE IF NOT EXISTS apis (
   gateway_state        TEXT NOT NULL DEFAULT 'deployed'
                          CHECK (gateway_state IN ('deployed', 'repair_required')),
   created_at           TEXT NOT NULL,
-  updated_at           TEXT NOT NULL
+  updated_at           TEXT NOT NULL,
+  agents_json          TEXT DEFAULT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_apis_slug ON apis (lower(slug));
@@ -171,7 +178,10 @@ CREATE TABLE IF NOT EXISTS access_requests (
   decided_at    TEXT,
   decision_note TEXT,
   created_at    TEXT NOT NULL,
-  updated_at    TEXT NOT NULL
+  updated_at    TEXT NOT NULL,
+  requested_tools_json TEXT DEFAULT NULL,
+  approved_tools_json  TEXT DEFAULT NULL,
+  grant_id      TEXT NULL
 );
 
 -- One open request per API/user pair.
@@ -196,7 +206,8 @@ CREATE TABLE IF NOT EXISTS grants (
   revoked_by        TEXT REFERENCES users (id) ON DELETE SET NULL,
   revoked_at        TEXT,
   created_at        TEXT NOT NULL,
-  updated_at        TEXT NOT NULL
+  updated_at        TEXT NOT NULL,
+  approved_tools_json TEXT DEFAULT NULL
 );
 
 -- At most one active grant per API/user pair.
@@ -284,7 +295,10 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS ix_messages_sender
   ON messages (sender_user_id, created_at);
 
-CREATE INDEX IF NOT EXISTS ix_messages_thread ON messages (thread_id, created_at);
+-- The newest message of a thread is the first row in `(created_at DESC, id DESC)`
+-- order; carrying `id` makes that lookup one index seek per thread, and every
+-- oldest-first or newest-first read of a thread walks the same index.
+CREATE INDEX IF NOT EXISTS ix_messages_thread_latest ON messages (thread_id, created_at, id);
 
 -- ── Notifications ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS notifications (
@@ -317,13 +331,18 @@ CREATE TABLE IF NOT EXISTS email_outbox (
   last_error      TEXT,
   idempotency_key TEXT,
   created_at      TEXT NOT NULL,
-  updated_at      TEXT NOT NULL
+  updated_at      TEXT NOT NULL,
+  recipient_user_id TEXT NULL,
+  priority        INTEGER NOT NULL DEFAULT 1
 );
 
 -- At-most-once semantics for keyed sends (verification, mass email).
 CREATE UNIQUE INDEX IF NOT EXISTS ux_email_outbox_idempotency ON email_outbox (idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_email_outbox_due ON email_outbox (status, next_attempt_at);
+-- Claim order; ix_email_outbox_due stays for due-time filtering.
+CREATE INDEX IF NOT EXISTS ix_email_outbox_priority
+  ON email_outbox (status, priority DESC, next_attempt_at ASC NULLS FIRST, created_at ASC, id ASC);
 
 -- ── Audit log (append-only) ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -456,3 +475,171 @@ CREATE TABLE IF NOT EXISTS gateway_identities (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_gateway_identities_username
   ON gateway_identities (namespace, ferrum_username);
 CREATE INDEX IF NOT EXISTS ix_gateway_identities_user ON gateway_identities (user_id, namespace);
+
+-- ── API gateway plugins (first-class plugin ownership) ─────────────────────
+--
+-- The Edge plugin config id Nexus created for each of an API's first-class
+-- plugins: the auth plugin, the `access_control` gate, the `rate_limiting`
+-- quota and the `cors` policy. Edge lets a proxy carry several configs of one
+-- plugin name, so the portal addresses these by recorded id rather than by
+-- name, exactly as `api_plugins.ferrum_plugin_config_id` does for the palette.
+-- Every published API has one row per role, with a NULL config id where the
+-- portal owns no config in that role.
+CREATE TABLE IF NOT EXISTS api_gateway_plugins (
+  api_id                  TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
+  role                    TEXT NOT NULL
+                            CHECK (role IN ('auth', 'access_control', 'rate_limit', 'cors')),
+  ferrum_plugin_config_id TEXT,
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL,
+  PRIMARY KEY (api_id, role)
+);
+
+-- ── API specification changes ──────────────────────────────────────────────
+--
+-- One row per revision that replaced another (an upload or a rollback), holding
+-- the consumer-facing comparison of the two documents as JSON. It is kept
+-- apart from `api_specs` so that it outlives the documents
+-- `NEXUS_SPEC_HISTORY_LIMIT` prunes, which is why `spec_id` and
+-- `previous_spec_id` are plain references rather than foreign keys. Retention
+-- is bounded separately, by `SPEC_CHANGE_HISTORY_LIMIT` rows per API.
+CREATE TABLE IF NOT EXISTS api_spec_changes (
+  id               TEXT PRIMARY KEY,
+  api_id           TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
+  spec_id          TEXT NOT NULL,
+  previous_spec_id TEXT,
+  kind             TEXT NOT NULL CHECK (kind IN ('update', 'rollback')),
+  version          TEXT NOT NULL,
+  previous_version TEXT,
+  revision_seq     INTEGER NOT NULL,
+  report_json      TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_api_spec_changes_spec ON api_spec_changes (spec_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_api_spec_changes_seq ON api_spec_changes (api_id, revision_seq);
+
+-- ── Notification preferences ───────────────────────────────────────────────
+--
+-- One row per account that has changed a preference; an account without one
+-- gets each notice's default, which is what each column defaults to. The first
+-- preferences are the spec-change notice's two channels (issue #447): in-app,
+-- on by default, and email, off until the account turns it on.
+CREATE TABLE IF NOT EXISTS user_notification_preferences (
+  user_id                 TEXT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  api_spec_updated_in_app SMALLINT NOT NULL DEFAULT 1 CHECK (api_spec_updated_in_app IN (0, 1)),
+  api_spec_updated_email  SMALLINT NOT NULL DEFAULT 0 CHECK (api_spec_updated_email IN (0, 1)),
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL
+);
+
+-- ── Identity-provider links, address proofs and password locks ────────────
+--
+-- `user_identities`: one row per portal account linked to one subject (`sub`)
+-- at one OpenID Connect provider. A returning single sign-on is matched on
+-- `(provider_id, issuer, subject)`, never on the email address, so the first
+-- unique key is what decides whose account a sign-in opens — and a provider
+-- id reused for another issuer matches none of the old links. The second keeps
+-- an account to one identity per provider. `provisioned` marks the identity
+-- that created the account, which then has no local password to fall back on.
+--
+-- `user_email_proofs`: evidence that an account's holder controls its address
+-- — a redeemed verification link, a completed password reset, or a provider
+-- that asserted the address verified. `users.email_verified` alone is not
+-- evidence: with verification off a registration is marked verified without
+-- any. Only a proof for the account's current address allows single sign-on
+-- to link to it.
+--
+-- `user_password_locks`: accounts that may never use a local password, because
+-- an identity provider created them. Kept apart from the links on purpose:
+-- removing the provider or unlinking the identity must not hand the account a
+-- password (through a reset) that outlives the provider's offboarding.
+CREATE TABLE IF NOT EXISTS user_identities (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  provider_id   TEXT NOT NULL,
+  issuer        TEXT NOT NULL,
+  subject       TEXT NOT NULL,
+  email         TEXT,
+  provisioned   SMALLINT NOT NULL DEFAULT 0 CHECK (provisioned IN (0, 1)),
+  last_login_at TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  CONSTRAINT ux_user_identities_subject UNIQUE (provider_id, issuer, subject),
+  CONSTRAINT ux_user_identities_user_provider UNIQUE (user_id, provider_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_email_proofs (
+  user_id    TEXT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  email      TEXT NOT NULL,
+  method     TEXT NOT NULL
+               CHECK (method IN ('verification_link', 'password_reset', 'identity_provider')),
+  proven_at  TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_password_locks (
+  user_id     TEXT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  provider_id TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+-- ── Account recovery jobs ──────────────────────────────────────────────────
+--
+-- The credential revocation a trusted password reset owes, made durable.
+-- The row is written in the same transaction as the reset, so a reset can
+-- never commit without its revocation; a worker drains it with retry until it
+-- succeeds, and credential issuance is refused while a row is outstanding.
+-- unblocked_at records when a job that kept failing stopped refusing
+-- issuance; its eventual success revokes only credentials created before it.
+CREATE TABLE IF NOT EXISTS account_recovery_jobs (
+  id              TEXT PRIMARY KEY,
+  generation      TEXT NOT NULL DEFAULT '',
+  user_id         TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'sending')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error      TEXT,
+  unblocked_at    TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_account_recovery_jobs_user ON account_recovery_jobs (user_id);
+CREATE INDEX IF NOT EXISTS ix_account_recovery_jobs_due ON account_recovery_jobs (status, next_attempt_at);
+
+-- ── Access gateway jobs ────────────────────────────────────────────────────
+--
+-- The gateway half of a targeted grant revocation or an access approval, made
+-- durable (issue #651). The row is written in the transaction that claims the
+-- decision: a grant moving active to revoked (kind 'revoke'), or a request
+-- moving pending to approved (kind 'approve'). It is deleted once the Edge ACL
+-- write it owes has landed, or, for an approval, in the transaction that
+-- commits the grant. A row a crash or a failed compensation leaves behind is
+-- driven to completion by the access gateway worker: a revocation's group
+-- comes off, and an approval whose grant never committed has its groups taken
+-- back and its request returned to pending.
+-- subject_id is the grant (revoke) or the access request (approve); both are
+-- UUIDs, so one unique key covers both kinds.
+CREATE TABLE IF NOT EXISTS access_gateway_jobs (
+  id              TEXT PRIMARY KEY,
+  generation      TEXT NOT NULL DEFAULT '',
+  kind            TEXT NOT NULL CHECK (kind IN ('revoke', 'approve')),
+  subject_id      TEXT NOT NULL,
+  api_id          TEXT NOT NULL,
+  user_id         TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  application_id  TEXT,
+  requested_by    TEXT REFERENCES users (id) ON DELETE SET NULL,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'sending')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error      TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_access_gateway_jobs_subject ON access_gateway_jobs (subject_id);
+CREATE INDEX IF NOT EXISTS ix_access_gateway_jobs_due ON access_gateway_jobs (status, next_attempt_at);

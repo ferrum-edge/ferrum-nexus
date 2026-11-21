@@ -1331,7 +1331,7 @@ export async function main(): Promise<void> {
   const { env, file: envFile, overrides } = environmentWithEnvFile();
   const loaded = loadConfig(env);
   // Before the store opens or the gateway is touched: a portal pointed at the
-  // wrong namespace should not migrate a database on the way to failing.
+  // wrong namespace should not create a schema on the way to failing.
   assertEnvOverridesAllowed(overrides, loaded, envFile);
   // With no `NEXUS_BOOTSTRAP_TOKEN` the portal still gets one, generated per
   // process, so a fresh deployment is never bootstrappable by whoever reaches
@@ -1345,6 +1345,9 @@ export async function main(): Promise<void> {
 
   const store = createStore(config);
   await store.init();
+  // Creates the base schema in an empty database. A database created by an
+  // earlier version is refused here, before anything reads it: there is no
+  // upgrade path before 1.0 (docs/operations.md).
   await store.migrate();
   // The same condition `GET /api/branding` publishes as `bootstrap_required`.
   const founderSeatOpen = (await store.users.countActiveSuperAdmins()) === 0;

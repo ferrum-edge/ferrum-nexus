@@ -2,7 +2,7 @@
  * MongoDB implementation of {@link NexusStore} (`mongodb` driver v7).
  *
  * The logical schema is unchanged: **one collection per logical table**, with
- * the same names the SQL migrations use. Only the physical representation
+ * the same names the SQL base schema uses. Only the physical representation
  * differs, in four documented ways:
  *
  * 1. **`_id` holds the string UUID.** Records still surface it as `id`; the
@@ -108,11 +108,12 @@ import { conflict, NexusError } from '../../../lib/errors.js';
 import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
-  runMigrations,
-  SCHEMA_MIGRATIONS_TABLE,
-  type MigrationDriver,
-  type MigrationFile,
-} from '../../migrate.js';
+  ensureBaseSchema,
+  SCHEMA_LEDGER_TABLE,
+  schemaFingerprint,
+  type BaseSchema,
+  type SchemaDriver,
+} from '../../schema.js';
 import type {
   AccessRequestFilter,
   AccessRequestRecord,
@@ -1072,7 +1073,7 @@ function auditFilter(filter: AuditLogFilter): Filter<NexusDoc> {
 
 /* ── Index definitions ──────────────────────────────────────────────────── */
 
-/** One MongoDB index, declared as data so a released step's definition can be frozen. */
+/** One MongoDB index, declared as data so the base schema's fingerprint covers it. */
 export interface IndexDefinition {
   collection: string;
   name: string;
@@ -1082,21 +1083,23 @@ export interface IndexDefinition {
 }
 
 /**
- * Every index of `001_initial`, translated.
+ * The MongoDB base schema: every index, translated from the SQL base schema.
+ * Collections need no creation step; the first insert makes each one.
  *
- * Frozen once the baseline ships: `db/released/001_initial.mongodb.json` is the
- * committed snapshot and `db/released-migrations.test.ts` fails when this list
- * drifts from it. After the release an index change is a new step in
- * {@link MONGO_MIGRATIONS}, never an edit here.
+ * Until 1.0 this list is edited directly, like `schema/base*.sql`; there are no
+ * migration steps. Its fingerprint ({@link MONGO_BASE_SCHEMA}) is what the
+ * ledger records, so a database created from an earlier list is refused at
+ * startup rather than run with indexes the code no longer expects
+ * (docs/operations.md, "Schema and upgrades before 1.0").
  *
  * Partial *unique* indexes map directly onto `partialFilterExpression`. The one
  * non-unique partial index — SQLite's `ix_notifications_unread ... WHERE
  * read_at IS NULL` — becomes the composite `(user_id, read_at)` instead: it is
  * a lookup index rather than a uniqueness rule, so equivalent coverage is all
- * that is required (the MySQL migration makes the same trade for the same
+ * that is required (the MySQL schema makes the same trade for the same
  * reason).
  */
-export const BASELINE_INDEXES: readonly IndexDefinition[] = [
+export const BASE_INDEXES: readonly IndexDefinition[] = [
   // organizations — `name_lower` is the derived companion of `lower(name)`.
   {
     collection: 'organizations',
@@ -1272,7 +1275,14 @@ export const BASELINE_INDEXES: readonly IndexDefinition[] = [
   },
   { collection: 'message_threads', name: 'ix_threads_api', key: { api_id: 1 } },
 
-  { collection: 'messages', name: 'ix_messages_thread', key: { thread_id: 1, created_at: 1 } },
+  // The newest message of a thread is the first in NEWEST_FIRST order,
+  // `(created_at desc, _id desc)`; carrying `_id` makes that lookup one index
+  // seek per thread, and an oldest-first read walks the same index backwards.
+  {
+    collection: 'messages',
+    name: 'ix_messages_thread_latest',
+    key: { thread_id: 1, created_at: -1, _id: -1 },
+  },
 
   {
     collection: 'notifications',
@@ -1375,13 +1385,58 @@ export const BASELINE_INDEXES: readonly IndexDefinition[] = [
     unique: true,
     partialFilterExpression: { edge_ordinal: { $type: 'number' } },
   },
-];
 
-/**
- * Indexes for the durable account-recovery revocations (migration `013`), the
- * MongoDB counterpart of the SQL table's unique user key and due scan.
- */
-export const ACCOUNT_RECOVERY_JOB_INDEXES: readonly IndexDefinition[] = [
+  // Claim order; `ix_email_outbox_due` stays for due-time filtering.
+  {
+    collection: 'email_outbox',
+    name: 'ix_email_outbox_priority',
+    key: { status: 1, priority: -1, next_attempt_at: 1, created_at: 1, _id: 1 },
+  },
+
+  // The `(api_id, role)` key of the first-class plugin ownership record,
+  // which the SQL dialects declare as a primary key.
+  {
+    collection: 'api_gateway_plugins',
+    name: 'ux_api_gateway_plugins_api_role',
+    key: { api_id: 1, role: 1 },
+    unique: true,
+  },
+
+  // One change summary per revision, and an API's summaries in publication
+  // order, as the SQL dialects' two unique indexes.
+  {
+    collection: 'api_spec_changes',
+    name: 'ux_api_spec_changes_spec',
+    key: { spec_id: 1 },
+    unique: true,
+  },
+  {
+    collection: 'api_spec_changes',
+    name: 'ux_api_spec_changes_seq',
+    key: { api_id: 1, revision_seq: 1 },
+    unique: true,
+  },
+
+  // The two keys of an identity-provider link. `(provider_id, issuer,
+  // subject)` decides whose account a returning sign-in opens; `(user_id,
+  // provider_id)` keeps an account to one identity per provider and serves the
+  // per-account listing. `user_notification_preferences`,
+  // `user_email_proofs` and `user_password_locks` are keyed by `_id` (the
+  // account id) and need no index.
+  {
+    collection: 'user_identities',
+    name: 'ux_user_identities_subject',
+    key: { provider_id: 1, issuer: 1, subject: 1 },
+    unique: true,
+  },
+  {
+    collection: 'user_identities',
+    name: 'ux_user_identities_user_provider',
+    key: { user_id: 1, provider_id: 1 },
+    unique: true,
+  },
+
+  // Account-recovery revocations: the SQL table's unique user key and due scan.
   {
     collection: 'account_recovery_jobs',
     name: 'ux_account_recovery_jobs_user',
@@ -1393,13 +1448,8 @@ export const ACCOUNT_RECOVERY_JOB_INDEXES: readonly IndexDefinition[] = [
     name: 'ix_account_recovery_jobs_due',
     key: { status: 1, next_attempt_at: 1 },
   },
-];
 
-/**
- * Indexes for the durable access gateway jobs (migration `015`), the MongoDB
- * counterpart of the SQL table's unique subject key and due scan.
- */
-export const ACCESS_GATEWAY_JOB_INDEXES: readonly IndexDefinition[] = [
+  // Access gateway jobs: the SQL table's unique subject key and due scan.
   {
     collection: 'access_gateway_jobs',
     name: 'ux_access_gateway_jobs_subject',
@@ -1413,6 +1463,13 @@ export const ACCESS_GATEWAY_JOB_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
+/** The MongoDB base schema's ledger identity: a fingerprint of {@link BASE_INDEXES}. */
+export const MONGO_BASE_SCHEMA: BaseSchema = {
+  id: schemaFingerprint(BASE_INDEXES.map((index) => JSON.stringify(index))),
+  source: 'BASE_INDEXES (server/src/db/adapters/mongodb/index.ts)',
+  sql: '',
+};
+
 /** Create one batch of {@link IndexDefinition}s. */
 async function createIndexes(db: Db, indexes: readonly IndexDefinition[]): Promise<void> {
   for (const index of indexes) {
@@ -1423,121 +1480,6 @@ async function createIndexes(db: Db, indexes: readonly IndexDefinition[]): Promi
         ? { partialFilterExpression: index.partialFilterExpression }
         : {}),
     });
-  }
-}
-
-/**
- * One MongoDB migration step. Mongo migrations are code rather than `.sql`
- * files, so each step also declares the indexes it creates as data: that
- * declaration is what the released-migration guard compares with the step's
- * frozen snapshot.
- */
-export interface MongoMigrationStep {
-  id: string;
-  indexes: readonly IndexDefinition[];
-  apply: (db: Db) => Promise<void>;
-}
-
-/**
- * `002_api_gateway_plugins`: the `(api_id, role)` key of the first-class
- * plugin ownership record, which the SQL dialects declare as a primary key.
- * The collection itself needs no creation step; the first insert makes it.
- */
-export const API_GATEWAY_PLUGIN_INDEXES: readonly IndexDefinition[] = [
-  {
-    collection: 'api_gateway_plugins',
-    name: 'ux_api_gateway_plugins_api_role',
-    key: { api_id: 1, role: 1 },
-    unique: true,
-  },
-];
-
-/**
- * `004_api_spec_changes`: one change summary per revision, and an API's
- * summaries in publication order, as the SQL dialects' two unique indexes.
- * The collection needs no creation step; the first insert makes it.
- */
-export const API_SPEC_CHANGE_INDEXES: readonly IndexDefinition[] = [
-  {
-    collection: 'api_spec_changes',
-    name: 'ux_api_spec_changes_spec',
-    key: { spec_id: 1 },
-    unique: true,
-  },
-  {
-    collection: 'api_spec_changes',
-    name: 'ux_api_spec_changes_seq',
-    key: { api_id: 1, revision_seq: 1 },
-    unique: true,
-  },
-];
-
-/**
- * `003_messages_thread_latest`: the newest message of a thread is the first in
- * {@link NEWEST_FIRST} order, `(created_at desc, _id desc)`. The baseline's
- * `ix_messages_thread` key `(thread_id, created_at)` leaves the `_id`
- * tie-break to an in-memory sort of the whole thread, so this index carries
- * `_id` too and replaces it: the newest-message lookup becomes one index seek
- * per thread, and an oldest-first read of a thread walks the same index
- * backwards.
- */
-export const MESSAGE_THREAD_LATEST_INDEXES: readonly IndexDefinition[] = [
-  {
-    collection: 'messages',
-    name: 'ix_messages_thread_latest',
-    key: { thread_id: 1, created_at: -1, _id: -1 },
-  },
-];
-
-/**
- * `006_user_identities`: the two keys of an identity-provider link, which the
- * SQL dialects declare as unique constraints. `(provider_id, issuer, subject)`
- * decides whose account a returning sign-in opens; `(user_id, provider_id)`
- * keeps an account to one identity per provider and serves the per-account
- * listing. `user_email_proofs` and `user_password_locks` are keyed by `_id`
- * (the account id) and need no index. No collection needs a creation step;
- * the first insert makes it.
- */
-export const USER_IDENTITY_INDEXES: readonly IndexDefinition[] = [
-  {
-    collection: 'user_identities',
-    name: 'ux_user_identities_subject',
-    key: { provider_id: 1, issuer: 1, subject: 1 },
-    unique: true,
-  },
-  {
-    collection: 'user_identities',
-    name: 'ux_user_identities_user_provider',
-    key: { user_id: 1, provider_id: 1 },
-    unique: true,
-  },
-];
-
-/** Claim order; retain the baseline due-time index for eligibility filtering. */
-export const EMAIL_OUTBOX_PRIORITY_INDEXES: readonly IndexDefinition[] = [
-  {
-    collection: 'email_outbox',
-    name: 'ix_email_outbox_priority',
-    key: { status: 1, priority: -1, next_attempt_at: 1, created_at: 1, _id: 1 },
-  },
-];
-
-/** The baseline messages index {@link MESSAGE_THREAD_LATEST_INDEXES} supersedes. */
-const SUPERSEDED_MESSAGES_THREAD_INDEX = 'ix_messages_thread';
-
-/**
- * Create the newest-message index, then drop the one it supersedes. Re-runnable:
- * `createIndex` is a no-op for an identical index, and an index or collection
- * that is already gone is what the drop wants.
- */
-async function applyMessageThreadLatest(db: Db): Promise<void> {
-  await createIndexes(db, MESSAGE_THREAD_LATEST_INDEXES);
-  try {
-    await db.collection(COLLECTIONS.messages).dropIndex(SUPERSEDED_MESSAGES_THREAD_INDEX);
-  } catch (error) {
-    // 26 NamespaceNotFound, 27 IndexNotFound.
-    const code = (error as { code?: unknown }).code;
-    if (code !== 26 && code !== 27) throw error;
   }
 }
 
@@ -1571,175 +1513,33 @@ export function latestMessagesPipeline(threadIds: readonly string[]): Document[]
   ];
 }
 
-/** The baseline creates every index; document fields are written by repositories. */
-export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
-  {
-    id: '001_initial',
-    indexes: BASELINE_INDEXES,
-    apply: (db: Db): Promise<void> => createIndexes(db, BASELINE_INDEXES),
-  },
-  {
-    id: '002_api_gateway_plugins',
-    indexes: API_GATEWAY_PLUGIN_INDEXES,
-    apply: (db: Db): Promise<void> => createIndexes(db, API_GATEWAY_PLUGIN_INDEXES),
-  },
-  {
-    id: '003_messages_thread_latest',
-    indexes: MESSAGE_THREAD_LATEST_INDEXES,
-    apply: applyMessageThreadLatest,
-  },
-  {
-    id: '004_api_spec_changes',
-    indexes: API_SPEC_CHANGE_INDEXES,
-    apply: (db: Db): Promise<void> => createIndexes(db, API_SPEC_CHANGE_INDEXES),
-  },
-  {
-    // `user_notification_preferences` is keyed by the account id in `_id`, so
-    // it declares no index; the step exists so every backend applies the same
-    // migration ids.
-    id: '005_notification_preferences',
-    indexes: [],
-    apply: async (): Promise<void> => {},
-  },
-  {
-    id: '006_user_identities',
-    indexes: USER_IDENTITY_INDEXES,
-    apply: (db: Db): Promise<void> => createIndexes(db, USER_IDENTITY_INDEXES),
-  },
-  {
-    id: '007_outbox_recipient',
-    indexes: [],
-    apply: async (db: Db): Promise<void> => {
-      await db
-        .collection(COLLECTIONS.emailOutbox)
-        .updateMany(
-          { recipient_user_id: { $exists: false } },
-          { $set: { recipient_user_id: null } },
-        );
-    },
-  },
-  {
-    id: '008_email_lifecycle_fence',
-    indexes: [],
-    apply: async (db: Db): Promise<void> => {
-      await db
-        .collection(COLLECTIONS.users)
-        .updateMany(
-          { email_lifecycle_fence: { $exists: false } },
-          { $set: { email_lifecycle_fence: '' } },
-        );
-    },
-  },
-  {
-    id: '009_outbox_priority',
-    indexes: EMAIL_OUTBOX_PRIORITY_INDEXES,
-    apply: async (db: Db): Promise<void> => {
-      const outbox = db.collection(COLLECTIONS.emailOutbox);
-      await outbox.updateMany(
-        { priority: { $exists: false } },
-        { $set: { priority: OUTBOX_PRIORITY.normal } },
-      );
-      // Match only the durable namespaces, never subject/body text. Both
-      // updates are replayable without changing delivery state or claim tokens.
-      await outbox.updateMany(
-        { priority: OUTBOX_PRIORITY.normal, idempotency_key: /^(verify:|reset:)/ },
-        { $set: { priority: OUTBOX_PRIORITY.high } },
-      );
-      await createIndexes(db, EMAIL_OUTBOX_PRIORITY_INDEXES);
-    },
-  },
-  {
-    id: '010_api_agents',
-    indexes: [],
-    apply: async (db: Db): Promise<void> => {
-      await db
-        .collection(COLLECTIONS.apis)
-        .updateMany({ agents: { $exists: false } }, { $set: { agents: null } });
-    },
-  },
-  {
-    id: '011_mcp_tool_subsets',
-    indexes: [],
-    apply: async (db: Db): Promise<void> => {
-      for (const [collection, fields] of [
-        [COLLECTIONS.accessRequests, ['requested_tools', 'approved_tools']],
-        [COLLECTIONS.grants, ['approved_tools']],
-      ] as const) {
-        for (const field of fields) {
-          await db
-            .collection(collection)
-            .updateMany({ [field]: { $exists: false } }, { $set: { [field]: null } });
-        }
-      }
-    },
-  },
-  {
-    id: '012_access_request_grant',
-    indexes: [],
-    apply: async (db: Db): Promise<void> => {
-      await db
-        .collection(COLLECTIONS.accessRequests)
-        .updateMany({ grant_id: { $exists: false } }, { $set: { grant_id: null } });
-    },
-  },
-  {
-    id: '013_account_recovery_jobs',
-    indexes: ACCOUNT_RECOVERY_JOB_INDEXES,
-    apply: (db: Db): Promise<void> => createIndexes(db, ACCOUNT_RECOVERY_JOB_INDEXES),
-  },
-  {
-    // MySQL widens eight text columns (issues #604 and #605). BSON strings
-    // have no column width, so MongoDB has nothing to change.
-    id: '014_mysql_text_capacity',
-    indexes: [],
-    apply: async (): Promise<void> => undefined,
-  },
-  {
-    id: '015_access_gateway_jobs',
-    indexes: ACCESS_GATEWAY_JOB_INDEXES,
-    apply: (db: Db): Promise<void> => createIndexes(db, ACCESS_GATEWAY_JOB_INDEXES),
-  },
-];
-
 /**
- * Apply every step of `steps` not yet recorded in `schema_migrations`, in id
- * order, under the same protocol as the SQL adapters. `steps` defaults to the
- * full list; the upgrade tests pass the released prefix to build a database as
- * an earlier release left it.
+ * Create the base schema in an empty database, accept one already at it, and
+ * refuse any other, under the same protocol as the SQL adapters. `createIndex`
+ * is a no-op for an identical index, so a start interrupted before the ledger
+ * write simply creates the rest and records it.
  */
-export async function runMongoMigrations(
+export async function ensureMongoSchema(
   db: Db,
-  steps: readonly MongoMigrationStep[] = MONGO_MIGRATIONS,
+  schema: BaseSchema = MONGO_BASE_SCHEMA,
+  indexes: readonly IndexDefinition[] = BASE_INDEXES,
 ): Promise<void> {
-  const collection = db.collection<NexusDoc>(SCHEMA_MIGRATIONS_TABLE);
-  const byId = new Map(steps.map((step) => [step.id, step.apply]));
-  const driver: MigrationDriver = {
-    ensureMigrationsTable: async (): Promise<void> => {
-      // `_id` is the migration id, so the implicit unique index is all the
+  const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE);
+  const driver: SchemaDriver = {
+    ensureLedger: async (): Promise<void> => {
+      // `_id` is the schema id, so the implicit unique index is all the
       // bookkeeping this needs; the collection is created on first insert.
     },
-    listApplied: async (): Promise<string[]> => {
-      const docs = await collection.find({}).toArray();
+    listRecorded: async (): Promise<string[]> => {
+      const docs = await ledger.find({}).toArray();
       return docs.map((doc) => str((doc as Row)._id));
     },
-    applyMigration: async (migration: MigrationFile): Promise<void> => {
-      const apply = byId.get(migration.id);
-      if (!apply) {
-        throw new NexusError(
-          'INTERNAL',
-          `No MongoDB implementation for migration '${migration.id}'`,
-        );
-      }
-      await apply(db);
-      await collection.insertOne({ _id: migration.id, applied_at: nowIso() });
+    createBaseSchema: async (base: BaseSchema): Promise<void> => {
+      await createIndexes(db, indexes);
+      await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
     },
   };
-  const files: MigrationFile[] = steps.map((step) => ({
-    id: step.id,
-    filename: `${step.id}.mongodb`,
-    sql: '',
-  }));
-  await runMigrations(driver, files);
+  await ensureBaseSchema(driver, schema);
 }
 
 /* ── Shared connection state ────────────────────────────────────────────── */
@@ -1897,7 +1697,7 @@ class MongoStore implements NexusStore {
   }
 
   async migrate(): Promise<void> {
-    await runMongoMigrations(this.ctx.db);
+    await ensureMongoSchema(this.ctx.db);
   }
 
   async close(): Promise<void> {

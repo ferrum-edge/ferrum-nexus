@@ -92,7 +92,7 @@ docker/    Dockerfile + docker-compose.example.yml
 | `db/store.ts`                                  | The `NexusStore` interface: 31 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
 | `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                                              |
 | `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                                                                                |
-| `db/migrations/`                               | SQL migrations per dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. MongoDB declares its indexes in code.                                                            |
+| `db/schema/`, `db/schema.ts`                   | The base schema per dialect (`base.sql`, `base.pg.sql`, `base.mysql.sql`; MongoDB declares its indexes in code) and the create-or-refuse rule (§4.5).                  |
 | `ferrum-admin/`                                | The **only** module that knows Edge's HTTP shape: `client.ts`, `jwt.ts`, `types.ts` and helpers.                                                                       |
 | `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                                                                   |
 | `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                                                                                |
@@ -288,21 +288,27 @@ and grant approval need multi-document transactions. With the opt-in,
 writes in place. That is an evaluation mode, not a production configuration.
 See [`operations.md`](operations.md#mongodb).
 
-### 4.5 Migrations
+### 4.5 The base schema (no migrations before 1.0)
 
-`db/migrate.ts` owns ordering, idempotency and "already applied". Adapters
-supply three primitives: `ensureMigrationsTable`, `listApplied`,
-`applyMigration`. Applied ids go in `schema_migrations`. The id (for example
-`001_initial`, `002_api_gateway_plugins`) is shared across dialects, so a
-migration can never apply twice on one database.
+Until 1.0 there are no migrations. Each backend has one base schema
+(`db/schema/base.sql`, `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in
+the MongoDB adapter), and a schema change edits it directly. `db/schema.ts`
+owns the rule every adapter applies at `migrate()`. Adapters supply three
+primitives: `ensureLedger`, `listRecorded` and `createBaseSchema`.
 
-`db/released-migrations.ts` records each released migration's per-backend
-checksum (SQL files, and `db/released/<id>.mongodb.json` for MongoDB). A schema
-change is a new forward migration with a higher id in every backend; CI rejects
-an edit to a released one
-([operations](operations.md#schema-versioning-and-upgrades)). The server build
-copies SQL files to `server/dist/db/migrations/`, and each runner loads the
-directory beside its own module.
+- An empty `schema_migrations` ledger means a new database. The adapter
+  creates the base schema and records its fingerprint (`base_<16 hex>`, a hash
+  of its statements) in one transaction where the engine allows. On MySQL it
+  replays `CREATE TABLE IF NOT EXISTS` statements under an advisory lock.
+- A ledger holding exactly this build's fingerprint means the schema is
+  current, so nothing happens.
+- Anything else, such as a pre-0.6 migration chain or another fingerprint, is
+  refused with a `NexusError` before any service reads the data. A database
+  created by an earlier version is never migrated
+  ([operations](operations.md#schema-and-upgrades-before-10)).
+
+The server build copies `db/schema/` to `server/dist/db/schema/`, and the
+loader reads it beside its own module.
 
 ---
 
@@ -558,8 +564,8 @@ leaves an outgoing auth config attached lists it under
 `outgoing_auth_configs_remaining` and records
 `existing_credentials_invalidated: false`, rather than claiming the old
 credentials stopped working. Once a role is recorded, the record alone governs
-it. Upgrade notes:
-[`operations.md`](operations.md#schema-versioning-and-upgrades).
+it. Schema notes:
+[`operations.md`](operations.md#schema-and-upgrades-before-10).
 
 ### 5.4 One consumer per identity per namespace
 
@@ -884,8 +890,7 @@ objects and removes the rows.
 ### Agent-ready listings
 
 `apis.agents_json` (MongoDB: `apis.agents`) stores an explicit operation selection,
-with `null` meaning off. Forward migration `010` upgrades retained APIs in place
-on SQLite, PostgreSQL, MySQL and MongoDB; no released migration is edited. Wire
+with `null` meaning off; the base schema creates the column on every backend. Wire
 types and the bounded Path Item selection helper live in `shared/src/agents.ts`.
 Publishing, settings updates, revision/rollback and restore validate the selection
 against the document and the method policy before gateway writes. Existing owner

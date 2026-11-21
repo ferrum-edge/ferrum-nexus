@@ -203,7 +203,7 @@ interface SmokeTarget {
    * transaction queue: two Nexus instances, as a deployment has. The contention
    * cases need one, because serialising bodies orders a single store object's
    * transactions and says nothing about the instance next to it. The caller
-   * closes what this returns; the schema is already migrated.
+   * closes what this returns; the schema already exists.
    *
    * Absent for sqlite, which is one connection to `:memory:` and cannot have a
    * second instance at all.
@@ -256,7 +256,7 @@ function withDatabase(url: string, database: string): string {
 
 /* ── Targets ────────────────────────────────────────────────────────────── */
 
-/** Open a second store over an already-migrated database; see {@link SmokeTarget.peer}. */
+/** Open a second store over a database that has its schema; see {@link SmokeTarget.peer}. */
 async function openPeer(config: ReturnType<typeof loadConfig>): Promise<NexusStore> {
   const store = createStore(config);
   try {
@@ -456,13 +456,13 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       return { id: api.id, slug: api.slug };
     }
 
-    /* ── migrations ───────────────────────────────────────────────────── */
+    /* ── schema ───────────────────────────────────────────────────────── */
 
-    it('migrations are idempotent', async () => {
+    it('ensuring the schema is idempotent', async () => {
       await store.migrate();
       await store.migrate();
       const user = await makeUser();
-      assert.ok(user.id, 'the schema is still usable after re-running migrations');
+      assert.ok(user.id, 'the schema is still usable after ensuring it again');
     });
 
     it('reports healthy', async () => {
@@ -6029,6 +6029,246 @@ register(
 register('mysql', process.env.NEXUS_TEST_MYSQL_URL, 'NEXUS_TEST_MYSQL_URL', mysqlTarget);
 register('mongodb', process.env.NEXUS_TEST_MONGO_URL, 'NEXUS_TEST_MONGO_URL', mongoTarget);
 
+/* ── Older databases are refused, never migrated ───────────────────────── */
+
+/**
+ * What the schema ledger of a database an earlier release created holds: a
+ * v0.5.2 database's migration chain, and a database created from an earlier
+ * version of the base schema. Before 1.0 there is no upgrade path, so the
+ * current store must refuse both at `migrate()` and change nothing
+ * (docs/operations.md, "Schema and upgrades before 1.0").
+ */
+const OLDER_LEDGERS: Record<string, string[]> = {
+  'an earlier release': [
+    '001_initial',
+    '002_api_gateway_plugins',
+    '003_messages_thread_latest',
+    '004_api_spec_changes',
+    '005_notification_preferences',
+    '006_user_identities',
+    '007_outbox_recipient',
+    '008_email_lifecycle_fence',
+    '009_outbox_priority',
+    '010_api_agents',
+    '011_mcp_tool_subsets',
+    '012_access_request_grant',
+    '013_account_recovery_jobs',
+  ],
+  'an earlier base schema': ['base_0000000000000000'],
+};
+const NO_UPGRADE_PATH = /no upgrade path before 1\.0/;
+
+/** A throwaway database holding `ledger` and an older `users` table. */
+interface OlderDatabase {
+  url: string;
+  /** The ledger ids and table names left in the database. */
+  inspect: () => Promise<{ ledger: string[]; tables: string[] }>;
+  drop: () => Promise<void>;
+}
+
+async function olderPostgres(adminUrl: string, ledger: string[]): Promise<OlderDatabase> {
+  const database = throwawayDbName();
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  await admin.query(`CREATE DATABASE "${database}"`);
+  await admin.end();
+  const url = withDatabase(adminUrl, database);
+  const client = new pg.Client({ connectionString: url });
+  await client.connect();
+  try {
+    await client.query('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)');
+    await client.query('CREATE TABLE users (id TEXT PRIMARY KEY)');
+    for (const id of ledger) {
+      await client.query("INSERT INTO schema_migrations VALUES ($1, 'then')", [id]);
+    }
+  } finally {
+    await client.end();
+  }
+  return {
+    url,
+    inspect: async () => {
+      const reader = new pg.Client({ connectionString: url });
+      await reader.connect();
+      try {
+        const ids = await reader.query('SELECT id FROM schema_migrations ORDER BY id');
+        const tables = await reader.query(
+          "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' " +
+            'ORDER BY table_name',
+        );
+        return {
+          ledger: ids.rows.map((row: { id: string }) => row.id),
+          tables: tables.rows.map((row: { table_name: string }) => row.table_name),
+        };
+      } finally {
+        await reader.end();
+      }
+    },
+    drop: async () => {
+      const cleaner = new pg.Client({ connectionString: adminUrl });
+      await cleaner.connect();
+      await cleaner.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+      await cleaner.end();
+    },
+  };
+}
+
+async function olderMysql(adminUrl: string, ledger: string[]): Promise<OlderDatabase> {
+  const database = throwawayDbName();
+  const admin = await mysql.createConnection(adminUrl);
+  await admin.query(`CREATE DATABASE \`${database}\``);
+  await admin.end();
+  const url = withDatabase(adminUrl, database);
+  const connection = await mysql.createConnection(url);
+  try {
+    await connection.query(
+      'CREATE TABLE schema_migrations (id VARCHAR(191) NOT NULL PRIMARY KEY, ' +
+        'applied_at VARCHAR(32) NOT NULL)',
+    );
+    await connection.query('CREATE TABLE users (id VARCHAR(64) NOT NULL PRIMARY KEY)');
+    for (const id of ledger) {
+      await connection.execute("INSERT INTO schema_migrations VALUES (?, 'then')", [id]);
+    }
+  } finally {
+    await connection.end();
+  }
+  return {
+    url,
+    inspect: async () => {
+      const reader = await mysql.createConnection(url);
+      try {
+        const [ids] = await reader.query<mysql.RowDataPacket[]>(
+          'SELECT id FROM schema_migrations ORDER BY id',
+        );
+        const [tables] = await reader.query<mysql.RowDataPacket[]>(
+          'SELECT TABLE_NAME AS name FROM information_schema.TABLES ' +
+            'WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME',
+        );
+        return {
+          ledger: ids.map((row) => String(row.id)),
+          tables: tables.map((row) => String(row.name)),
+        };
+      } finally {
+        await reader.end();
+      }
+    },
+    drop: async () => {
+      const cleaner = await mysql.createConnection(adminUrl);
+      await cleaner.query(`DROP DATABASE IF EXISTS \`${database}\``);
+      await cleaner.end();
+    },
+  };
+}
+
+async function olderMongo(baseUrl: string, ledger: string[]): Promise<OlderDatabase> {
+  const database = throwawayDbName();
+  const url = withDatabase(baseUrl, database);
+  const client = new MongoClient(url);
+  await client.connect();
+  try {
+    const db = client.db(database);
+    await db.collection('users').insertOne({ _id: 'older' } as Document);
+    for (const id of ledger) {
+      await db.collection('schema_migrations').insertOne({ _id: id, applied_at: 'then' } as Document);
+    }
+  } finally {
+    await client.close();
+  }
+  return {
+    url,
+    inspect: async () => {
+      const reader = new MongoClient(url);
+      await reader.connect();
+      try {
+        const db = reader.db(database);
+        const ids = await db.collection('schema_migrations').find({}).sort({ _id: 1 }).toArray();
+        const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+        const users = await db.collection('users').indexes();
+        return {
+          ledger: ids.map((doc) => String(doc._id)),
+          // Collections, plus any index beyond `_id` the refused start created.
+          tables: [
+            ...collections.map((collection) => collection.name),
+            ...users.filter((index) => index.name !== '_id_').map((index) => String(index.name)),
+          ].sort(),
+        };
+      } finally {
+        await reader.close();
+      }
+    },
+    drop: async () => {
+      const cleaner = new MongoClient(url);
+      try {
+        await cleaner.connect();
+        await cleaner.db(database).dropDatabase();
+      } finally {
+        await cleaner.close();
+      }
+    },
+  };
+}
+
+function registerOlderSchemaRefusal(
+  label: string,
+  driver: DbDriver,
+  url: string | undefined,
+  variable: string,
+  makeOlder: (url: string, ledger: string[]) => Promise<OlderDatabase>,
+): void {
+  describe(`older databases are refused — ${label}`, () => {
+    if (url === undefined || url.trim() === '') {
+      it(`skipped — set ${variable} to run against a real ${label} server`, {
+        skip: `${variable} is not set`,
+      });
+      return;
+    }
+    for (const [source, ledger] of Object.entries(OLDER_LEDGERS)) {
+      it(`refuses a database created by ${source}, changing nothing`, async () => {
+        const older = await makeOlder(url, ledger);
+        try {
+          const before = await older.inspect();
+          const store = createStore(testConfig(driver, older.url));
+          try {
+            await store.init();
+            await assert.rejects(store.migrate(), (error: unknown) => {
+              assert.ok(isNexusError(error), String(error));
+              assert.match(error.message, NO_UPGRADE_PATH);
+              assert.ok(error.message.includes(ledger[0]!), error.message);
+              return true;
+            });
+          } finally {
+            await store.close();
+          }
+          assert.deepEqual(await older.inspect(), before);
+        } finally {
+          await older.drop();
+        }
+      });
+    }
+  });
+}
+
+registerOlderSchemaRefusal(
+  'postgres',
+  'postgres',
+  process.env.NEXUS_TEST_POSTGRES_URL,
+  'NEXUS_TEST_POSTGRES_URL',
+  olderPostgres,
+);
+registerOlderSchemaRefusal(
+  'mysql',
+  'mysql',
+  process.env.NEXUS_TEST_MYSQL_URL,
+  'NEXUS_TEST_MYSQL_URL',
+  olderMysql,
+);
+registerOlderSchemaRefusal(
+  'mongodb',
+  'mongodb',
+  process.env.NEXUS_TEST_MONGO_URL,
+  'NEXUS_TEST_MONGO_URL',
+  olderMongo,
+);
+
 /* ── The MongoDB replica-set rule ───────────────────────────────────────── */
 
 const standaloneUrl = process.env.NEXUS_TEST_MONGO_STANDALONE_URL;
@@ -6175,8 +6415,8 @@ describe('mongodb newest-message index', () => {
       const db = mongo.db(database);
       const messages = db.collection('messages');
 
-      // `003_messages_thread_latest` replaces the baseline's thread index with
-      // one whose key is the whole newest-first sort.
+      // The base schema's thread index has the whole newest-first sort as its
+      // key; the older `(thread_id, created_at)` one no longer exists.
       const indexes = await messages.indexes();
       const latestIndex = indexes.find((index) => index.name === 'ix_messages_thread_latest');
       assert.ok(latestIndex, 'the newest-message index exists');
@@ -6188,7 +6428,7 @@ describe('mongodb newest-message index', () => {
       assert.equal(
         indexes.some((index) => index.name === 'ix_messages_thread'),
         false,
-        'the superseded index is dropped',
+        'the superseded index is not created',
       );
 
       const makeIndexUser = (role: 'client' | 'provider'): Promise<UserRecord> =>

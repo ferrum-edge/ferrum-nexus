@@ -290,6 +290,7 @@ image against the same Edge release on demand, outside CI, and covers the local
 data-plane profile only.
 
 Nexus supports Node `^22.22.2 || ^24.15.0 || >=26.0.0` since `v0.4.0` (adopted through
-#521). `v0.4.0` froze migrations `007_outbox_recipient` to `011_mcp_tool_subsets`,
-`v0.5.0` froze `012_access_request_grant`, and `v0.5.1` froze
-`013_account_recovery_jobs`; `v0.5.2` adds none, and no Edge adoption adds a migration.
+#521). From `v0.6.0` the earlier migrations are folded into one base schema, with no
+upgrade path between releases before 1.0
+([schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10)); no Edge
+adoption changes the Nexus schema.

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { createSqliteMigrationDriver, openSqliteDatabase } from './adapters/sqlite/index.js';
-import { loadMigrations, runMigrations, splitSqlStatements } from './migrate.js';
+import { createSqliteSchemaDriver, openSqliteDatabase } from './adapters/sqlite/index.js';
+import { ensureBaseSchema, loadBaseSchema, splitSqlStatements } from './schema.js';
 
 const CREATE_STATEMENT = /^CREATE\s/;
 const CREATE_TABLE_IF_NOT_EXISTS = /^CREATE TABLE IF NOT EXISTS (\w+)/;
@@ -11,40 +11,35 @@ const NOT_NULL = /NOT NULL/;
 const UNIQUE_CONSTRAINT_FAILED = /UNIQUE constraint failed/;
 const UNIQUE_CONSTRAINT_FAILED_PRIMARY = /UNIQUE constraint failed|PRIMARY KEY/;
 
-describe('buildout schema baseline', () => {
-  it('ships one complete initial schema for each SQL dialect', () => {
+/** A fresh in-memory SQLite database at the base schema. */
+function baseDatabase(): ReturnType<typeof openSqliteDatabase> {
+  const db = openSqliteDatabase(':memory:');
+  db.exec(loadBaseSchema('sqlite').sql);
+  return db;
+}
+
+describe('base schema', () => {
+  it('ships one complete base schema for each SQL dialect, with the same tables', () => {
     for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
-      const files = loadMigrations(dialect);
-      assert.deepEqual(
-        files.map((file) => file.id),
-        [
-          '001_initial',
-          '002_api_gateway_plugins',
-          '003_messages_thread_latest',
-          '004_api_spec_changes',
-          '005_notification_preferences',
-          '006_user_identities',
-          '007_outbox_recipient',
-          '008_email_lifecycle_fence',
-          '009_outbox_priority',
-          '010_api_agents',
-          '011_mcp_tool_subsets',
-          '012_access_request_grant',
-          '013_account_recovery_jobs',
-          '014_mysql_text_capacity',
-          '015_access_gateway_jobs',
-        ],
-      );
-      const statements = splitSqlStatements(files[0]!.sql);
+      const statements = splitSqlStatements(loadBaseSchema(dialect).sql);
       assert.ok(statements.length > 0);
       assert.ok(statements.every((statement) => CREATE_STATEMENT.test(statement)));
+      if (dialect === 'mysql') {
+        // MySQL DDL commits on its own, so its schema must be replayable as a
+        // whole: only CREATE TABLE IF NOT EXISTS, with every index inline.
+        assert.ok(statements.every((statement) => CREATE_TABLE_IF_NOT_EXISTS.test(statement)));
+      }
       const tables = statements.flatMap((statement) => {
         const match = CREATE_TABLE_IF_NOT_EXISTS.exec(statement);
         return match ? [match[1]] : [];
       });
       assert.deepEqual(tables.sort(), [
+        'access_gateway_jobs',
         'access_requests',
+        'account_recovery_jobs',
+        'api_gateway_plugins',
         'api_plugins',
+        'api_spec_changes',
         'api_specs',
         'api_viewers',
         'apis',
@@ -66,15 +61,60 @@ describe('buildout schema baseline', () => {
         'notifications',
         'organizations',
         'sessions',
+        'user_email_proofs',
+        'user_identities',
+        'user_notification_preferences',
+        'user_password_locks',
         'users',
       ]);
     }
   });
 
-  it('initializes current defaults and constraints without incremental ALTERs', () => {
-    const db = openSqliteDatabase(':memory:');
+  it('creates every column the stores write, with its default', () => {
+    const db = baseDatabase();
     try {
-      db.exec(loadMigrations('sqlite')[0]!.sql);
+      db.exec(`
+        INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('u', 'user@example.test', 'unused', 'User', 'provider', 'now', 'now');
+        INSERT INTO apis (id, name, slug, owner_user_id, namespace, version, auth_plugin,
+                          created_at, updated_at)
+          VALUES ('a', 'API', 'api', 'u', 'ferrum', '1.0.0', 'key_auth', 'now', 'now');
+        INSERT INTO access_requests (id, api_id, user_id, justification, created_at, updated_at)
+          VALUES ('r', 'a', 'u', 'Because', 'now', 'now');
+        INSERT INTO grants (id, api_id, user_id, acl_group, granted_by, created_at, updated_at)
+          VALUES ('g', 'a', 'u', 'group', 'u', 'now', 'now');
+        INSERT INTO email_outbox (id, to_email, subject, body_html, body_text, created_at, updated_at)
+          VALUES ('e', 'user@example.test', 'Subject', '<p>Body</p>', 'Body', 'now', 'now');
+      `);
+      assert.deepEqual(db.prepare('SELECT email_lifecycle_fence FROM users').get(), {
+        email_lifecycle_fence: '',
+      });
+      assert.deepEqual(db.prepare('SELECT agents_json FROM apis').get(), { agents_json: null });
+      assert.deepEqual(
+        db
+          .prepare('SELECT requested_tools_json, approved_tools_json, grant_id FROM access_requests')
+          .get(),
+        { requested_tools_json: null, approved_tools_json: null, grant_id: null },
+      );
+      assert.deepEqual(db.prepare('SELECT approved_tools_json FROM grants').get(), {
+        approved_tools_json: null,
+      });
+      // Mail is normal priority (1) and unbound unless the writer says otherwise.
+      assert.deepEqual(db.prepare('SELECT recipient_user_id, priority FROM email_outbox').get(), {
+        recipient_user_id: null,
+        priority: 1,
+      });
+      for (const table of ['account_recovery_jobs', 'access_gateway_jobs']) {
+        assert.deepEqual(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get(), { n: 0 });
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it('initializes current defaults and constraints', () => {
+    const db = baseDatabase();
+    try {
       db.exec(`
         INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
           VALUES ('u', 'user@example.test', 'unused', 'User', 'client', 'now', 'now');
@@ -113,21 +153,9 @@ describe('buildout schema baseline', () => {
     }
   });
 
-  it('adds the first-class plugin ownership table as a replayable forward migration', () => {
-    for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
-      const forward = loadMigrations(dialect).find((file) => file.id === '002_api_gateway_plugins');
-      assert.ok(forward, `${dialect} ships 002_api_gateway_plugins`);
-      // This migration is replayable without metadata checks.
-      const statements = splitSqlStatements(forward.sql);
-      assert.deepEqual(
-        statements.map((statement) => CREATE_TABLE_IF_NOT_EXISTS.exec(statement)?.[1]),
-        ['api_gateway_plugins'],
-      );
-    }
-
-    const db = openSqliteDatabase(':memory:');
+  it('keys first-class plugin ownership by API and role', () => {
+    const db = baseDatabase();
     try {
-      for (const file of loadMigrations('sqlite')) db.exec(file.sql);
       db.exec(`
         INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
           VALUES ('u', 'user@example.test', 'unused', 'User', 'provider', 'now', 'now');
@@ -164,24 +192,25 @@ describe('buildout schema baseline', () => {
     }
   });
 
-  it("replaces the messages thread index with one that serves a thread's newest message", async () => {
-    // InnoDB already suffixes secondary indexes with the primary key, so the
-    // MySQL step is intentionally empty, which its runner accepts.
-    const mysqlStep = loadMigrations('mysql').find(
-      (file) => file.id === '003_messages_thread_latest',
+  it("indexes messages so a thread's newest message is one index seek", async () => {
+    // InnoDB already suffixes secondary indexes with the primary key, so MySQL
+    // keeps `ix_messages_thread (thread_id, created_at)`, which is
+    // `(thread_id, created_at, id)` there.
+    assert.match(loadBaseSchema('mysql').sql, /KEY ix_messages_thread \(thread_id, created_at\)/);
+    assert.match(
+      loadBaseSchema('pg').sql,
+      /ix_messages_thread_latest ON messages \(thread_id, created_at, id\)/,
     );
-    assert.ok(mysqlStep, 'mysql ships 003_messages_thread_latest');
-    assert.deepEqual(splitSqlStatements(mysqlStep.sql), []);
 
     const db = openSqliteDatabase(':memory:');
     try {
-      await runMigrations(createSqliteMigrationDriver(db), loadMigrations('sqlite'));
+      await ensureBaseSchema(createSqliteSchemaDriver(db), loadBaseSchema('sqlite'));
       const indexes = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'messages'")
         .all()
         .map((row) => (row as { name: string }).name);
       assert.ok(indexes.includes('ix_messages_thread_latest'));
-      assert.equal(indexes.includes('ix_messages_thread'), false, 'the old index is dropped');
+      assert.equal(indexes.includes('ix_messages_thread'), false);
 
       // The per-thread subquery of `findLatestByThreads`: the `id` tie-break
       // comes from the index, not from a temporary sort of the thread.
@@ -206,20 +235,9 @@ describe('buildout schema baseline', () => {
     }
   });
 
-  it('adds the revision change history as a replayable forward migration', () => {
-    const mysqlStep = loadMigrations('mysql').find((file) => file.id === '004_api_spec_changes');
-    assert.ok(mysqlStep, 'mysql ships 004_api_spec_changes');
-    // This migration is replayable without metadata checks.
-    assert.deepEqual(
-      splitSqlStatements(mysqlStep.sql).map(
-        (statement) => CREATE_TABLE_IF_NOT_EXISTS.exec(statement)?.[1],
-      ),
-      ['api_spec_changes'],
-    );
-
-    const db = openSqliteDatabase(':memory:');
+  it('keeps one change summary per revision, outliving the revision itself', () => {
+    const db = baseDatabase();
     try {
-      for (const file of loadMigrations('sqlite')) db.exec(file.sql);
       const sql =
         'INSERT INTO api_spec_changes (id, api_id, spec_id, kind, version, revision_seq, ' +
         'report_json, created_at, updated_at) ' +
@@ -247,21 +265,9 @@ describe('buildout schema baseline', () => {
     }
   });
 
-  it('adds identity-provider links, proofs and password locks as a replayable migration', () => {
-    for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
-      const forward = loadMigrations(dialect).find((file) => file.id === '006_user_identities');
-      assert.ok(forward, `${dialect} ships 006_user_identities`);
-      // This migration is replayable without metadata checks.
-      const statements = splitSqlStatements(forward.sql);
-      assert.deepEqual(
-        statements.map((statement) => CREATE_TABLE_IF_NOT_EXISTS.exec(statement)?.[1]),
-        ['user_identities', 'user_email_proofs', 'user_password_locks'],
-      );
-    }
-
-    const db = openSqliteDatabase(':memory:');
+  it('keys identity-provider links, proofs and password locks to the account', () => {
+    const db = baseDatabase();
     try {
-      for (const file of loadMigrations('sqlite')) db.exec(file.sql);
       const link = (id: string, user: string, provider: string, issuer: string, sub: string) =>
         db
           .prepare(

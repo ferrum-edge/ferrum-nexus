@@ -6,6 +6,33 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Breaking
+
+- **One base schema, and no upgrade path before 1.0.** Ferrum Nexus is in
+  buildout, and no upgrade paths will be designed until 1.0. Every migration,
+  `001_initial` through `015_access_gateway_jobs` (including the unreleased
+  `014_mysql_text_capacity` and `015_access_gateway_jobs`), is folded into a
+  single base schema per backend: `server/src/db/schema/base.sql`,
+  `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in the MongoDB adapter.
+  A new database is created directly at the final schema. The migration files,
+  the released-migration checksum manifest (`released-migrations.ts`, its
+  MongoDB snapshots and its test) and the released-baseline upgrade suite are
+  removed.
+  **A database created by `v0.5.2` or earlier is not migrated.** At startup,
+  and in `npm run migrate`, Nexus reads `schema_migrations`. A pre-0.6
+  migration chain, or a base-schema fingerprint other than its own, makes it
+  exit non-zero without changing anything, with an error that says to start
+  against a new, empty database. Back up the old database (it is the rollback
+  to `v0.5.2`), recreate it, deal with the old portal's resources in the Edge
+  namespace, and register the first administrator again; see
+  [schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10)
+  and [moving to a new release](docs/operations.md#moving-to-a-new-release).
+  The ledger now holds one row: the base schema's fingerprint (`base_` and 16
+  hex digits, a hash of its statements), so a later release that edits the
+  schema also refuses databases created before the edit. `npm run migrate`
+  keeps its name; it creates or verifies the schema and prints
+  `Schema ready (driver: …).`
+
 ### Added
 
 - A scheduled **Edge Main Drift** workflow (`.github/workflows/edge-main-drift.yml`, weekly and
@@ -526,11 +553,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   acquired again, so the leases of deleted consumers, proxies and applications
   were never removed. `leases.deleteExpired` and the `expires_at` index existed
   for this sweep, but nothing called it.
-- A failed migration names itself, as the upgrade runbook says it does
-  (#678). The error now reads `Migration <id> failed: <driver error>`, with
-  the driver error kept as its `cause`; before, SQLite, PostgreSQL and
-  MongoDB printed only the bare driver error, so the operator had to work out
-  which migration ran it.
+- A failed schema creation names what failed (#678). The error reads
+  `Creating the base schema <id> failed: <driver error>`, with the driver
+  error kept as its `cause`; before, SQLite, PostgreSQL and MongoDB printed
+  only the bare driver error.
 - `GET /api/health` reports the version in `server/package.json` (#679). It
   read `npm_package_version`, which the image's `node server/dist/index.js`
   never sets, and otherwise a literal that each release had to bump by hand.
@@ -545,13 +571,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   value whose JSON holds a backslash did not match itself. It is now a literal
   substring test, as the search filters already are (#595).
 - MySQL now enforces `apis.circuit_breaker IN (0, 1)`, as SQLite and
-  PostgreSQL always have; the pending `014_mysql_text_capacity` migration adds
-  the constraint (#677).
-- The released-baseline upgrade suite now seeds the structures each source
-  release's later migrations added (gateway plugin ownership, change
-  summaries, notification preferences, identity links, a bound outbox row,
-  agent and tool selections, a request for more tools, a recovery job), so
-  their data is proven to survive the upgrade on every backend.
+  PostgreSQL always have; the MySQL base schema declares the constraint (#677).
 - Publish and spec-revision rollback tests, and the refused-compensation
   contract, now fail if the injected failure never fires or no gateway write
   preceded it.
@@ -571,7 +591,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   An approval likewise committed `approved` before its group and grant, and
   could leave the request `approved` with no grant and a group no grant stood
   behind. Each claim now commits a durable `access_gateway_jobs` row
-  (migration `015_access_gateway_jobs`), which the request deletes once the
+  (a new table in the base schema), which the request deletes once the
   gateway matches. A new background worker finishes what is left: it takes a
   revoked grant's groups off (`access.revoke_complete`), unless the grant is
   active again or a newer grant holds them, and compensates an approval whose
@@ -579,11 +599,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `pending` (`access.approve_rollback` with `recovered: true`). A tool
   approval cancelled because its grant is gone now clears the approver's
   `decided_by` and `decided_at`. A request that stalls until the worker takes
-  its job over writes nothing to the gateway. The first start after the
-  migration also queues jobs, once, for revoked grants and grantless
-  approvals an earlier release may already have stranded
-  (`access.stranded_repair_queued`); approved tool requests are listed for a
-  manual repair instead. See
+  its job over writes nothing to the gateway. The first start also scans,
+  once, for revoked grants and grantless approvals an earlier release may have
+  stranded and queues jobs for them (`access.stranded_repair_queued`). Since a
+  database an earlier release created is now refused rather than upgraded,
+  the scan finds nothing on a database created at the base schema. See
   [operations](docs/operations.md#access-gateway-jobs).
 
 - Access requests, grants and message threads no longer show a `private`
@@ -755,8 +775,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   match the term as a literal substring, as PostgreSQL, MySQL and MongoDB
   already did. A backslash, `%` or `_` in the term is an ordinary character.
 - **MySQL stores every value the API accepts in audit details and spec
-  metadata** (#604, #605). The new forward migration `014_mysql_text_capacity`
-  widens eight columns to `LONGTEXT`:
+  metadata** (#604, #605). The MySQL base schema declares eight columns as
+  `LONGTEXT`:
   - `audit_logs.details_json` and `apis.description` (were `TEXT`, 65,535
     bytes);
   - `api_specs.parsed_title` (was `VARCHAR(255)`);
@@ -768,10 +788,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   descriptions failed on strict-mode MySQL with an internal error, and was
   truncated otherwise. So did a specification with a long `info.title`,
   `info.version` or `info.description`; the last two become the API's version
-  and description when the request names none. The
-  migration is a no-op on SQLite, PostgreSQL and MongoDB. On MySQL it rebuilds
-  the affected tables, so allow for that on a large audit log. The MySQL
-  migration runner now supports this widening and verifies it on replay.
+  and description when the request names none. SQLite, PostgreSQL and MongoDB
+  had no such limit.
 
 - **Web console state fixes** (#593, #594, #596, #597).
   - A credential issue or rotation that is in flight can no longer be

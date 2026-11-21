@@ -10,7 +10,7 @@
  *   (`"ident"` → `` `ident` ``, which is what lets the shared repos say
  *   `"key"` — a reserved word here and not in PostgreSQL) and reports
  *   `affectedRows` as the matched row count for UPDATEs (CLIENT_FOUND_ROWS);
- * - the serialized, resumable migration runner in `migrations.ts`;
+ * - the serialized, replayable base-schema creation in `schema.ts`;
  * - `transaction()`, a real `START TRANSACTION`/`COMMIT`/`ROLLBACK` on a
  *   dedicated connection checked out of the pool for the duration of the body.
  *   Nested `transaction()` calls join the outer one, and bodies are serialised,
@@ -34,7 +34,7 @@ import mysql from 'mysql2/promise';
 import type { DbDriver } from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
-import { runMysqlMigrations } from './migrations.js';
+import { ensureMysqlSchema } from './schema.js';
 import type { NexusStore, StoreHealth } from '../../store.js';
 import { formatSql, type Row, type SqlExecutor, type SqlParam } from '../sql-common.js';
 import { createSqlStore, type SqlStoreBackend } from '../sql-repos.js';
@@ -92,7 +92,7 @@ class MysqlBackend implements SqlStoreBackend {
   }
 
   async migrate(): Promise<void> {
-    await runMysqlMigrations(this.db);
+    await ensureMysqlSchema(this.db);
   }
 
   async close(): Promise<void> {

@@ -99,12 +99,12 @@ import { conflict } from '../../../lib/errors.js';
 import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
-  loadMigrations,
-  runMigrations,
-  SCHEMA_MIGRATIONS_TABLE,
-  type MigrationDriver,
-  type MigrationFile,
-} from '../../migrate.js';
+  ensureBaseSchema,
+  loadBaseSchema,
+  SCHEMA_LEDGER_TABLE,
+  type BaseSchema,
+  type SchemaDriver,
+} from '../../schema.js';
 import type {
   AccessRequestFilter,
   AccessRequestRecord,
@@ -798,7 +798,7 @@ export function openSqliteDatabase(path: string): Database {
   }
   // SQLite's built-in `lower()` folds ASCII only, while the search `q` filter
   // and MongoDB's derived `name_lower`/`slug_lower` fields use JS
-  // `toLowerCase()`. Overriding it here, before any migration runs, makes the
+  // `toLowerCase()`. Overriding it here, before the schema is created, makes the
   // `lower(name)` / `lower(slug)` / `lower(email)` expression indexes — and the
   // case-insensitive unique rules `ux_organizations_name`,
   // `ux_applications_owner_name`, `ux_users_email` and `ux_apis_slug` — agree
@@ -809,8 +809,8 @@ export function openSqliteDatabase(path: string): Database {
   // an index expression. An existing file database has its unique indexes built
   // with the old ASCII `lower`, so it must be recreated (or `REINDEX` the four
   // `lower(...)` indexes) to pick the new mapping up. Every released database
-  // was created with this mapping (it predates v0.1.0), so no forward
-  // migration or reindex path is required (see docs/operations.md).
+  // was created with this mapping (it predates v0.1.0), so no reindex is
+  // required (see docs/operations.md).
   db.function('lower', { deterministic: true }, (value: unknown): string | null => {
     if (value === null || value === undefined) return null;
     return String(value).toLowerCase();
@@ -818,29 +818,29 @@ export function openSqliteDatabase(path: string): Database {
   return db;
 }
 
-/** The SQLite migration primitives; exported for the baseline upgrade tests. */
-export function createSqliteMigrationDriver(db: Database): MigrationDriver {
+/** The SQLite schema primitives; exported for the schema tests. */
+export function createSqliteSchemaDriver(db: Database): SchemaDriver {
   return {
-    async ensureMigrationsTable(): Promise<void> {
+    async ensureLedger(): Promise<void> {
       db.exec(
-        `CREATE TABLE IF NOT EXISTS ${SCHEMA_MIGRATIONS_TABLE} (
+        `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
            id TEXT PRIMARY KEY,
            applied_at TEXT NOT NULL
          )`,
       );
     },
-    async listApplied(): Promise<string[]> {
-      return queryAll(db, `SELECT id FROM ${SCHEMA_MIGRATIONS_TABLE}`).map((row) => text(row.id));
+    async listRecorded(): Promise<string[]> {
+      return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).map((row) => text(row.id));
     },
-    async applyMigration(migration: MigrationFile): Promise<void> {
-      const apply = db.transaction((file: MigrationFile) => {
-        db.exec(file.sql);
-        db.prepare(`INSERT INTO ${SCHEMA_MIGRATIONS_TABLE} (id, applied_at) VALUES (?, ?)`).run(
-          file.id,
+    async createBaseSchema(schema: BaseSchema): Promise<void> {
+      const create = db.transaction((base: BaseSchema) => {
+        db.exec(base.sql);
+        db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
+          base.id,
           nowIso(),
         );
       });
-      apply(migration);
+      create(schema);
     },
   };
 }
@@ -996,7 +996,7 @@ class SqliteStore implements NexusStore {
   }
 
   async migrate(): Promise<void> {
-    await runMigrations(createSqliteMigrationDriver(this.db), loadMigrations('sqlite'));
+    await ensureBaseSchema(createSqliteSchemaDriver(this.db), loadBaseSchema('sqlite'));
   }
 
   async close(): Promise<void> {

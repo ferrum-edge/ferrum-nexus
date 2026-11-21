@@ -4,10 +4,10 @@ This walkthrough takes you from an empty machine to a client calling a
 published API through the gateway, with a credential the portal issued.
 
 It targets Ferrum Nexus `v0.5.2` with Ferrum Edge `v0.9.15`, the supported pair
-in the [release notes](release-notes.md). To upgrade a deployment that keeps
-its data, see [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades).
-A development database created before `v0.1.0` needs the
-[development reset](operations.md#buildout-schema-policy).
+in the [release notes](release-notes.md). Before 1.0 there is no upgrade path:
+a database created by an earlier version is refused at startup and must be
+recreated (see [schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10)).
+Start this walkthrough with a new database.
 
 You play three roles in turn: the operator who runs the stack, a **provider**
 who publishes an API, and a **client** who requests access and calls it. Allow
@@ -192,7 +192,7 @@ NEXUS_BOOTSTRAP_TOKEN=walkthrough-bootstrap-token
 Then start it:
 
 ```bash
-npm run migrate   # also runs automatically at startup
+npm run migrate   # creates the schema; also runs automatically at startup
 npm run dev       # backend :8787, web :5173 (NEXUS_PORT / NEXUS_WEB_PORT)
 ```
 
