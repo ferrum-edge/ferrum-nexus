@@ -2206,11 +2206,13 @@ class MongoStore implements NexusStore {
         this.opts,
       ),
 
-    listUserIdsByProvider: async (providerId) =>
+    listUserIdsByProvider: async (providerId, issuer) =>
       (
         await this.col(COLLECTIONS.userIdentities).distinct(
           'user_id',
-          { provider_id: providerId } as Filter<NexusDoc>,
+          (issuer === undefined
+            ? { provider_id: providerId }
+            : { provider_id: providerId, issuer }) as Filter<NexusDoc>,
           this.opts,
         )
       )

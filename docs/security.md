@@ -746,8 +746,9 @@ own transaction, every session of every account linked at a provider it cuts
 off (#591), password sessions included: a session records neither the provider
 nor the password that opened it. `local_only` cuts off every provider that was
 in force and enabled, `NEXUS_OIDC_PROVIDERS` ones included, whose own `enabled`
-flag cannot be edited through the API; it keeps the links, so turning single
-sign-on back on lets them sign in again. A provider still in force cuts off the
+flag cannot be edited through the API; the policy change itself keeps the links
+(a provider removed in the same save loses its links as any removal does), so
+turning single sign-on back on lets them sign in again. A provider still in force cuts off the
 links at its own issuer only, not those under its id at another issuer (a
 settings row an environment provider shadows). The `admin.settings_update` entry
 records `providers_cut_off` and `sessions_revoked`, on every switch to
@@ -790,8 +791,11 @@ Environment secrets stay in the environment. No token, code, verifier, `state`,
   so a link cannot slip between the check and promotion. Every manual privilege
   increase, including `client` → `provider` and `admin` → `super_admin`, ends
   **all** existing sessions in that transaction and records `terminated_sessions`
-  in `user.role_change`. Removing an identity alone leaves its sessions alive;
-  none of those old cookies may inherit a subsequent promotion.
+  in `user.role_change`. Removing an identity ends every session of the account
+  in its own transaction (#591), under the same lifecycle lease, and it
+  re-checks the account's role there, so an `admin` cannot remove an identity
+  of an account promoted meanwhile; none of those old cookies may inherit a
+  subsequent promotion.
 - An address a lower-trust provider provisioned first leaves its rightful,
   admin-mapped holder refused with `privileged_account`, and with no password
   to sign in and link. A `super_admin` can release the address once the account
@@ -2081,7 +2085,7 @@ Naming is `<domain>.<verb>`, lowercase snake_case. God-mode actions are `god.*`.
 | `auth.sso_login`       | `user`      | A single sign-on opened a session; committed with the session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `provisioned` or `linked` when this sign-in did that too. Refused sign-ins are logged (provider and reason), not audited.                                                                                                                                                                                                                        |
 | `auth.sso_provision`   | `user`      | Just-in-time provisioning created the account. `details`: `provider_id`, `subject`, `email`, `email_verified`, `role`, `org_id`, `role_mapping`, `org_mapping` (the rules that matched). Never `super_admin`.                                                                                                                                                                                                                                                                |
 | `auth.sso_link`        | `user`      | An identity-provider subject was linked to an existing account: automatically under the proven-address rule, or explicitly from the account's own session. `details`: `provider_id`, `subject`, `identity_id`, `email`, `explicit`, `email_verified_by_provider`.                                                                                                                                                                                                            |
-| `auth.sso_unlink`      | `user`      | An administrator removed a link (`DELETE /api/users/:id/identities/:identityId`). `details`: `identity_id`, `provider_id`, `subject`.                                                                                                                                                                                                                                                                                                                                        |
+| `auth.sso_unlink`      | `user`      | An administrator removed a link (`DELETE /api/users/:id/identities/:identityId`). `details`: `identity_id`, `provider_id`, `subject`, `terminated_sessions` (the account's sessions it ended).                                                                                                                                                                                                                                                                               |
 | `auth.sso_claims_sync` | `user`      | A sign-in's claims changed the account's role or organization, or a promotion was withheld; the actor is the system. `details`: `provider_id`, `subject`, `from_role`/`to_role` and/or `from_org_id`/`to_org_id`, `role_mapping`, `org_mapping`; for a promotion, `terminated_sessions` (every other session was ended); for a withheld one, `role_withheld`, `withheld_reason: "lower_trust_identities"` and `lower_trust_provider_ids`. Never written for a `super_admin`. |
 | `auth.sso_deprovision` | `user`      | A sign-in's claims mapped to no role and `deprovision_on_access_loss` is on: the account was disabled, its sessions ended and its gateway revocation queued, in one transaction; the actor is the system. `details`: `provider_id`, `subject`, `reason`, `role`, `terminated_sessions`, `revoked_reset_links`, `gateway_teardown: "queued"`. The revocation's outcome is `user.gateway_teardown_complete`.                                                                   |
 

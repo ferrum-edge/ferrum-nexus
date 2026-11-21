@@ -1183,12 +1183,15 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         providerId,
       ]),
 
-    listUserIdsByProvider: async (providerId) =>
+    listUserIdsByProvider: async (providerId, issuer) =>
       (
         await queryAll(
           exec,
-          'SELECT DISTINCT user_id FROM user_identities WHERE provider_id = ? ORDER BY user_id ASC',
-          [providerId],
+          issuer === undefined
+            ? 'SELECT DISTINCT user_id FROM user_identities WHERE provider_id = ? ORDER BY user_id ASC'
+            : 'SELECT DISTINCT user_id FROM user_identities WHERE provider_id = ? AND issuer = ? ' +
+                'ORDER BY user_id ASC',
+          issuer === undefined ? [providerId] : [providerId, issuer],
         )
       ).map((row) => text(row.user_id)),
 

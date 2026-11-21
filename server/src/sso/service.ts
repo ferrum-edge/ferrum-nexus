@@ -1498,17 +1498,11 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               }
               const cutOffUsers = new Set<Uuid>();
               for (const [id, issuer] of cutOff) {
-                for (const userId of await tx.userIdentities.listUserIdsByProvider(id)) {
-                  if (cutOffUsers.has(userId)) continue;
-                  if (
-                    issuer === null ||
-                    (await tx.userIdentities.listByUser(userId)).some(
-                      (link) => link.provider_id === id && link.issuer === issuer,
-                    )
-                  ) {
-                    cutOffUsers.add(userId);
-                  }
-                }
+                const linked = await tx.userIdentities.listUserIdsByProvider(
+                  id,
+                  ...(issuer === null ? [] : [issuer]),
+                );
+                for (const userId of linked) cutOffUsers.add(userId);
               }
               for (const id of removed) {
                 if (envIds.has(id)) continue;

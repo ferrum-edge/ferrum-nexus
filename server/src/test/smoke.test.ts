@@ -4147,6 +4147,22 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.deepEqual(await store.userIdentities.listUserIdsByProvider(`${provider}-none`), []);
       assert.equal(await store.userIdentities.delete(extraOwner.id), true);
       assert.deepEqual(await store.userIdentities.listUserIdsByProvider(provider), [other.id]);
+      // With an issuer, only the links at that issuer under the provider id.
+      const otherIssuer = await store.userIdentities.create({
+        user_id: owner.id,
+        provider_id: provider,
+        issuer: `${issuer}/other`,
+        subject: `subject-${newId()}`,
+        provisioned: false,
+      });
+      assert.deepEqual(
+        await store.userIdentities.listUserIdsByProvider(provider, `${issuer}/other`),
+        [owner.id],
+      );
+      assert.deepEqual(await store.userIdentities.listUserIdsByProvider(provider, issuer), [
+        other.id,
+      ]);
+      assert.equal(await store.userIdentities.delete(otherIssuer.id), true);
       // Removing a provider removes its links, and only its links.
       assert.equal(await store.userIdentities.deleteByProvider(provider), 1);
       assert.equal(await store.userIdentities.countByProvider(provider), 0);
