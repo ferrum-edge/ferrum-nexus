@@ -888,6 +888,9 @@ function nullsFirstAsc(column: string): string {
 }
 
 /** Comma-separated `?` placeholders for an `IN (...)` list. */
+/** Accounts per set-based session delete: well under every dialect's parameter limit. */
+const SESSION_DELETE_BATCH = 500;
+
 function placeholders(count: number): string {
   return new Array(count).fill('?').join(', ');
 }
@@ -1369,6 +1372,19 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     deleteForUser: async (userId) =>
       execute(exec, 'DELETE FROM sessions WHERE user_id = ?', [userId]),
+
+    deleteForUsers: async (userIds) => {
+      let deleted = 0;
+      for (let start = 0; start < userIds.length; start += SESSION_DELETE_BATCH) {
+        const batch = userIds.slice(start, start + SESSION_DELETE_BATCH);
+        deleted += await execute(
+          exec,
+          `DELETE FROM sessions WHERE user_id IN (${placeholders(batch.length)})`,
+          batch,
+        );
+      }
+      return deleted;
+    },
 
     deleteExpired: async (now) =>
       execute(exec, 'DELETE FROM sessions WHERE expires_at <= ?', [now]),

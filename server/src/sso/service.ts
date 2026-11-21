@@ -1508,10 +1508,7 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
                 if (envIds.has(id)) continue;
                 linksRemoved[id] = await tx.userIdentities.deleteByProvider(id);
               }
-              let sessionsRevoked = 0;
-              for (const userId of cutOffUsers) {
-                sessionsRevoked += await tx.sessions.deleteForUser(userId);
-              }
+              const sessionsRevoked = await tx.sessions.deleteForUsers([...cutOffUsers]);
               const nextProviders = new Map(
                 providersInForce(config, next).map(
                   ({ settings }): [string, SsoProviderSettings] => [settings.id, settings],

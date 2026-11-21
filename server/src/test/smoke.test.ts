@@ -801,6 +801,31 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         expires_at: isoInSeconds(600),
       });
       assert.equal(await store.sessions.deleteForUser(user.id), 1);
+
+      // Set-based termination for several accounts at once, across batches.
+      const others = [await makeUser(), await makeUser()];
+      for (const account of [user, ...others]) {
+        await store.sessions.create({
+          token_hash: `many-${newId()}`,
+          user_id: account.id,
+          csrf_token: 'csrf',
+          expires_at: isoInSeconds(600),
+        });
+      }
+      const bystander = await makeUser();
+      await store.sessions.create({
+        token_hash: `bystander-${newId()}`,
+        user_id: bystander.id,
+        csrf_token: 'csrf',
+        expires_at: isoInSeconds(600),
+      });
+      const absent = Array.from({ length: 600 }, () => newId());
+      assert.equal(
+        await store.sessions.deleteForUsers([...absent, user.id, ...others.map((o) => o.id)]),
+        3,
+      );
+      assert.equal(await store.sessions.deleteForUsers([]), 0);
+      assert.equal(await store.sessions.deleteForUser(bystander.id), 1);
     });
 
     /* ── apis and specs ───────────────────────────────────────────────── */

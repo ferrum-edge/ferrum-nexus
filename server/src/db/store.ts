@@ -963,6 +963,11 @@ export interface SessionRepo {
   delete(id: Uuid): Promise<boolean>;
   /** Terminate every session of a user (logout-everywhere, disable, role change). */
   deleteForUser(userId: Uuid): Promise<number>;
+  /**
+   * Terminate every session of each of `userIds` (an SSO provider cut-off), in
+   * a few set-based statements rather than one per account. Returns the total.
+   */
+  deleteForUsers(userIds: readonly Uuid[]): Promise<number>;
   /** Housekeeping: drop sessions whose `expires_at` is at or before `now`. */
   deleteExpired(now: IsoTimestamp): Promise<number>;
 }

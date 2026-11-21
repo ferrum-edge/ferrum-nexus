@@ -246,9 +246,10 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
   );
 
   /**
-   * Remove one link. The account keeps everything else; its next single
-   * sign-on through that provider is matched afresh — linked again only under
-   * the verified-email rule, or refused.
+   * Remove one link, ending every session of the account with it. The account
+   * keeps everything else; its next single sign-on through that provider is
+   * matched afresh — linked again only under the verified-email rule, or
+   * refused.
    */
   app.delete(
     '/:id/identities/:identityId',

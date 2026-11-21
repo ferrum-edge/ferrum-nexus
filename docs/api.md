@@ -900,8 +900,11 @@ Errors: `404 NOT_FOUND`.
 ### `DELETE /api/users/:id/identities/:identityId`
 
 _admin_ (a **_super_admin_** for an `admin` or `super_admin` account), **CSRF
-required** — removes one link; audited as `auth.sso_unlink`. The account keeps
-everything else. Its next sign-in through that provider is matched afresh:
+required** — removes one link and ends every session of the account in the same
+transaction; audited as `auth.sso_unlink` with `terminated_sessions`. The role is
+re-checked there, so an `admin` gets `403` for an account promoted meanwhile.
+The account keeps everything else. Its next sign-in through that provider is
+matched afresh:
 linked again only under the proven-address rule or explicitly, or refused.
 An account the identity provisioned keeps its password lock, so it gains no
 password. Returns `{ "ok": true }`.
@@ -1397,8 +1400,14 @@ update of `policy`, `allowed_email_domains`, `deprovision_on_access_loss` and
   refused. `default_role` may be `null` (no match → no access).
 - Allowed domains, deployment-wide and per provider, are normalized
   (`@Example.COM` → `example.com`).
+- A save that removes a provider, disables one, or turns the policy to
+  `local_only` ends, in its transaction, every session of the accounts linked
+  at a provider it cuts off (`local_only` cuts off every provider that was in
+  force and enabled, environment ones included).
 - Audited as `admin.settings_update` with `target_id: "sso"`, recording key
-  names, provider ids and `links_removed`, never a secret.
+  names, provider ids and `links_removed`, never a secret, plus
+  `providers_cut_off` and `sessions_revoked` for a cut-off (on a switch to
+  `local_only` always, `[]` and `0` when nothing was in force).
 
 Errors: `400 VALIDATION_FAILED` for any of:
 

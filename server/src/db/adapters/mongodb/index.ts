@@ -2391,6 +2391,20 @@ class MongoStore implements NexusStore {
       (await this.col(COLLECTIONS.sessions).deleteMany({ user_id: userId }, this.opts))
         .deletedCount,
 
+    deleteForUsers: async (userIds) => {
+      let deleted = 0;
+      for (let start = 0; start < userIds.length; start += 500) {
+        const batch = userIds.slice(start, start + 500);
+        deleted += (
+          await this.col(COLLECTIONS.sessions).deleteMany(
+            { user_id: { $in: batch } } as Filter<NexusDoc>,
+            this.opts,
+          )
+        ).deletedCount;
+      }
+      return deleted;
+    },
+
     deleteExpired: async (now) =>
       (
         await this.col(COLLECTIONS.sessions).deleteMany(

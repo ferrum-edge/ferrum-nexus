@@ -21,7 +21,14 @@ import type { LeaseRepo, NexusStore, SessionRecord, TransactionOptions } from '.
 import { isoInSeconds, newId } from '../lib/ids.js';
 import { SSO_SETTINGS_LOCK_KEY, ssoProviderLockKey } from '../lib/keyed-serializer.js';
 import { readStoredSsoSettings, SSO_SETTINGS_KEY } from '../sso/settings.js';
-import { buildTestApp, cookieValue, type TestApp, type TestSession } from './helpers.js';
+import {
+  buildTestApp,
+  cookieValue,
+  TEST_EDGE_JWT_SECRET,
+  type TestApp,
+  type TestSession,
+} from './helpers.js';
+import { createMockFerrumEdge, type MockFerrumEdge } from './mock-ferrum-edge.js';
 import { createMockOidcProvider, type MockOidcProvider } from './mock-oidc-provider.js';
 
 function barrier(): { promise: Promise<void>; release: () => void } {
@@ -530,6 +537,7 @@ export function runSsoRetirementContract(
     let second: TestApp | null = null;
     let founder: TestSession;
     let idp: MockOidcProvider | null = null;
+    let edge: MockFerrumEdge | null = null;
     let race: PeerRace | null = null;
 
     before(async () => {
@@ -538,16 +546,26 @@ export function runSsoRetirementContract(
       peer = await target.peer();
       idp = createMockOidcProvider({ clientId: 'retirement-peer', clientSecret: null });
       await idp.start();
+      // Owned here, not by either app, so teardown stops it even when an
+      // app fails to start.
+      const gateway = createMockFerrumEdge({
+        jwtSecret: TEST_EDGE_JWT_SECRET,
+        issuer: 'ferrum-edge',
+        maxCredentialsPerType: 2,
+      });
+      edge = gateway;
+      await gateway.start();
       const env = { NEXUS_OIDC_ALLOW_HTTP_LOOPBACK: 'true', NEXUS_OIDC_PROVIDERS: '[]' };
       first = await buildTestApp({
         store: target.store,
+        edge: gateway,
         env,
         wrapStore: (store) => holdSessionInsert(store, () => race),
       });
       const peerStore = peer;
       second = await buildTestApp({
         store: peerStore,
-        edge: first.edge,
+        edge: gateway,
         env,
         wrapStore: (store) => reportLeaseWaits(store, () => race),
       });
@@ -561,6 +579,7 @@ export function runSsoRetirementContract(
         () => second?.close(),
         () => first?.close(),
         () => idp?.stop(),
+        () => edge?.stop(),
         () => peer?.close(),
         () => target?.teardown(),
       ]) {
