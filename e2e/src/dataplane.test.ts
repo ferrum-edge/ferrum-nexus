@@ -920,7 +920,14 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         gateway_client_key_path: '/nonexistent/secret-client.key',
         server_ca_path: '/nonexistent/secret-ca.pem',
       },
-      gateway: { namespace: 'nexus', otel_endpoint: `${UPSTREAM_URL}/manifest-must-not-fetch` },
+      // `https://`: the preview refuses a cleartext exporter to a host that is
+      // not a loopback IP literal, as Ferrum Edge drops one (#740). A TLS
+      // attempt at the plain-HTTP upstream still shows in its snapshot, as a
+      // `CLIENT_ERROR` observation.
+      gateway: {
+        namespace: 'nexus',
+        otel_endpoint: `${UPSTREAM_URL.replace(/^http:/, 'https:')}/manifest-must-not-fetch`,
+      },
     };
     const response = await portalRaw('POST', '/api/service-manifests/preview', {
       session: provider,
@@ -948,6 +955,29 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       body: { namespace: 'nexus', manifest: { ...manifest, auth: null } },
     });
     assert.equal(invalid.status, 400);
+    // A cleartext exporter to the upstream by name is refused, and the refusal
+    // fetches nothing either: the snapshot below would count a plain HTTP
+    // request to it. A loopback-literal override (`E2E_UPSTREAM_URL`) is
+    // spelled `localhost`, which reaches the same fixture and does not qualify.
+    const named = new URL(UPSTREAM_URL);
+    named.protocol = 'http:';
+    if (named.hostname === '[::1]' || named.hostname.startsWith('127.')) {
+      named.hostname = 'localhost';
+    }
+    const cleartext = await portalRaw('POST', '/api/service-manifests/preview', {
+      session: provider,
+      body: {
+        namespace: 'nexus',
+        manifest: {
+          ...manifest,
+          gateway: {
+            namespace: 'nexus',
+            otel_endpoint: `${named.origin}/manifest-must-not-fetch`,
+          },
+        },
+      },
+    });
+    assert.equal(cleartext.status, 400);
     assert.deepEqual(await upstreamSnapshot(), before, 'preview performs no upstream request');
   });
 
