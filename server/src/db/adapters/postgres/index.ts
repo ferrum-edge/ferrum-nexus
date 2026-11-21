@@ -32,7 +32,6 @@ import {
   ensureBaseSchema,
   loadBaseSchema,
   SCHEMA_LEDGER_TABLE,
-  SchemaRaceError,
   splitSqlStatements,
   type BaseSchema,
   type SchemaDriver,
@@ -66,61 +65,25 @@ function pgExecutor(queryable: PgQueryable): SqlExecutor {
   };
 }
 
-/** SQLSTATE `undefined_table`: the ledger does not exist yet. */
-const UNDEFINED_TABLE = '42P01';
-
-/** The ledger's ids, or none when there is no ledger yet. */
-async function readLedger(queryable: PgQueryable): Promise<string[]> {
-  try {
-    const result = await queryable.query(`SELECT id FROM ${SCHEMA_LEDGER_TABLE}`);
-    return (result.rows as { id: string }[]).map((row) => String(row.id));
-  } catch (error) {
-    if ((error as { code?: unknown }).code === UNDEFINED_TABLE) return [];
-    throw error;
-  }
-}
-
-async function tablesPresent(queryable: PgQueryable, schema: BaseSchema): Promise<string[]> {
-  // Every relation an unqualified name would resolve to on the connection's
-  // search path, not just its first schema: that is what the store's queries
-  // would read.
-  const result = await queryable.query(
-    `SELECT c.relname AS table_name FROM pg_catalog.pg_class c
-      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
-        AND pg_catalog.pg_table_is_visible(c.oid)
-        AND c.relname = ANY($1::text[])`,
-    [[...schema.tables]],
-  );
-  return (result.rows as { table_name: string }[]).map((row) => String(row.table_name));
-}
-
 /** The PostgreSQL schema primitives; exported for the schema tests. */
 export function createPostgresSchemaDriver(pool: PgPool): SchemaDriver {
   return {
-    writesClaims: false,
-    listRecorded: () => readLedger(pool),
-    existingTables: (schema) => tablesPresent(pool, schema),
+    async ensureLedger(): Promise<void> {
+      await pool.query(
+        `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
+           id TEXT PRIMARY KEY,
+           applied_at TEXT NOT NULL
+         )`,
+      );
+    },
+    async listRecorded(): Promise<string[]> {
+      const result = await pool.query(`SELECT id FROM ${SCHEMA_LEDGER_TABLE}`);
+      return (result.rows as { id: string }[]).map((row) => String(row.id));
+    },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
       const client = await pool.connect();
       try {
-        // READ COMMITTED whatever the session default: the re-read below must
-        // see what a creator that held the lock before this one committed.
-        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-        // One creator per database at a time; the lock ends with the
-        // transaction. Everything below runs only for the winner.
-        await client.query("SELECT pg_advisory_xact_lock(hashtext('ferrum-nexus:base-schema'))");
-        await client.query(
-          `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
-             id TEXT PRIMARY KEY,
-             applied_at TEXT NOT NULL
-           )`,
-        );
-        if (
-          (await readLedger(client)).length > 0 ||
-          (await tablesPresent(client, schema)).length > 0
-        ) {
-          throw new SchemaRaceError();
-        }
+        await client.query('BEGIN');
         for (const statement of splitSqlStatements(schema.sql)) {
           await client.query(statement);
         }

@@ -20,9 +20,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   removed.
   **A database created by `v0.5.2` or earlier is not migrated.** At startup,
   and in `npm run migrate`, Nexus reads `schema_migrations`. A pre-0.6
-  migration chain, a base-schema fingerprint other than its own, or Nexus
-  tables with no record make it exit non-zero without changing the schema or
-  data, with an error that says to start
+  migration chain, or a base schema generation other than its own, makes it
+  exit non-zero without changing the schema or data, with an error that says
+  to start
   against a new, empty database. Stop Nexus and take a paired Nexus and Edge
   backup, with their secrets, before changing either side (it is the rollback
   to `v0.5.2` and its Edge release), then recreate the database, deal with the
@@ -30,9 +30,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   administrator again; see
   [schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10)
   and [moving to a new release](docs/operations.md#moving-to-a-new-release).
-  The ledger now holds one row: the base schema's fingerprint (`base_` and 16
-  hex digits, a hash of its statements), so a later release that edits the
-  schema also refuses databases created before the edit. `npm run migrate`
+  The ledger now holds one entry, the base schema's generation
+  (`000_base_v0_6`). It is bumped whenever the base schema changes before 1.0,
+  so a later release that edits the schema also refuses databases created
+  before the edit. `npm run migrate`
   keeps its name; it creates or verifies the schema and prints
   `Schema ready (driver: …).`
 

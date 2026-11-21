@@ -2,20 +2,13 @@
  * Creating the MySQL base schema, serialized across application instances.
  *
  * MySQL DDL commits on its own, outside any transaction, so the base schema
- * cannot be created atomically with its ledger row. Instead:
- *
- * - every statement of `schema/base.mysql.sql` is a replayable
- *   `CREATE TABLE IF NOT EXISTS` with its keys and constraints inline (MySQL
- *   has no `CREATE INDEX IF NOT EXISTS`), checked before any of them runs;
- * - the ledger first gets this build's claim (`creating:<fingerprint>`), then
- *   the tables are created, and one `UPDATE` replaces the claim with the
- *   fingerprint. A start interrupted part-way leaves the claim, so the next
- *   start of the same build replays the file (tables it already created are
- *   skipped, with their rows) and records it, while tables some other version
- *   left with no claim are refused (`ensureBaseSchema`).
- *
- * One database advisory lock covers the ledger reads, the claim, every
- * statement and the final record, so two instances starting together create
+ * cannot be created atomically with its ledger row. Instead every statement
+ * of `schema/base.mysql.sql` is a replayable `CREATE TABLE IF NOT EXISTS` with
+ * its keys and constraints inline (MySQL has no `CREATE INDEX IF NOT EXISTS`),
+ * and the ledger row is written last: a start interrupted part-way finds an
+ * empty ledger, replays the file — the tables it already created are skipped
+ * — and records it. One database advisory lock covers the ledger reads, every
+ * statement and the ledger write, so two instances starting together create
  * the schema once.
  */
 import { createHash } from 'node:crypto';
@@ -24,9 +17,7 @@ import { nowIso } from '../../../lib/ids.js';
 import {
   ensureBaseSchema,
   loadBaseSchema,
-  schemaClaim,
   SCHEMA_LEDGER_TABLE,
-  SchemaRaceError,
   splitSqlStatements,
   type BaseSchema,
 } from '../../schema.js';
@@ -54,67 +45,15 @@ export function replayableStatements(schema: BaseSchema): string[] {
   return statements;
 }
 
-/** `ER_NO_SUCH_TABLE`: the ledger does not exist yet. */
-const NO_SUCH_TABLE = 1146;
-
-/** The ledger's ids, or none when there is no ledger yet. */
-async function readLedger(connection: mysql.PoolConnection): Promise<string[]> {
-  try {
-    const [recorded] = await connection.query<mysql.RowDataPacket[]>(
-      `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`,
-    );
-    return recorded.map((row) => String(row.id));
-  } catch (error) {
-    if ((error as { errno?: unknown }).errno === NO_SUCH_TABLE) return [];
-    throw error;
-  }
-}
-
-async function tablesPresent(
-  connection: mysql.PoolConnection,
-  schema: BaseSchema,
-): Promise<string[]> {
-  if (schema.tables.length === 0) return [];
-  const [tables] = await connection.query<mysql.RowDataPacket[]>(
-    `SELECT TABLE_NAME AS name FROM information_schema.TABLES
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (?)`,
-    [[...schema.tables]],
-  );
-  return tables.map((row) => String(row.name));
-}
-
 async function createBaseSchema(
   connection: mysql.PoolConnection,
   schema: BaseSchema,
-  resume: boolean,
 ): Promise<void> {
-  const statements = replayableStatements(schema);
-  const claim = schemaClaim(schema);
-  await connection.query(`CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
-    id VARCHAR(191) NOT NULL, applied_at VARCHAR(32) NOT NULL, PRIMARY KEY (id)
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`);
-  // The advisory lock already makes this start the only creator; the
-  // re-read keeps the driver contract the other adapters follow.
-  const recorded = await readLedger(connection);
-  if (resume) {
-    if (recorded.length !== 1 || recorded[0] !== claim) throw new SchemaRaceError();
-  } else {
-    if (recorded.length > 0 || (await tablesPresent(connection, schema)).length > 0) {
-      throw new SchemaRaceError();
-    }
-    await connection.execute(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`, [
-      claim,
-      nowIso(),
-    ]);
-  }
-  for (const statement of statements) await connection.query(statement);
-  const [result] = await connection.execute<mysql.ResultSetHeader>(
-    `UPDATE ${SCHEMA_LEDGER_TABLE} SET id = ?, applied_at = ? WHERE id = ?`,
-    [schema.id, nowIso(), claim],
-  );
-  if (result.affectedRows !== 1) {
-    throw new Error(`The MySQL schema claim ${claim} disappeared before it could be recorded`);
-  }
+  for (const statement of replayableStatements(schema)) await connection.query(statement);
+  await connection.execute(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`, [
+    schema.id,
+    nowIso(),
+  ]);
 }
 
 /** One connection owns the advisory lock, ledger reads, all statements, and release. */
@@ -168,10 +107,18 @@ export async function ensureMysqlSchema(
     }
     await ensureBaseSchema(
       {
-        writesClaims: true,
-        listRecorded: () => readLedger(connection),
-        existingTables: (base) => tablesPresent(connection, base),
-        createBaseSchema: (base, { resume }) => createBaseSchema(connection, base, resume),
+        async ensureLedger() {
+          await connection.query(`CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
+          id VARCHAR(191) NOT NULL, applied_at VARCHAR(32) NOT NULL, PRIMARY KEY (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`);
+        },
+        async listRecorded() {
+          const [recorded] = await connection.query<mysql.RowDataPacket[]>(
+            `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`,
+          );
+          return recorded.map((row) => String(row.id));
+        },
+        createBaseSchema: (base) => createBaseSchema(connection, base),
       },
       schema,
     );

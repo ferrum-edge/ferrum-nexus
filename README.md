@@ -42,7 +42,7 @@ Releases before `v0.4.0` supported Node 22.14 or later.
   until 1.0. A database is never migrated: one created by `v0.5.2` or earlier, or
   at a different base schema, is refused at startup and must be recreated (from
   `v0.6.0`, which folded the earlier migrations into the base schema). A release
-  whose schema fingerprint is unchanged opens the previous release's database;
+  whose base schema generation is unchanged opens the previous release's database;
   each release's notes say which applies. See
   [schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10),
   [moving to a new release](docs/operations.md#moving-to-a-new-release) and

@@ -24,20 +24,17 @@ import { pathToFileURL } from 'node:url';
 const serverDir = process.cwd();
 const require = createRequire(resolve(serverDir, 'package.json'));
 const Database = require('better-sqlite3');
-const { loadBaseSchema, schemaDir } = await import(
+const { BASE_SCHEMA_ID, loadBaseSchema, schemaDir } = await import(
   pathToFileURL(resolve(serverDir, 'dist/db/schema.js')).href
 );
 
 assert.ok(Number(process.versions.napi) >= 10);
 assert.deepEqual(readdirSync(schemaDir()).sort(), ['base.mysql.sql', 'base.pg.sql', 'base.sql']);
 assert.equal(existsSync(resolve(serverDir, 'dist/db/migrations')), false);
-const ids = new Set();
+assert.match(BASE_SCHEMA_ID, /^000_base_v\d+_\d+$/);
 for (const dialect of ['sqlite', 'pg', 'mysql']) {
-  const { id } = loadBaseSchema(dialect);
-  assert.match(id, /^base_[0-9a-f]{16}$/);
-  ids.add(id);
+  assert.equal(loadBaseSchema(dialect).id, BASE_SCHEMA_ID);
 }
-assert.equal(ids.size, 3);
 
 const db = new Database(':memory:');
 db.exec(loadBaseSchema('sqlite').sql);

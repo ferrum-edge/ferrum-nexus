@@ -5,7 +5,8 @@ published API through the gateway, with a credential the portal issued.
 
 It targets Ferrum Nexus `v0.5.2` with Ferrum Edge `v0.9.15`, the supported pair
 in the [release notes](release-notes.md). From `v0.6.0` there is no upgrade
-path before 1.0: a database created by an earlier version is refused at startup
+path before 1.0: a database created by `v0.5.2` or earlier, or at a different
+base schema generation, is refused at startup
 and must be recreated (see
 [schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10)).
 Start this walkthrough with a new database.

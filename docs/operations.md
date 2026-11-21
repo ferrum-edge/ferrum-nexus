@@ -1466,62 +1466,46 @@ the earlier migration chain (`001_initial` to `015_access_gateway_jobs`) into
 it, and later schema changes edit it directly. There are no migration files.
 
 **At startup** (`store.init()`, then `store.migrate()`, before the server
-listens) Nexus reads the `schema_migrations` table (a collection on MongoDB):
+listens) Nexus reads the `schema_migrations` table (a collection on MongoDB),
+the same ledger the pre-0.6 migration runner kept:
 
-- **Empty or missing, and none of Nexus's tables exist:** a new database.
-  Nexus creates the ledger and the base schema and records its fingerprint,
-  `base_` followed by 16 hex digits, as the table's only row.
-- **Exactly this build's fingerprint:** the schema is current, so nothing
+- **Empty or missing:** a new database. Nexus creates the base schema and
+  records the base schema's generation, `000_base_v0_6` in this release, as the
+  ledger's only entry.
+- **Exactly this build's generation:** the schema is current, so nothing
   happens.
-- **Only this build's claim** (`creating:base_…`): a first start of this
-  build that stopped part-way on MySQL or MongoDB, which cannot create the
-  schema in one transaction. Nexus finishes creating it.
-- **Anything else:** a database created by `v0.5.2` or earlier (the table lists
-  migration ids such as `001_initial`), by a release with a different base
-  schema, or holding Nexus tables with no record at all (an earlier version's
-  first start that stopped before recording anything). Nexus exits non-zero
-  **without changing the schema or data** and prints:
+- **Anything else:** a database created by `v0.5.2` or earlier (the ledger
+  lists migration ids such as `001_initial`), or at a different base schema
+  generation. Nexus exits non-zero **without changing the schema or data** and
+  prints:
 
   ```text
   This database was created by a different Ferrum Nexus schema (it records
   001_initial, 002_api_gateway_plugins, 003_messages_thread_latest,
-  004_api_spec_changes and 9 more; this build's schema is base_…). Ferrum Nexus
-  has no upgrade path before 1.0: a database created by an earlier version is
-  never migrated, and its schema and data were not changed. Back up anything
-  you need, then start this version against a new, empty database (or drop and
-  recreate this one).
+  004_api_spec_changes and 9 more; this build's schema is 000_base_v0_6).
+  Ferrum Nexus has no upgrade path before 1.0: a database created by an earlier
+  version is never migrated, and its schema and data were not changed. Back up
+  anything you need, then start this version against a new, empty database (or
+  drop and recreate this one).
   ```
 
   Recreate the database as described in
   [moving to a new release](#moving-to-a-new-release).
 
-The fingerprint is a hash of the base schema's statements. Comments and runs
-of whitespace outside quoted literals are excluded, so any change to a statement
-produces a new fingerprint. MongoDB's covers its index list and the SQLite base
-schema, which stands for the logical schema. A release that changes the base
-schema refuses every database an earlier release created.
-A release that leaves the schema unchanged keeps the fingerprint and opens the
-previous release's database as it is. Each release's notes say which applies.
-To see a database's fingerprint, run `SELECT id FROM schema_migrations` (SQL
-backends) or `db.schema_migrations.find({})` (MongoDB, where the `schema`
-document holds the fingerprint in `schema` and `state` is `ready` or `creating`;
-any other document is a pre-0.6 migration id in `_id`).
+The generation (`BASE_SCHEMA_ID` in `server/src/db/schema.ts`) is bumped in
+the same change as any edit to the base schema. A release whose generation
+changed refuses every database an earlier generation created. A release that
+keeps the generation opens the previous release's database as it is. Each
+release's notes say which applies. To see a database's generation, run
+`SELECT id FROM schema_migrations` (SQL backends) or
+`db.schema_migrations.find({})` (MongoDB).
 
-Never edit `schema_migrations` to get past the refusal. Emptying it does not
-help: Nexus then finds its tables with no record and refuses them. Writing this
-build's fingerprint or claim into it makes Nexus run against, or replay over,
-tables it did not create. Do not point an older release at a database a newer
-one created either. Releases before `v0.6.0` do not know the fingerprint and
-would try to replay their migrations over it.
-
-Only one start creates a schema in a given database. Each backend does the
-creation inside an exclusive section: a transaction-scoped advisory lock on
-PostgreSQL, an immediate transaction on SQLite, the `GET_LOCK` advisory lock
-on MySQL, and a claim on one fixed ledger key on MongoDB. It re-reads the
-ledger there before creating anything. Two instances of the same release
-starting on one empty database both come up. If two different releases start
-on one empty database at once, the first one creates its schema, and the other
-changes nothing and is refused.
+Never edit `schema_migrations` to get past the refusal: Nexus would then run
+against, or create tables over, a schema it was not written for. Do not point an
+older release at a database a newer one created either: releases before
+`v0.6.0` do not know the generation and would try to replay their migrations
+over it. Give Nexus a dedicated database; creating the schema in one that
+already holds unrelated tables or indexes with the same names is not supported.
 
 ### Moving to a new release
 
@@ -1645,15 +1629,11 @@ NEXUS_DB_URL=mysql://nexus:secret@db.internal:3306/nexus
 MySQL DDL commits on its own, outside the schema ledger, so the base schema
 cannot be created in one transaction. Every statement in `base.mysql.sql` is a
 `CREATE TABLE IF NOT EXISTS` with its indexes and constraints inline, and
-Nexus refuses the file before running any of it if one is not. Before the first
-`CREATE`, the ledger gets this release's claim, `creating:base_…`. After the
-last one, a single `UPDATE` replaces the claim with the fingerprint. A start
-that stops part-way leaves the claim, and the next start of the same release
-replays the file: tables that already exist are skipped, so rows written in
-between are kept. Do not delete the claim. Without it the existing tables have
-no record and are refused. A database-scoped advisory lock (`GET_LOCK`)
-serializes the check, the claim, the statements and the record across
-instances.
+Nexus refuses the file before running any of it if one is not. The ledger
+entry is written only after every table exists, so a start that stops part-way
+leaves the ledger empty and the next start replays the file: tables that
+already exist are skipped, with their rows. A database-scoped advisory lock
+(`GET_LOCK`) serializes schema creation across instances.
 
 ### MongoDB
 
@@ -1696,21 +1676,11 @@ transactions run their steps in order but without atomic commit, so a failure
 part-way (for example during an approval) leaves partial writes. Do not use it
 in production.
 
-Indexes are created by `migrate()` from `BASE_INDEXES`, and the schema's
-fingerprint (over that list and the SQLite base schema, which stands for the
-logical schema) is recorded in `schema_migrations` like the SQL backends'.
-Collections are created by their first insert. The ledger is one document,
-`_id: "schema"`, that every release contends on. Index builds are not
-transactional, so a start first inserts that document in state `creating`
-(naming the schema being created), then builds the indexes, then turns the same
-document to `ready` with one conditional update. The key is never freed, so a
-start that arrives late cannot record a second schema beside a published one.
-`createIndex` is a no-op for an existing identical index, so a later start of
-the same release takes over an interrupted claim and finishes. A claim younger
-than 30 seconds belongs to a peer still at work, so the start waits for it (up
-to a minute) before taking it over. Do not delete the document; without it the
-existing collections are refused. An index build interrupted by a replica-set
-election is retried once a primary is back.
+Indexes are created by `migrate()` from `BASE_INDEXES` and the generation is
+recorded in `schema_migrations` like the SQL backends'. Collections are created
+by their first insert. `createIndex` is a no-op for an existing identical
+index, so a start interrupted before the ledger write finishes on the next
+start.
 
 ### Transactions and contention retries
 

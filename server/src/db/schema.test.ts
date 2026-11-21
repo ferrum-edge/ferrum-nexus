@@ -9,25 +9,19 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { conflict, isNexusError } from '../lib/errors.js';
+import { MONGO_BASE_SCHEMA } from './adapters/mongodb/index.js';
 import { createSqliteSchemaDriver, openSqliteDatabase } from './adapters/sqlite/index.js';
-import { mongoBaseSchema } from './adapters/mongodb/index.js';
 import {
-  canonicalStatement,
+  BASE_SCHEMA_ID,
   ensureBaseSchema,
   loadBaseSchema,
-  SchemaBusyError,
-  schemaClaim,
-  schemaFingerprint,
   SCHEMA_LEDGER_TABLE,
-  SchemaRaceError,
   type BaseSchema,
   type SchemaDriver,
 } from './schema.js';
 
-const BASE_ID = /^base_[0-9a-f]{16}$/;
 const NO_UPGRADE_PATH = /no upgrade path before 1\.0/;
 const RECREATE = /new, empty database/;
-const NO_RECORD = /already holds Ferrum Nexus tables \(users\) but no record/;
 const NAMES_FAILED_SCHEMA = /^Creating the base schema base_test failed: .*no such table: missing/;
 
 /** What a v0.5.2 database records: the released migration chain. */
@@ -55,7 +49,6 @@ function tables(db: ReturnType<typeof openSqliteDatabase>): string[] {
 }
 
 function ledger(db: ReturnType<typeof openSqliteDatabase>): string[] {
-  if (!tables(db).includes(SCHEMA_LEDGER_TABLE)) return [];
   return db
     .prepare(`SELECT id FROM ${SCHEMA_LEDGER_TABLE} ORDER BY id`)
     .all()
@@ -118,10 +111,9 @@ describe('ensureBaseSchema', () => {
     try {
       const driver = createSqliteSchemaDriver(db);
       const earlier: BaseSchema = {
-        id: schemaFingerprint(['CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY)']),
+        id: '000_base_v0_5_test',
         source: 'earlier.sql',
         sql: 'CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY);',
-        tables: ['users'],
       };
       await ensureBaseSchema(driver, earlier);
       await assert.rejects(ensureBaseSchema(driver, loadBaseSchema('sqlite')), NO_UPGRADE_PATH);
@@ -139,7 +131,6 @@ describe('ensureBaseSchema', () => {
         id: 'base_test',
         source: 'broken.sql',
         sql: 'CREATE TABLE kept (id TEXT PRIMARY KEY); ALTER TABLE missing ADD COLUMN extra TEXT;',
-        tables: ['kept'],
       };
       await assert.rejects(ensureBaseSchema(driver, broken), (error: unknown) => {
         assert.ok(error instanceof Error);
@@ -147,15 +138,15 @@ describe('ensureBaseSchema', () => {
         assert.ok(error.cause instanceof Error, 'the driver error is kept as the cause');
         return true;
       });
-      // SQLite creates the ledger and the schema in one transaction: nothing
-      // is left behind.
-      assert.deepEqual(tables(db), []);
+      // SQLite creates the schema in one transaction: nothing is left behind.
+      assert.deepEqual(tables(db), [SCHEMA_LEDGER_TABLE]);
+      assert.deepEqual(ledger(db), []);
     } finally {
       db.close();
     }
   });
 
-  it('refuses a ledger holding this schema plus anything else', async () => {
+  it('refuses a ledger holding this generation plus anything else', async () => {
     const db = openSqliteDatabase(':memory:');
     try {
       const schema = loadBaseSchema('sqlite');
@@ -163,279 +154,17 @@ describe('ensureBaseSchema', () => {
       await ensureBaseSchema(driver, schema);
       db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} VALUES ('001_initial', 'then')`).run();
       await assert.rejects(ensureBaseSchema(driver, schema), NO_UPGRADE_PATH);
-      assert.deepEqual(ledger(db), ['001_initial', schema.id].sort());
+      assert.deepEqual(ledger(db), ['000_base_v0_6', '001_initial']);
     } finally {
       db.close();
     }
-  });
-
-  it("refuses the schema's tables with no record, creating nothing", async () => {
-    const db = openSqliteDatabase(':memory:');
-    try {
-      // What an earlier version's first start leaves if it stops before
-      // recording anything (or tables made by hand).
-      db.exec('CREATE TABLE users (id TEXT PRIMARY KEY)');
-      const schema = loadBaseSchema('sqlite');
-      await assert.rejects(ensureBaseSchema(createSqliteSchemaDriver(db), schema), (error) => {
-        assert.ok(isNexusError(error));
-        assert.match(error.message, NO_RECORD);
-        assert.match(error.message, NO_UPGRADE_PATH);
-        return true;
-      });
-      // Not even the ledger table is created.
-      assert.deepEqual(tables(db), ['users']);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('refuses a claim on a driver that never writes one', async () => {
-    const db = openSqliteDatabase(':memory:');
-    try {
-      const schema = loadBaseSchema('sqlite');
-      db.exec(
-        `CREATE TABLE ${SCHEMA_LEDGER_TABLE} (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
-      );
-      db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} VALUES (?, 'now')`).run(schemaClaim(schema));
-      await assert.rejects(ensureBaseSchema(createSqliteSchemaDriver(db), schema), NO_UPGRADE_PATH);
-      assert.deepEqual(tables(db), [SCHEMA_LEDGER_TABLE]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('creates nothing when the ledger changed between the check and the creation', async () => {
-    const db = openSqliteDatabase(':memory:');
-    try {
-      const schema = loadBaseSchema('sqlite');
-      const driver = createSqliteSchemaDriver(db);
-      db.exec(
-        `CREATE TABLE ${SCHEMA_LEDGER_TABLE} (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
-      );
-      db.prepare(
-        `INSERT INTO ${SCHEMA_LEDGER_TABLE} VALUES ('base_0000000000000000', 'now')`,
-      ).run();
-      await assert.rejects(driver.createBaseSchema(schema, { resume: false }), SchemaRaceError);
-      assert.deepEqual(tables(db), [SCHEMA_LEDGER_TABLE]);
-      assert.deepEqual(ledger(db), ['base_0000000000000000']);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('classifies again after losing the creation race', async () => {
-    const schema = loadBaseSchema('sqlite');
-    for (const [winner, outcome] of [
-      [schema.id, 'accepted'],
-      ['base_0000000000000000', 'refused'],
-    ] as const) {
-      let recorded: string[] = [];
-      const driver: SchemaDriver = {
-        writesClaims: false,
-        async listRecorded() {
-          return [...recorded];
-        },
-        async existingTables() {
-          return [];
-        },
-        async createBaseSchema() {
-          recorded = [winner];
-          throw new SchemaRaceError();
-        },
-      };
-      if (outcome === 'accepted') {
-        assert.deepEqual(await ensureBaseSchema(driver, schema), { created: false });
-      } else {
-        await assert.rejects(ensureBaseSchema(driver, schema), NO_UPGRADE_PATH);
-      }
-    }
-  });
-
-  it("resumes exactly this build's own claim on a driver that writes claims", async () => {
-    const schema = loadBaseSchema('sqlite');
-    const claim = schemaClaim(schema);
-    for (const [start, outcome] of [
-      [[claim], 'resumed'],
-      [[claim, schema.id], 'refused'],
-      [['creating:base_0000000000000000'], 'refused'],
-    ] as const) {
-      let recorded: string[] = [...start];
-      const resumes: boolean[] = [];
-      const driver: SchemaDriver = {
-        writesClaims: true,
-        async listRecorded() {
-          return [...recorded];
-        },
-        async existingTables() {
-          return ['organizations'];
-        },
-        async createBaseSchema(_base, { resume }) {
-          resumes.push(resume);
-          recorded = [schema.id];
-        },
-      };
-      if (outcome === 'resumed') {
-        assert.deepEqual(await ensureBaseSchema(driver, schema), { created: true });
-        assert.deepEqual(resumes, [true]);
-      } else {
-        await assert.rejects(ensureBaseSchema(driver, schema), NO_UPGRADE_PATH);
-        assert.deepEqual(resumes, []);
-      }
-    }
-  });
-
-  it('accepts the record a peer wrote while this start lost the creation race', async () => {
-    const schema = loadBaseSchema('sqlite');
-    const recorded: string[] = [];
-    const driver: SchemaDriver = {
-      writesClaims: false,
-      async listRecorded() {
-        return [...recorded];
-      },
-      async existingTables() {
-        return [];
-      },
-      async createBaseSchema() {
-        // The peer committed first, and this start's own insert collided.
-        recorded.push(schema.id);
-        throw new Error('duplicate key');
-      },
-    };
-    assert.deepEqual(await ensureBaseSchema(driver, schema), { created: false });
-  });
-
-  it('waits while a peer of this build holds the claim, until it publishes', async () => {
-    const schema = loadBaseSchema('sqlite');
-    let recorded: string[] = [];
-    let creates = 0;
-    let polls = 0;
-    const driver: SchemaDriver = {
-      writesClaims: true,
-      async listRecorded() {
-        if (creates > 0) {
-          polls += 1;
-          // The peer holds its claim for a few polls, then publishes.
-          recorded = polls >= 6 ? [schema.id] : [schemaClaim(schema)];
-        }
-        return [...recorded];
-      },
-      async existingTables() {
-        return [];
-      },
-      async createBaseSchema() {
-        creates += 1;
-        throw new SchemaBusyError();
-      },
-    };
-    assert.deepEqual(await ensureBaseSchema(driver, schema, { pollMs: 1 }), {
-      created: false,
-    });
-    assert.equal(creates, 1, 'the start waited instead of creating again');
-    assert.ok(polls >= 6);
-  });
-
-  it('looks at the ledger again before refusing tables a peer just created', async () => {
-    const schema = loadBaseSchema('sqlite');
-    for (const [peer, writesClaims, expected] of [
-      // A transactional peer committed its tables and record together.
-      [schema.id, false, 'current'],
-      // A non-transactional peer claimed, then created its first table.
-      [schemaClaim(schema), true, 'resume'],
-    ] as const) {
-      let reads = 0;
-      const resumes: boolean[] = [];
-      const driver: SchemaDriver = {
-        writesClaims,
-        async listRecorded() {
-          reads += 1;
-          return reads === 1 ? [] : [peer];
-        },
-        async existingTables() {
-          return ['organizations'];
-        },
-        async createBaseSchema(_base, { resume }) {
-          resumes.push(resume);
-          throw new SchemaRaceError();
-        },
-      };
-      if (expected === 'current') {
-        assert.deepEqual(await ensureBaseSchema(driver, schema), { created: false });
-        assert.deepEqual(resumes, []);
-      } else {
-        // Resuming a claim it found; the stub's race then ends in a refusal
-        // only after MAX_RACES, which proves it never refused the tables.
-        await assert.rejects(ensureBaseSchema(driver, schema));
-        assert.ok(resumes.length > 0 && resumes.every((resume) => resume));
-      }
-    }
-  });
-
-  it('re-reads a ledger that lags its own acknowledged publication, within a bound', async () => {
-    const schema = loadBaseSchema('sqlite');
-    for (const [lagReads, outcome] of [
-      [3, 'created'],
-      [1_000, 'refused'],
-    ] as const) {
-      let recorded: string[] = [];
-      let created = false;
-      let reads = 0;
-      const driver: SchemaDriver = {
-        writesClaims: true,
-        async listRecorded() {
-          if (!created) return [...recorded];
-          reads += 1;
-          return reads > lagReads ? [schema.id] : [schemaClaim(schema)];
-        },
-        async existingTables() {
-          return [];
-        },
-        async createBaseSchema() {
-          created = true;
-          recorded = [schema.id];
-        },
-      };
-      if (outcome === 'created') {
-        assert.deepEqual(await ensureBaseSchema(driver, schema, { pollMs: 1 }), {
-          created: true,
-        });
-      } else {
-        await assert.rejects(ensureBaseSchema(driver, schema, { pollMs: 1 }), (error) => {
-          assert.ok(isNexusError(error));
-          // Not the recreate advice: the schema is ours, only unconfirmed.
-          assert.match(error.message, /start Ferrum Nexus again/);
-          assert.doesNotMatch(error.message, NO_UPGRADE_PATH);
-          return true;
-        });
-      }
-    }
-  });
-
-  it('refuses when a different build recorded its schema at the same moment', async () => {
-    const schema = loadBaseSchema('sqlite');
-    const recorded: string[] = [];
-    const driver: SchemaDriver = {
-      writesClaims: false,
-      async listRecorded() {
-        return [...recorded];
-      },
-      async existingTables() {
-        return [];
-      },
-      async createBaseSchema(base) {
-        recorded.push('base_0000000000000000', base.id);
-      },
-    };
-    await assert.rejects(ensureBaseSchema(driver, schema), NO_UPGRADE_PATH);
   });
 
   it('passes a NexusError from the driver through unchanged', async () => {
     const refusal = conflict('Another instance holds the lock');
     const driver: SchemaDriver = {
-      writesClaims: false,
+      async ensureLedger() {},
       async listRecorded() {
-        return [];
-      },
-      async existingTables() {
         return [];
       },
       async createBaseSchema() {
@@ -449,34 +178,12 @@ describe('ensureBaseSchema', () => {
   });
 });
 
-describe('base schema fingerprint', () => {
-  it('is stable for a backend, distinct across backends, and shaped base_<hex>', () => {
-    const ids = (['sqlite', 'pg', 'mysql'] as const).map((dialect) => {
-      const { id } = loadBaseSchema(dialect);
-      assert.match(id, BASE_ID);
-      assert.equal(loadBaseSchema(dialect).id, id);
-      return id;
-    });
-    const mongo = mongoBaseSchema().id;
-    assert.match(mongo, BASE_ID);
-    assert.equal(mongoBaseSchema().id, mongo);
-    assert.equal(new Set([...ids, mongo]).size, 4);
-  });
-
-  it('changes the MongoDB fingerprint with its indexes', () => {
-    assert.notEqual(mongoBaseSchema([]).id, mongoBaseSchema().id);
-  });
-
-  it('ignores whitespace outside literals, but not a changed statement or literal', () => {
-    const fingerprint = (...statements: string[]): string =>
-      schemaFingerprint(statements.map(canonicalStatement));
-    const a = fingerprint("CREATE TABLE t (a TEXT DEFAULT 'two  words')");
-    assert.equal(fingerprint("  CREATE TABLE t\n  (a   TEXT\tDEFAULT 'two  words')  "), a);
-    assert.notEqual(fingerprint("CREATE TABLE t (a TEXT DEFAULT 'two words')"), a);
-    assert.notEqual(fingerprint("CREATE TABLE t (a TEXT NOT NULL DEFAULT 'two  words')"), a);
-    assert.notEqual(
-      fingerprint("CREATE TABLE t (a TEXT DEFAULT 'two  words')", 'CREATE TABLE u (b TEXT)'),
-      a,
-    );
+describe('base schema generation', () => {
+  it('is the one id every backend records', () => {
+    assert.match(BASE_SCHEMA_ID, /^000_base_v\d+_\d+$/);
+    for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
+      assert.equal(loadBaseSchema(dialect).id, BASE_SCHEMA_ID);
+    }
+    assert.equal(MONGO_BASE_SCHEMA.id, BASE_SCHEMA_ID);
   });
 });

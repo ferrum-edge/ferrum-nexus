@@ -2,10 +2,10 @@
 --
 -- Until Ferrum Nexus 1.0 this file is the whole schema: there are no
 -- migrations and no upgrade path between releases. Change the schema by
--- editing this file (and its other dialect variants) directly. A database
--- created by an earlier version of the schema is refused at startup, never
--- migrated, and must be recreated (server/src/db/schema.ts; docs/operations.md,
--- "Schema and upgrades before 1.0").
+-- editing this file (and its other dialect variants) directly, and bump
+-- BASE_SCHEMA_ID in server/src/db/schema.ts in the same change. A database
+-- created at an earlier generation is refused at startup, never migrated, and
+-- must be recreated (docs/operations.md, "Schema and upgrades before 1.0").
 --
 -- Mirrors base.sql table for table, column for column and index for
 -- index. The conventions are identical to the SQLite variant:

@@ -102,7 +102,6 @@ import {
   ensureBaseSchema,
   loadBaseSchema,
   SCHEMA_LEDGER_TABLE,
-  SchemaRaceError,
   type BaseSchema,
   type SchemaDriver,
 } from '../../schema.js';
@@ -821,46 +820,27 @@ export function openSqliteDatabase(path: string): Database {
 
 /** The SQLite schema primitives; exported for the schema tests. */
 export function createSqliteSchemaDriver(db: Database): SchemaDriver {
-  const ledgerExists = (): boolean =>
-    queryAll(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [
-      SCHEMA_LEDGER_TABLE,
-    ]).length > 0;
-  const recorded = (): string[] =>
-    ledgerExists()
-      ? queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).map((row) => text(row.id))
-      : [];
-  const existing = (schema: BaseSchema): string[] => {
-    const names = new Set(schema.tables);
-    return queryAll(db, "SELECT name FROM sqlite_master WHERE type = 'table'")
-      .map((row) => text(row.name))
-      .filter((name) => names.has(name));
-  };
   return {
-    writesClaims: false,
-    async listRecorded(): Promise<string[]> {
-      return recorded();
+    async ensureLedger(): Promise<void> {
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
+           id TEXT PRIMARY KEY,
+           applied_at TEXT NOT NULL
+         )`,
+      );
     },
-    async existingTables(schema: BaseSchema): Promise<string[]> {
-      return existing(schema);
+    async listRecorded(): Promise<string[]> {
+      return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).map((row) => text(row.id));
     },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
-      // IMMEDIATE takes the write lock before the re-read, so a second
-      // process on the same file cannot create the schema in between.
       const create = db.transaction((base: BaseSchema) => {
-        db.exec(
-          `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
-             id TEXT PRIMARY KEY,
-             applied_at TEXT NOT NULL
-           )`,
-        );
-        if (recorded().length > 0 || existing(base).length > 0) throw new SchemaRaceError();
         db.exec(base.sql);
         db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
           base.id,
           nowIso(),
         );
       });
-      create.immediate(schema);
+      create(schema);
     },
   };
 }

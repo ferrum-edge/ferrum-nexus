@@ -4,7 +4,15 @@ Nexus `v0.4.0` ships the optional tool subsets tracked by
 [#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446), implemented in
 [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519). This page describes the
 provider opt-in, the exposure-identity rules and the writer-drain rollout that an
-upgrade to `v0.4.0` requires.
+upgrade to `v0.4.0` required.
+
+> **Historical for upgrades.** Since `v0.6.0` there is no upgrade path before 1.0: a
+> database written by an earlier release is refused, not migrated, and the base schema
+> already has the tool columns (see
+> [schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10) and
+> [moving to a new release](operations.md#moving-to-a-new-release)). The enrollment and
+> exposure-identity rules below still describe how subsets behave; the migration and
+> writer-drain steps applied to the `v0.4.0` upgrade only.
 
 ## Enrollment and rollout
 

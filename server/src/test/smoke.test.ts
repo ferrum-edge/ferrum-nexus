@@ -64,15 +64,7 @@ import {
   type RequestContext,
 } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
-import {
-  ensureMongoSchema,
-  latestMessagesPipeline,
-  mongoBaseSchema,
-  mongoLedgerEntry,
-} from '../db/adapters/mongodb/index.js';
-import { ensureMysqlSchema } from '../db/adapters/mysql/schema.js';
-import { createPostgresSchemaDriver } from '../db/adapters/postgres/index.js';
-import { ensureBaseSchema, loadBaseSchema, type BaseSchema } from '../db/schema.js';
+import { latestMessagesPipeline } from '../db/adapters/mongodb/index.js';
 import { createStore } from '../db/index.js';
 import type {
   ApiSpecRecord,
@@ -6097,9 +6089,6 @@ register('mongodb', process.env.NEXUS_TEST_MONGO_URL, 'NEXUS_TEST_MONGO_URL', mo
  * (docs/operations.md, "Schema and upgrades before 1.0").
  */
 const OLDER_LEDGERS: Record<string, string[]> = {
-  // Tables with no record: an earlier release's first start that stopped
-  // before recording anything.
-  'an interrupted earlier release': [],
   'an earlier release': [
     '001_initial',
     '002_api_gateway_plugins',
@@ -6115,10 +6104,9 @@ const OLDER_LEDGERS: Record<string, string[]> = {
     '012_access_request_grant',
     '013_account_recovery_jobs',
   ],
-  'an earlier base schema': ['base_0000000000000000'],
+  'an earlier base schema generation': ['000_base_v0_5_test'],
 };
 const NO_UPGRADE_PATH = /no upgrade path before 1\.0/;
-const BASE_FINGERPRINT = /^base_[0-9a-f]{16}$/;
 
 /** A throwaway database holding `ledger` and an older `users` table. */
 interface OlderDatabase {
@@ -6128,7 +6116,7 @@ interface OlderDatabase {
   drop: () => Promise<void>;
 }
 
-async function olderPostgres(adminUrl: string, ledger: string[] | null): Promise<OlderDatabase> {
+async function olderPostgres(adminUrl: string, ledger: string[]): Promise<OlderDatabase> {
   const database = throwawayDbName();
   const admin = new pg.Client({ connectionString: adminUrl });
   await admin.connect();
@@ -6138,18 +6126,12 @@ async function olderPostgres(adminUrl: string, ledger: string[] | null): Promise
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {
-    if (ledger !== null) {
-      // With no entries there is no ledger at all, as an earlier version's
-      // first start leaves it when it stops before recording anything.
-      if (ledger.length > 0) {
-        await client.query(
-          'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
-        );
-      }
-      await client.query('CREATE TABLE users (id TEXT PRIMARY KEY)');
-      for (const id of ledger) {
-        await client.query("INSERT INTO schema_migrations VALUES ($1, 'then')", [id]);
-      }
+    await client.query(
+      'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
+    );
+    await client.query('CREATE TABLE users (id TEXT PRIMARY KEY)');
+    for (const id of ledger) {
+      await client.query("INSERT INTO schema_migrations VALUES ($1, 'then')", [id]);
     }
   } finally {
     await client.end();
@@ -6160,15 +6142,15 @@ async function olderPostgres(adminUrl: string, ledger: string[] | null): Promise
       const reader = new pg.Client({ connectionString: url });
       await reader.connect();
       try {
+        const ids = await reader.query('SELECT id FROM schema_migrations ORDER BY id');
         const tables = await reader.query(
           "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' " +
             'ORDER BY table_name',
         );
-        const names = tables.rows.map((row: { table_name: string }) => row.table_name);
-        const ids = names.includes('schema_migrations')
-          ? (await reader.query('SELECT id FROM schema_migrations ORDER BY id')).rows
-          : [];
-        return { ledger: ids.map((row: { id: string }) => row.id), tables: names };
+        return {
+          ledger: ids.rows.map((row: { id: string }) => row.id),
+          tables: tables.rows.map((row: { table_name: string }) => row.table_name),
+        };
       } finally {
         await reader.end();
       }
@@ -6182,7 +6164,7 @@ async function olderPostgres(adminUrl: string, ledger: string[] | null): Promise
   };
 }
 
-async function olderMysql(adminUrl: string, ledger: string[] | null): Promise<OlderDatabase> {
+async function olderMysql(adminUrl: string, ledger: string[]): Promise<OlderDatabase> {
   const database = throwawayDbName();
   const admin = await mysql.createConnection(adminUrl);
   await admin.query(`CREATE DATABASE \`${database}\``);
@@ -6190,17 +6172,13 @@ async function olderMysql(adminUrl: string, ledger: string[] | null): Promise<Ol
   const url = withDatabase(adminUrl, database);
   const connection = await mysql.createConnection(url);
   try {
-    if (ledger !== null) {
-      if (ledger.length > 0) {
-        await connection.query(
-          'CREATE TABLE schema_migrations (id VARCHAR(191) NOT NULL PRIMARY KEY, ' +
-            'applied_at VARCHAR(32) NOT NULL)',
-        );
-      }
-      await connection.query('CREATE TABLE users (id VARCHAR(64) NOT NULL PRIMARY KEY)');
-      for (const id of ledger) {
-        await connection.execute("INSERT INTO schema_migrations VALUES (?, 'then')", [id]);
-      }
+    await connection.query(
+      'CREATE TABLE schema_migrations (id VARCHAR(191) NOT NULL PRIMARY KEY, ' +
+        'applied_at VARCHAR(32) NOT NULL)',
+    );
+    await connection.query('CREATE TABLE users (id VARCHAR(64) NOT NULL PRIMARY KEY)');
+    for (const id of ledger) {
+      await connection.execute("INSERT INTO schema_migrations VALUES (?, 'then')", [id]);
     }
   } finally {
     await connection.end();
@@ -6210,19 +6188,17 @@ async function olderMysql(adminUrl: string, ledger: string[] | null): Promise<Ol
     inspect: async () => {
       const reader = await mysql.createConnection(url);
       try {
+        const [ids] = await reader.query<mysql.RowDataPacket[]>(
+          'SELECT id FROM schema_migrations ORDER BY id',
+        );
         const [tables] = await reader.query<mysql.RowDataPacket[]>(
           'SELECT TABLE_NAME AS name FROM information_schema.TABLES ' +
             'WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME',
         );
-        const names = tables.map((row) => String(row.name));
-        const ids = names.includes('schema_migrations')
-          ? (
-              await reader.query<mysql.RowDataPacket[]>(
-                'SELECT id FROM schema_migrations ORDER BY id',
-              )
-            )[0]
-          : [];
-        return { ledger: ids.map((row) => String(row.id)), tables: names };
+        return {
+          ledger: ids.map((row) => String(row.id)),
+          tables: tables.map((row) => String(row.name)),
+        };
       } finally {
         await reader.end();
       }
@@ -6235,23 +6211,18 @@ async function olderMysql(adminUrl: string, ledger: string[] | null): Promise<Ol
   };
 }
 
-async function olderMongo(baseUrl: string, ledger: string[] | null): Promise<OlderDatabase> {
+async function olderMongo(baseUrl: string, ledger: string[]): Promise<OlderDatabase> {
   const database = throwawayDbName();
   const url = withDatabase(baseUrl, database);
   const client = new MongoClient(url);
   await client.connect();
   try {
     const db = client.db(database);
-    if (ledger !== null) {
-      await db.collection('users').insertOne({ _id: 'older' } as Document);
-      for (const id of ledger) {
-        // A database created at an earlier base schema holds the singleton
-        // `schema` document; a pre-0.6 one holds one document per migration.
-        const doc = id.startsWith('base_')
-          ? { _id: 'schema', state: 'ready', schema: id, applied_at: 'then' }
-          : { _id: id, applied_at: 'then' };
-        await db.collection('schema_migrations').insertOne(doc as Document);
-      }
+    await db.collection('users').insertOne({ _id: 'older' } as Document);
+    for (const id of ledger) {
+      await db
+        .collection('schema_migrations')
+        .insertOne({ _id: id, applied_at: 'then' } as Document);
     }
   } finally {
     await client.close();
@@ -6267,7 +6238,7 @@ async function olderMongo(baseUrl: string, ledger: string[] | null): Promise<Old
         const collections = await db.listCollections({}, { nameOnly: true }).toArray();
         const users = await db.collection('users').indexes();
         return {
-          ledger: ids.map((doc) => mongoLedgerEntry(doc)),
+          ledger: ids.map((doc) => String(doc._id)),
           // Collections, plus any index beyond `_id` the refused start created.
           tables: [
             ...collections.map((collection) => collection.name),
@@ -6290,53 +6261,12 @@ async function olderMongo(baseUrl: string, ledger: string[] | null): Promise<Old
   };
 }
 
-/** A build with the same schema statements but another fingerprint. */
-const OTHER_BUILD = 'base_1111111111111111';
-
-/** Create `schema` in the database at `url` through the backend's own driver. */
-async function ensureWith(driver: DbDriver, url: string, schema: BaseSchema): Promise<void> {
-  if (driver === 'postgres') {
-    const pool = new pg.Pool({ connectionString: url });
-    try {
-      await ensureBaseSchema(createPostgresSchemaDriver(pool), schema);
-    } finally {
-      await pool.end();
-    }
-  } else if (driver === 'mysql') {
-    const pool = mysql.createPool(url);
-    try {
-      await ensureMysqlSchema(pool, schema);
-    } finally {
-      await pool.end();
-    }
-  } else {
-    const client = new MongoClient(url);
-    try {
-      await client.connect();
-      await ensureMongoSchema(client.db(), schema);
-    } finally {
-      await client.close();
-    }
-  }
-}
-
-/** This build's schema for `driver`, and the same schema under another fingerprint. */
-function competingBuilds(driver: DbDriver): [BaseSchema, BaseSchema] {
-  const current =
-    driver === 'postgres'
-      ? loadBaseSchema('pg')
-      : driver === 'mysql'
-        ? loadBaseSchema('mysql')
-        : mongoBaseSchema();
-  return [current, { ...current, id: OTHER_BUILD }];
-}
-
 function registerOlderSchemaRefusal(
   label: string,
   driver: DbDriver,
   url: string | undefined,
   variable: string,
-  makeOlder: (url: string, ledger: string[] | null) => Promise<OlderDatabase>,
+  makeOlder: (url: string, ledger: string[]) => Promise<OlderDatabase>,
 ): void {
   describe(`older databases are refused — ${label}`, () => {
     if (url === undefined || url.trim() === '') {
@@ -6356,7 +6286,7 @@ function registerOlderSchemaRefusal(
             await assert.rejects(store.migrate(), (error: unknown) => {
               assert.ok(isNexusError(error), String(error));
               assert.match(error.message, NO_UPGRADE_PATH);
-              assert.ok(error.message.includes(ledger[0] ?? 'users'), error.message);
+              assert.ok(error.message.includes(ledger[0]!), error.message);
               return true;
             });
           } finally {
@@ -6368,52 +6298,6 @@ function registerOlderSchemaRefusal(
         }
       });
     }
-
-    it('lets two instances start on one empty database at once', async () => {
-      const empty = await makeOlder(url, null);
-      try {
-        const first = createStore(testConfig(driver, empty.url));
-        const second = createStore(testConfig(driver, empty.url));
-        try {
-          await Promise.all([first.init(), second.init()]);
-          await Promise.all([first.migrate(), second.migrate()]);
-          await first.migrate();
-        } finally {
-          await Promise.all([first.close(), second.close()]);
-        }
-        const { ledger, tables } = await empty.inspect();
-        assert.equal(ledger.length, 1, JSON.stringify(ledger));
-        assert.match(ledger[0] ?? '', BASE_FINGERPRINT);
-        if (driver !== 'mongodb') {
-          assert.ok(tables.includes('access_gateway_jobs'), JSON.stringify(tables));
-        }
-      } finally {
-        await empty.drop();
-      }
-    });
-
-    it('lets exactly one of two different builds create an empty database', async () => {
-      const empty = await makeOlder(url, null);
-      try {
-        const builds = competingBuilds(driver);
-        const outcomes = await Promise.allSettled(
-          builds.map((schema) => ensureWith(driver, empty.url, schema)),
-        );
-        const won = outcomes.flatMap((outcome, i) =>
-          outcome.status === 'fulfilled' ? [builds[i]!.id] : [],
-        );
-        assert.equal(won.length, 1, JSON.stringify(outcomes));
-        const lost = outcomes.find((outcome) => outcome.status === 'rejected');
-        assert.ok(lost && lost.status === 'rejected');
-        assert.match(String((lost.reason as Error).message), NO_UPGRADE_PATH);
-        // The loser left the winner's record alone, and the winner still opens it.
-        assert.deepEqual((await empty.inspect()).ledger, won);
-        const winner = builds.find((schema) => schema.id === won[0])!;
-        await ensureWith(driver, empty.url, winner);
-      } finally {
-        await empty.drop();
-      }
-    });
   });
 }
 

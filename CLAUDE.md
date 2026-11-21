@@ -27,9 +27,11 @@ paths will be designed before 1.0:
   `server/src/db/adapters/mongodb/index.ts`. The pre-0.6 migration chain (`001` to `015`) is folded
   into it. A schema change edits all four in the same change. Do not add migration files, upgrade
   steps, data backfills or a released-migration freeze.
-- `server/src/db/schema.ts` records the schema's fingerprint (a hash of its statements) in
-  `schema_migrations`. At startup an empty ledger gets the base schema, a matching fingerprint is
-  left alone, and anything else (a pre-0.6 migration chain, an older fingerprint) is refused with
+- **Bump `BASE_SCHEMA_ID` in `server/src/db/schema.ts` (`000_base_v0_6`, named after the release
+  that first ships it) in the same change as any edit to the base schema.** It is the one entry
+  `schema_migrations` records. At startup an empty ledger gets the base schema, a matching
+  generation is left alone, and anything else (a pre-0.6 migration chain, an older generation) is
+  refused with
   an error telling the operator to recreate the database. A database created by an earlier version
   is never migrated. See
   [docs/operations.md, "Schema and upgrades before 1.0"](docs/operations.md#schema-and-upgrades-before-10).
@@ -204,8 +206,8 @@ container image.
   `shared/src/api-contract.ts`, and add the call to `web/src/lib/api.ts`.
 - **Adding a DB column or table**: until v1, edit the base schema directly, with no migration:
   `server/src/db/schema/base.sql`, `base.pg.sql` and `base.mysql.sql`, plus `BASE_INDEXES` in the
-  MongoDB adapter for any index. The fingerprint changes with the edit, so older databases are
-  refused at startup and must be recreated. Then update `NexusStore`, implement it in sqlite,
+  MongoDB adapter for any index, and bump `BASE_SCHEMA_ID` in `server/src/db/schema.ts` so older
+  databases are refused at startup and must be recreated. Then update `NexusStore`, implement it in sqlite,
   sql-repos, and mongodb, and extend the smoke suite and `server/src/db/base-schema.test.ts`.
 - **Touching the Edge integration**: only through `server/src/ferrum-admin/`, and extend the mock
   in `server/src/test/mock-ferrum-edge.ts` to match.

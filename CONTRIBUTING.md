@@ -65,7 +65,8 @@ coverage changes visible.
 **Until v1, edit the base schema directly; there are no migrations.** Each backend has one base
 schema (`server/src/db/schema/base.sql`, `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in the
 MongoDB adapter), and a schema change edits all four in the same change. No upgrade paths are
-designed before 1.0: a database created from an earlier schema is refused at startup and must be
+designed before 1.0: bump `BASE_SCHEMA_ID` in `server/src/db/schema.ts` with every schema edit, and
+a database created at an earlier schema generation is refused at startup and must be
 recreated, development databases included. See
 [schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10).
 

@@ -294,28 +294,21 @@ See [`operations.md`](operations.md#mongodb).
 Until 1.0 there are no migrations. Each backend has one base schema
 (`db/schema/base.sql`, `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in
 the MongoDB adapter), and a schema change edits it directly. `db/schema.ts`
-owns the rule every adapter applies at `migrate()`. Adapters supply
-`listRecorded`, `existingTables` and `createBaseSchema`, and say whether they
-write claims (`writesClaims`).
+owns the rule every adapter applies at `migrate()`, keeping the pre-0.6
+runner's shape: adapters supply `ensureLedger`, `listRecorded` and
+`createBaseSchema`.
 
-- A `schema_migrations` ledger holding exactly this build's fingerprint
-  (`base_<16 hex>`, a hash of the schema's statements) means the schema is
+- A `schema_migrations` ledger holding exactly `BASE_SCHEMA_ID` (the base
+  schema's generation, bumped with every schema edit) means the schema is
   current, so nothing happens.
-- An empty or missing ledger, with none of the schema's tables present, means a
-  new database. The adapter creates the ledger and the schema inside an
-  exclusive section, re-reading the ledger there first, and records the
-  fingerprint. SQLite (an immediate transaction) and PostgreSQL (a
-  transaction-scoped advisory lock) do this atomically. MySQL (under its
-  advisory lock) and MongoDB (a claim on one fixed ledger key) cannot, so they
-  first write a claim, `creating:<fingerprint>`, and publish the fingerprint
-  last. A start that finds another got there first changes nothing and looks
-  again.
-- This build's own claim, on an adapter that writes claims, means its creation
-  stopped part-way, so the adapter finishes it.
-- Anything else is refused with a `NexusError` before any service reads the
-  data: a pre-0.6 migration chain, another fingerprint or claim, or the
-  schema's tables with no record. A database created by an earlier version is
-  never migrated ([operations](operations.md#schema-and-upgrades-before-10)).
+- An empty ledger means a new database: the adapter creates the schema and
+  records the generation, atomically on SQLite and PostgreSQL; MySQL replays
+  `CREATE TABLE IF NOT EXISTS` statements under its advisory lock and records
+  last; MongoDB creates its indexes, then records.
+- Anything else, such as a pre-0.6 migration chain or another generation, is
+  refused with a `NexusError` before any service reads the data. A database
+  created by an earlier version is never migrated
+  ([operations](operations.md#schema-and-upgrades-before-10)).
 
 The server build copies `db/schema/` to `server/dist/db/schema/`, and the
 loader reads it beside its own module.
