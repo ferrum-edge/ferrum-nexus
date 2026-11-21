@@ -563,9 +563,10 @@ gateway.
 
 **Backend states:**
 
-- **Unknown**: there is nothing to report. Either the API has no proxy on the
-  gateway (for example while a repair is pending), and the card says there is
-  nothing to measure; or the gateway's backend sample has no state for the
+- **Unknown**: there is nothing to report. Either the portal has no gateway
+  proxy recorded for the API (for example after an administrator cleared a
+  missing deployment's reference and the API awaits restoration), and the card
+  says there is nothing to measure; or the gateway's backend sample has no state for the
   API, and the card says whether circuit breaking is on in the API's saved
   settings beside that observation. With it on, the gateway normally lists the
   breaker once a request has reached it, which can be a while after you turn it
@@ -900,7 +901,8 @@ most often after an authentication change.
 **"A client gets 502/503."** That is your backend. Check **Backend** on the
 Overview tab: **Failing** confirms it and says since when. **Unknown** does not
 clear your backend; it means the gateway has no breaker or health-check state
-to report for the API right now, or that the API has no proxy to measure. Check the backend is healthy and reachable
+to report for the API right now, or that the portal has no gateway proxy
+recorded for the API to measure. Check the backend is healthy and reachable
 **from the gateway**.
 
 **"My rate limit is not applied."** Confirm it is saved on **Settings**. It is
