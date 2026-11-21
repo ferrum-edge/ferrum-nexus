@@ -418,9 +418,10 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
    * exactly as the callback found it before its slow token exchange.
    *
    * Every sign-in commit runs under the provider's {@link ssoProviderLockKey},
-   * which a settings save takes as well, so a removal, a disable or a policy
-   * change that has committed is seen here, and one that has not yet started
-   * waits for this commit and then revokes the session it issued. The re-read
+   * which a settings save takes as well, so a removal, a disable or a switch to
+   * `local_only` that has committed is seen here, and one that has not yet
+   * started waits for this commit and then revokes the session it issued. The
+   * re-read
    * alone would not order a returning sign-in against a save on another
    * instance: the save's revocation cannot see a session this transaction has
    * not yet committed.

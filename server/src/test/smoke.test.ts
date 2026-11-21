@@ -804,7 +804,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       // Set-based termination for several accounts at once, across batches:
       // live accounts sit in the first batch, at its boundary and in the last.
-      const others = [await makeUser(), await makeUser()];
+      const others = [await makeUser(), await makeUser(), await makeUser()];
       const tokens = new Map<string, string>();
       for (const account of [user, ...others]) {
         const token = `many-${newId()}`;
@@ -824,11 +824,12 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         expires_at: isoInSeconds(600),
       });
       const absent = (count: number): string[] => Array.from({ length: count }, () => newId());
-      const [first, second] = others;
-      assert.ok(first && second);
-      const ids = [user.id, ...absent(498), first.id, ...absent(300), second.id];
+      const [first, second, third] = others;
+      assert.ok(first && second && third);
+      const ids = [user.id, ...absent(498), first.id, second.id, ...absent(300), third.id];
       assert.equal(ids.indexOf(first.id), 499, 'the last id of the first batch of 500');
-      assert.equal(await store.sessions.deleteForUsers(ids), 3);
+      assert.equal(ids.indexOf(second.id), 500, 'the first id of the second batch');
+      assert.equal(await store.sessions.deleteForUsers(ids), 4);
       for (const token of tokens.values()) {
         assert.equal(await store.sessions.findByTokenHash(token), null);
       }

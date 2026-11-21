@@ -730,11 +730,17 @@ lease inside it), not across the token exchange. A settings save first takes the
 deployment-wide `sso:settings` key and then the key of every provider it can
 affect, in sorted order, and then, inside its transaction, refuses with
 `409 CONFLICT` unless the stored settings are still the ones it worked that set
-out from. On every backend, and across instances, a save either commits before
-the callback's re-read, which then refuses the attempt, or waits for the
-callback to commit and then sees what it wrote: a removal deletes the new link
-with the provider's others, and a cut-off revokes the new session with the
-linked accounts' others
+out from. On every backend, and across instances once every instance runs a
+version whose returning sign-ins take the provider lease
+([mixed-version rollouts](operations.md#8-scaling)), a save either commits
+before the callback's re-read, which then refuses the attempt if the save
+changed what the re-read checks (the provider removed, disabled or
+reconfigured, the policy turned to `local_only`, or the domain list no longer
+admitting the address), or waits for the callback to commit and then sees what
+it wrote: a removal deletes the new link with the provider's others, and a
+cut-off (removal, disable or a switch to `local_only`) revokes the new session
+with the linked accounts' others. Any other settings change, `sso_only`
+included, neither refuses the callback nor ends its session
 ([Cross-instance locks are fenced at commit](#cross-instance-locks-are-fenced-at-commit)).
 The re-read alone would not order a returning sign-in against a save on
 another instance: the save's revocation cannot see a session that the
