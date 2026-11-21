@@ -1549,7 +1549,10 @@ notes), the new release needs a new, empty database:
      access that requires, see [Namespace routability](#namespace-routability)).
      The old proxies and credentials keep working until you remove them or
      retire the data plane that serves the old namespace; nothing the new portal
-     does touches them.
+     does touches them. That includes its retired-key cleanup: before you
+     upgrade the gateway that serves the old namespace past Edge v0.9.20, edit
+     or remove its configs yourself (see
+     [palette keys the next Edge release removes](#palette-keys-the-next-edge-release-removes)).
 6. Start the new release. It creates the schema, and the next registration
    becomes the founding `super_admin` (see
    [first run and the bootstrap token](#first-run-and-the-bootstrap-token)).

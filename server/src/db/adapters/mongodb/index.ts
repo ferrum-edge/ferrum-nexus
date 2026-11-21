@@ -1597,7 +1597,15 @@ export async function ensureMongoSchema(
   indexes: readonly IndexDefinition[] = BASE_INDEXES,
   options: SchemaWaitOptions = {},
 ): Promise<void> {
-  const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE);
+  // Schema decisions read and write the ledger with an explicit policy, not
+  // whatever the connection string sets: claims and publication wait for a
+  // majority, and reads go to the primary, so a start never decides on a
+  // ledger that lags its own acknowledged write.
+  const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE, {
+    writeConcern: { w: 'majority' },
+    readConcern: { level: 'majority' },
+    readPreference: 'primary',
+  });
   const existing = async (base: BaseSchema): Promise<string[]> => {
     const names = new Set(base.tables);
     const collections = await db.listCollections({}, { nameOnly: true }).toArray();

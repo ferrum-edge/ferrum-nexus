@@ -141,6 +141,8 @@ const DEFAULT_PEER_WAIT_MS = 60_000;
 const DEFAULT_POLL_MS = 250;
 /** Re-classifications after a lost race; the second one normally decides. */
 const MAX_RACES = 3;
+/** Re-reads of a ledger that does not yet show this start's publication. */
+const VERIFY_RETRIES = 20;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -149,21 +151,13 @@ function isCurrent(recorded: readonly string[], schema: BaseSchema): boolean {
   return recorded.length === 1 && recorded[0] === schema.id;
 }
 
-/**
- * The ledger shows this build's own interrupted creation: its claim, and at
- * most its id (published just before the claim could be removed).
- */
+/** The ledger shows this build's own interrupted creation: exactly its claim. */
 function isResumable(
   recorded: readonly string[],
   schema: BaseSchema,
   driver: SchemaDriver,
 ): boolean {
-  const claim = schemaClaim(schema);
-  return (
-    driver.writesClaims &&
-    recorded.includes(claim) &&
-    recorded.every((id) => id === claim || id === schema.id)
-  );
+  return driver.writesClaims && recorded.length === 1 && recorded[0] === schemaClaim(schema);
 }
 
 /** What to do with the database as it is now; a refusal throws. */
@@ -215,7 +209,13 @@ export async function ensureBaseSchema(
       if (error instanceof SchemaBusyError && races < MAX_RACES) continue;
       throw schemaFailure(schema, error);
     }
-    const recorded = await driver.listRecorded();
+    let recorded = await driver.listRecorded();
+    // A read that still shows this build's own claim lags the publication
+    // the driver just had acknowledged; give it a moment before deciding.
+    for (let check = 0; isResumable(recorded, schema, driver) && check < VERIFY_RETRIES; check++) {
+      await sleep(options.pollMs ?? DEFAULT_POLL_MS);
+      recorded = await driver.listRecorded();
+    }
     if (!isCurrent(recorded, schema)) throw olderSchemaError(recorded, schema);
     return { created: true };
   }

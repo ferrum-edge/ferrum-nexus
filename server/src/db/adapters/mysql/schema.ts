@@ -97,9 +97,7 @@ async function createBaseSchema(
   // re-read keeps the driver contract the other adapters follow.
   const recorded = await readLedger(connection);
   if (resume) {
-    if (!recorded.includes(claim) || recorded.some((id) => id !== claim && id !== schema.id)) {
-      throw new SchemaRaceError();
-    }
+    if (recorded.length !== 1 || recorded[0] !== claim) throw new SchemaRaceError();
   } else {
     if (recorded.length > 0 || (await tablesPresent(connection, schema)).length > 0) {
       throw new SchemaRaceError();
@@ -110,10 +108,6 @@ async function createBaseSchema(
     ]);
   }
   for (const statement of statements) await connection.query(statement);
-  if (recorded.includes(schema.id)) {
-    await connection.execute(`DELETE FROM ${SCHEMA_LEDGER_TABLE} WHERE id = ?`, [claim]);
-    return;
-  }
   const [result] = await connection.execute<mysql.ResultSetHeader>(
     `UPDATE ${SCHEMA_LEDGER_TABLE} SET id = ?, applied_at = ? WHERE id = ?`,
     [schema.id, nowIso(), claim],

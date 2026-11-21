@@ -251,12 +251,12 @@ describe('ensureBaseSchema', () => {
     }
   });
 
-  it("resumes this build's own claim on a driver that writes claims, and refuses another's", async () => {
+  it("resumes exactly this build's own claim on a driver that writes claims", async () => {
     const schema = loadBaseSchema('sqlite');
     const claim = schemaClaim(schema);
     for (const [start, outcome] of [
       [[claim], 'resumed'],
-      [[claim, schema.id], 'resumed'],
+      [[claim, schema.id], 'refused'],
       [['creating:base_0000000000000000'], 'refused'],
     ] as const) {
       let recorded: string[] = [...start];
