@@ -1608,7 +1608,11 @@ export async function ensureMongoSchema(
   });
   const existing = async (base: BaseSchema): Promise<string[]> => {
     const names = new Set(base.tables);
-    const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+    // From the primary, like the ledger: a lagging secondary could hide
+    // collections an earlier start created, or show ones already dropped.
+    const collections = await db
+      .listCollections({}, { nameOnly: true, readPreference: 'primary' })
+      .toArray();
     return collections.map((collection) => collection.name).filter((name) => names.has(name));
   };
   const schemaDoc = async (): Promise<Row | null> =>

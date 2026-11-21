@@ -1502,7 +1502,10 @@ schema, which stands for the logical schema. A release that changes the base
 schema refuses every database an earlier release created.
 A release that leaves the schema unchanged keeps the fingerprint and opens the
 previous release's database as it is. Each release's notes say which applies.
-To see a database's fingerprint, run `SELECT id FROM schema_migrations`.
+To see a database's fingerprint, run `SELECT id FROM schema_migrations` (SQL
+backends) or `db.schema_migrations.find({})` (MongoDB, where the `schema`
+document holds the fingerprint in `schema` and `state` is `ready` or `creating`;
+any other document is a pre-0.6 migration id in `_id`).
 
 Never edit `schema_migrations` to get past the refusal. Emptying it does not
 help: Nexus then finds its tables with no record and refuses them. Writing this

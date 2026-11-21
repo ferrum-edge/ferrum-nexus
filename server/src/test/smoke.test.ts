@@ -6245,9 +6245,12 @@ async function olderMongo(baseUrl: string, ledger: string[] | null): Promise<Old
     if (ledger !== null) {
       await db.collection('users').insertOne({ _id: 'older' } as Document);
       for (const id of ledger) {
-        await db
-          .collection('schema_migrations')
-          .insertOne({ _id: id, applied_at: 'then' } as Document);
+        // A database created at an earlier base schema holds the singleton
+        // `schema` document; a pre-0.6 one holds one document per migration.
+        const doc = id.startsWith('base_')
+          ? { _id: 'schema', state: 'ready', schema: id, applied_at: 'then' }
+          : { _id: id, applied_at: 'then' };
+        await db.collection('schema_migrations').insertOne(doc as Document);
       }
     }
   } finally {

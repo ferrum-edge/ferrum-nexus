@@ -98,7 +98,9 @@ export function createPostgresSchemaDriver(pool: PgPool): SchemaDriver {
     async createBaseSchema(schema: BaseSchema): Promise<void> {
       const client = await pool.connect();
       try {
-        await client.query('BEGIN');
+        // READ COMMITTED whatever the session default: the re-read below must
+        // see what a creator that held the lock before this one committed.
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
         // One creator per database at a time; the lock ends with the
         // transaction. Everything below runs only for the winner.
         await client.query("SELECT pg_advisory_xact_lock(hashtext('ferrum-nexus:base-schema'))");

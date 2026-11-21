@@ -93,9 +93,8 @@ export interface SchemaDriver {
    * Create the ledger (if missing) and the base schema, and record the
    * schema's id, inside an exclusive section. Before any DDL, re-read the
    * ledger there and require it to be empty, with none of `schema.tables`
-   * present (or, with `resume: true`, to hold only this build's claim and
-   * possibly its id); otherwise change nothing and throw
-   * {@link SchemaRaceError}. A driver with transactional DDL does all of it
+   * present (or, with `resume: true`, to hold exactly this build's
+   * claim); otherwise change nothing and throw {@link SchemaRaceError}. A driver with transactional DDL does all of it
    * atomically. One without writes the claim before its first DDL, makes
    * every statement replayable, and publishes the id last. A driver that
    * finds a peer of this build already creating the schema throws

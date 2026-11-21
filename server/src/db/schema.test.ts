@@ -370,6 +370,40 @@ describe('ensureBaseSchema', () => {
     }
   });
 
+  it('re-reads a ledger that lags its own acknowledged publication, within a bound', async () => {
+    const schema = loadBaseSchema('sqlite');
+    for (const [lagReads, outcome] of [
+      [3, 'created'],
+      [1_000, 'refused'],
+    ] as const) {
+      let recorded: string[] = [];
+      let created = false;
+      let reads = 0;
+      const driver: SchemaDriver = {
+        writesClaims: true,
+        async listRecorded() {
+          if (!created) return [...recorded];
+          reads += 1;
+          return reads > lagReads ? [schema.id] : [schemaClaim(schema)];
+        },
+        async existingTables() {
+          return [];
+        },
+        async createBaseSchema() {
+          created = true;
+          recorded = [schema.id];
+        },
+      };
+      if (outcome === 'created') {
+        assert.deepEqual(await ensureBaseSchema(driver, schema, { pollMs: 1 }), {
+          created: true,
+        });
+      } else {
+        await assert.rejects(ensureBaseSchema(driver, schema, { pollMs: 1 }), NO_UPGRADE_PATH);
+      }
+    }
+  });
+
   it('refuses when a different build recorded its schema at the same moment', async () => {
     const schema = loadBaseSchema('sqlite');
     const recorded: string[] = [];
