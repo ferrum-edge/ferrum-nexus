@@ -1079,7 +1079,7 @@ export interface ApiUsageLatency {
  */
 export interface ApiUsageBackend {
   status: ApiUsageBackendStatus;
-  /** One human-readable sentence explaining `status`, or `null`. */
+  /** A short human-readable explanation of `status`, or `null`. */
   detail: string | null;
   /** Since when the backend has been in a failing state, when Edge reports it. */
   since?: IsoTimestamp;

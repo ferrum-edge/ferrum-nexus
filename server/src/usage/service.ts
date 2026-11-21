@@ -184,27 +184,30 @@ function scopeOf(target: string | undefined): string {
 /**
  * Why the gateway lists no breaker for this proxy, in the catalog's terms.
  *
- * Edge creates a breaker's runtime state lazily, on the first request after
- * the proxy has one, and lists only instantiated entries. The cumulative
- * request counters can predate the setting, so traffic alone does not mean an
- * enabled breaker should already be listed: until the next request reaches
- * it, an enabled breaker is configured but unobserved, not absent.
+ * Edge creates a breaker's runtime state lazily, when a request reaches the
+ * breaker, and lists only instantiated entries. The cumulative request
+ * counters can include traffic from before the breaker was enabled, or traffic
+ * refused before it (authentication, for one), so traffic alone does not mean
+ * an enabled breaker should already be listed: it is configured but
+ * unobserved, not absent. The wording states the catalog setting as the API's
+ * saved setting, not as the gateway's live configuration, and does not claim
+ * the setting is why the gateway is silent.
  */
 function unobservedBreaker(breakerConfigured: boolean, hasTraffic: boolean | null): string {
   if (!breakerConfigured) {
     if (hasTraffic === null) {
-      return 'Request metrics are unavailable, no circuit breaker is configured for this API, and the gateway reports no backend state.';
+      return "Request metrics are unavailable, circuit breaking is off in this API's catalog settings, and the gateway reports no backend state.";
     }
     return hasTraffic
-      ? 'No circuit breaker is configured for this API, so the gateway reports no backend state.'
-      : 'No traffic has reached this API yet and no circuit breaker is configured for it, so the gateway has no backend state to report.';
+      ? "Circuit breaking is off in this API's catalog settings, and the gateway reports no backend state."
+      : "The sampled counters show no traffic yet, circuit breaking is off in this API's catalog settings, and the gateway has no backend state to report.";
   }
   if (hasTraffic === null) {
-    return 'Request metrics are unavailable. A circuit breaker is configured for this API, but the gateway reports no state for it yet.';
+    return "Request metrics are unavailable. Circuit breaking is on in this API's catalog settings, but the gateway has reported no breaker state yet.";
   }
   return hasTraffic
-    ? 'A circuit breaker is configured for this API, but the gateway reports no state for it yet. The gateway creates that state on the first request after the breaker is enabled, and the request counts can predate it.'
-    : 'A circuit breaker is configured for this API, but no traffic has reached it yet, so the gateway has no breaker state to report.';
+    ? "Circuit breaking is on in this API's catalog settings, but the gateway has reported no breaker state yet. The gateway creates that state when a request reaches the breaker; the request totals can include traffic from before it was enabled, or traffic refused before reaching it."
+    : "Circuit breaking is on in this API's catalog settings, but the sampled counters show no traffic yet, so the gateway has no breaker state to report.";
 }
 
 /**
