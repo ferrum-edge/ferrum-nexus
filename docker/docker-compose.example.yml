@@ -81,7 +81,9 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # Edge v0.9.15 runs as UID 65532 and pre-creates /data with that ownership.
+  # Edge images from v0.9.15 on, including the release pinned in
+  # release/compatibility.env, run as UID 65532 and pre-create /data with that
+  # ownership.
   # This one-shot container also repairs older root-owned named volumes before
   # SQLite opens its database; it is a no-op on later starts.
   ferrum-edge-init:

@@ -1344,11 +1344,14 @@ class SqliteStore implements NexusStore {
         providerId,
       ]),
 
-    listUserIdsByProvider: async (providerId) =>
+    listUserIdsByProvider: async (providerId, issuer) =>
       queryAll(
         this.db,
-        'SELECT DISTINCT user_id FROM user_identities WHERE provider_id = ? ORDER BY user_id ASC',
-        [providerId],
+        issuer === undefined
+          ? 'SELECT DISTINCT user_id FROM user_identities WHERE provider_id = ? ORDER BY user_id ASC'
+          : 'SELECT DISTINCT user_id FROM user_identities WHERE provider_id = ? AND issuer = ? ' +
+              'ORDER BY user_id ASC',
+        issuer === undefined ? [providerId] : [providerId, issuer],
       ).map((row) => text(row.user_id)),
 
     touchLogin: async (id, email, at) => {
@@ -1513,6 +1516,20 @@ class SqliteStore implements NexusStore {
 
     deleteForUser: async (userId) =>
       execute(this.db, 'DELETE FROM sessions WHERE user_id = ?', [userId]),
+
+    deleteForUsers: async (userIds) => {
+      let deleted = 0;
+      // 500 per statement: well under SQLite's bound-parameter limit.
+      for (let start = 0; start < userIds.length; start += 500) {
+        const batch = userIds.slice(start, start + 500);
+        deleted += execute(
+          this.db,
+          `DELETE FROM sessions WHERE user_id IN (${batch.map(() => '?').join(', ')})`,
+          batch,
+        );
+      }
+      return deleted;
+    },
 
     deleteExpired: async (now) =>
       execute(this.db, 'DELETE FROM sessions WHERE expires_at <= ?', [now]),
