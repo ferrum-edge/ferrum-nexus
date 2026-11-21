@@ -906,6 +906,18 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
   }
 
   it('previews proposed manifests in the packaged image without fetching or disclosing references', async () => {
+    // Telemetry endpoints aimed at the observed fixture, whatever scheme they
+    // use: the fixture's effective port is written explicitly, so switching
+    // the scheme of an override without a port (`http://upstream`, port 80)
+    // cannot move the attempt to a port nobody observes. `localhost` stands
+    // in for a loopback-literal override where a named host is needed.
+    const fixture = new URL(UPSTREAM_URL);
+    const fixturePort = fixture.port || (fixture.protocol === 'https:' ? '443' : '80');
+    const telemetryEndpoint = (scheme: 'http:' | 'https:', named = false): string => {
+      const loopback = fixture.hostname === '[::1]' || fixture.hostname.startsWith('127.');
+      const host = named && loopback ? 'localhost' : fixture.hostname;
+      return `${scheme}//${host}:${fixturePort}/manifest-must-not-fetch`;
+    };
     const before = await upstreamSnapshot();
     const manifest = {
       schema: 'ferrum.service_manifest',
@@ -920,7 +932,14 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         gateway_client_key_path: '/nonexistent/secret-client.key',
         server_ca_path: '/nonexistent/secret-ca.pem',
       },
-      gateway: { namespace: 'nexus', otel_endpoint: `${UPSTREAM_URL}/manifest-must-not-fetch` },
+      // `https://`: the preview refuses a cleartext exporter to a host that is
+      // not a loopback IP literal, as Ferrum Edge drops one (#740). A TLS
+      // attempt at the plain-HTTP upstream still shows in its snapshot, as a
+      // `CLIENT_ERROR` observation.
+      gateway: {
+        namespace: 'nexus',
+        otel_endpoint: telemetryEndpoint('https:'),
+      },
     };
     const response = await portalRaw('POST', '/api/service-manifests/preview', {
       session: provider,
@@ -948,6 +967,24 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       body: { namespace: 'nexus', manifest: { ...manifest, auth: null } },
     });
     assert.equal(invalid.status, 400);
+    // A cleartext exporter to the upstream by name is refused, and the refusal
+    // fetches nothing either: the snapshot below would count a plain HTTP
+    // request to it. A loopback-literal override (`E2E_UPSTREAM_URL`) is
+    // spelled `localhost`, which reaches the same fixture and does not qualify.
+    const cleartext = await portalRaw('POST', '/api/service-manifests/preview', {
+      session: provider,
+      body: {
+        namespace: 'nexus',
+        manifest: {
+          ...manifest,
+          gateway: {
+            namespace: 'nexus',
+            otel_endpoint: telemetryEndpoint('http:', true),
+          },
+        },
+      },
+    });
+    assert.equal(cleartext.status, 400);
     assert.deepEqual(await upstreamSnapshot(), before, 'preview performs no upstream request');
   });
 

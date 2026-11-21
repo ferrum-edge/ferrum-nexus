@@ -2409,9 +2409,13 @@ and the configured namespace in both the request and manifest (the contract's de
 namespace is `ferrum`). The immutable published shared v1 schema and complete shared fixture
 set are pinned in `contracts/ferrum-contracts/PIN` with the other vendored contracts.
 Strict validation rejects nulls where types prohibit them, unknown keys, unsupported
-schema versions/protocols, noncanonical paths and invalid references. Intake is bounded
-to 32 KiB, 8 levels, 1,024 nodes, 32 array entries and 2,048-character strings, with
-an authenticated per-account burst limit. Failures do not echo source values.
+schema versions/protocols, noncanonical paths and invalid references, and also these
+Alloy and Ferrum Edge checks: cleartext telemetry to a host that is not a loopback IP
+literal, derived resource IDs over Edge's limit, and fields over Edge's bounds, counted in characters (see
+[the preview guide](service-manifest-preview.md#checks-beyond-the-pinned-contract)).
+Intake is bounded to 32 KiB, 8 levels, 1,024 nodes, 32 array entries and strings of
+2,048 characters, or the field's own longer bound (`api.service_base_path`: 2,049),
+with an authenticated per-account burst limit. Failures do not echo source values.
 
 The result includes only a bounded summary; TLS paths, file/telemetry locations,
 upstream hosts and free-form descriptions are omitted and reference values are marked

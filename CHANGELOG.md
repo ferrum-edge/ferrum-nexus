@@ -258,6 +258,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- The service-manifest preview now applies Alloy's and Ferrum Edge's refusals
+  for cleartext telemetry, derived resource IDs and exported field bounds
+  (#740, #734). A cleartext `gateway.otel_endpoint` must name a canonical
+  loopback IP literal (`127.d.d.d` or `[::1]`), as Edge v0.9.19 and later
+  require; `https://` is accepted for any host. The derived
+  `<proxy_id>-otel-tracing` resource ID, which Alloy writes for every export,
+  is held to Edge's 254-character limit with or without an exporter, so a
+  242-character proxy ID is refused. Edge's bounds on the exported fields
+  (ferrum-contracts#74) apply ahead of the re-vendored schema, and a schema
+  `maxLength` above 2048 is honoured instead of clipped, so a 2049-character
+  `api.service_base_path` is accepted. The pinned `contracts-edge-0.9.20`
+  fixture `valid/orders-api.json`, whose exporter is cleartext to a named host,
+  is refused until ferrum-contracts#82 is published.
+
+- The Usage card no longer says "No circuit breaker is configured" for an API
+  whose catalog setting enables one that the gateway has not yet reported
+  (#735). Edge normally creates a breaker's runtime state when a request reaches
+  the breaker, and the cumulative request counters can include traffic from before
+  the setting or refused before the breaker. The `unknown` backend detail now
+  names the API's saved setting and distinguishes circuit breaking off, on but
+  not yet observed, and unavailable request metrics. Observed open, half-open
+  and closed states are unchanged.
+
 - **Credential deletes are conditioned on the read they were decided from**
   (ferrum-edge#7393). Edge addresses credential entries only by index, and
   reads redact them, so an entry another writer (an operator, Foundry,

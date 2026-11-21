@@ -2324,19 +2324,25 @@ IP.
 }
 ```
 
-| Field                    | Meaning                                                                                                                                                                                                           |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `available`              | `false` when the request metrics could not be read, the API has no proxy, or no series belongs to it. Counters are then zeros that mean "unmeasured" — hide them; `latency_ms` is `null`                          |
-| `unavailable_reason`     | optional, display-ready explanation                                                                                                                                                                               |
-| `unavailable_code`       | present exactly when `available` is `false`: `no_proxy`, `no_series` (no series for this proxy yet), `unreachable`, `refused` (the gateway refused the portal's credential on `GET /metrics`), or `gateway_error` |
-| `requests.*`             | **cumulative since the gateway process started**; a restart resets them. There is no time window                                                                                                                  |
-| `gateway_uptime_seconds` | how far back the counters reach; omitted when not reported                                                                                                                                                        |
-| `latency_ms`             | percentiles interpolated from histogram buckets (like `histogram_quantile`); a quantile in the top bucket reports the highest finite bound; `null` when empty                                                     |
-| `backend.status`         | `healthy` (closed breaker), `failing` (open breaker or ejected target), `recovering` (half-open), `unknown` (read, nothing reported), `unavailable` (could not be read; `detail` says why)                        |
-| `backend.since`          | present only for an ejected target                                                                                                                                                                                |
+| Field                    | Meaning                                                                                                                                                                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `available`              | `false` when the request metrics could not be read, the API has no proxy, or no series belongs to it. Counters are then zeros that mean "unmeasured" — hide them; `latency_ms` is `null`                                                                                  |
+| `unavailable_reason`     | optional, display-ready explanation                                                                                                                                                                                                                                       |
+| `unavailable_code`       | present exactly when `available` is `false`: `no_proxy`, `no_series` (no series for this proxy yet), `unreachable`, `refused` (the gateway refused the portal's credential on `GET /metrics`), or `gateway_error`                                                         |
+| `requests.*`             | **cumulative since the gateway process started**; a restart resets them. There is no time window                                                                                                                                                                          |
+| `gateway_uptime_seconds` | how far back the counters reach; omitted when not reported                                                                                                                                                                                                                |
+| `latency_ms`             | percentiles interpolated from histogram buckets (like `histogram_quantile`); a quantile in the top bucket reports the highest finite bound; `null` when empty                                                                                                             |
+| `backend.status`         | `healthy` (closed breaker), `failing` (open breaker or ejected target), `recovering` (half-open), `unknown` (read, nothing reported; or no gateway proxy recorded for the API, with `unavailable_code: "no_proxy"`), `unavailable` (could not be read; `detail` says why) |
+| `backend.since`          | present only for an ejected target                                                                                                                                                                                                                                        |
 
-`unknown` does not mean the backend is down: Edge lists a breaker only for a
-proxy that has one and has been called; `detail` says which. Backend state is
+`unknown` does not mean the backend is down. With `unavailable_code: "no_proxy"`
+there is no proxy to sample and `detail` says so. Otherwise the gateway's
+backend sample lists no breaker or ejected target for the proxy. Edge normally creates a breaker's
+state when a request reaches it, so an enabled breaker can be absent from the
+sample while the cumulative counters show traffic from before it was enabled or
+refused before it. Then `detail` states the API's saved `circuit_breaker`
+setting (off or on) beside that observation, and whether request metrics were
+available; the two are independent facts. Backend state is
 read independently — it may be filled while `available` is `false`, and
 `unavailable` when only it failed.
 
@@ -3533,7 +3539,10 @@ configured portal namespace (`403 FORBIDDEN` otherwise). The contract defaults a
 omitted gateway namespace to `ferrum`; it does not inherit the caller's selection.
 Maximum body is 32 KiB; a larger one answers `400 VALIDATION_FAILED` ("Request
 body is too large"). Nesting, strings and references are bounded and the schema
-is validated strictly (`400 VALIDATION_FAILED`). Unknown/null fields are not stripped
+is validated strictly (`400 VALIDATION_FAILED`), together with these Alloy and Ferrum
+Edge checks: cleartext `gateway.otel_endpoint` to a host that is not a loopback IP
+literal, derived resource IDs over 254 characters, and Edge's field bounds, counted in characters (see
+[`service-manifest-preview.md`](service-manifest-preview.md#checks-beyond-the-pinned-contract)). Unknown/null fields are not stripped
 or coerced. The result has `preview_only: true`, `contract_status: "implemented"`, the
 immutable contract commit, service/public-path/protocol/auth/agent hints and redacted
 reference-presence flags. No upstream/file/TLS/telemetry values or free-form text
