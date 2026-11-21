@@ -1474,25 +1474,40 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               // their accounts before the links move, then revoke in this
               // transaction. The policy cut-off reaches environment
               // providers too, whose own `enabled` flag cannot be edited here.
-              const cutOff = new Set<string>();
-              for (const id of removed) if (!envIds.has(id)) cutOff.add(id);
+              //
+              // Each entry maps a provider id to the issuer whose links it
+              // cuts off, or to `null` for every link under the id: a removal
+              // deletes them all. A provider still in force cuts off only its
+              // own issuer's links; one under the same id at another issuer
+              // (a settings row an environment provider shadows) never signed
+              // anybody in through it.
+              const cutOff = new Map<string, string | null>();
+              for (const id of removed) if (!envIds.has(id)) cutOff.set(id, null);
+              const policyCutOff = stored.policy !== 'local_only' && next.policy === 'local_only';
               const nextEnabled = new Map(
                 providersInForce(config, next).map(({ settings }) => [
                   settings.id,
-                  next.policy !== 'local_only' && settings.enabled,
+                  settings.enabled,
                 ]),
               );
-              if (stored.policy !== 'local_only') {
-                for (const { settings } of providersInForce(config, stored)) {
-                  if (settings.enabled && nextEnabled.get(settings.id) === false) {
-                    cutOff.add(settings.id);
-                  }
+              for (const { settings } of providersInForce(config, stored)) {
+                if (!settings.enabled || cutOff.has(settings.id)) continue;
+                if (policyCutOff || nextEnabled.get(settings.id) === false) {
+                  cutOff.set(settings.id, settings.issuer);
                 }
               }
               const cutOffUsers = new Set<Uuid>();
-              for (const id of cutOff) {
+              for (const [id, issuer] of cutOff) {
                 for (const userId of await tx.userIdentities.listUserIdsByProvider(id)) {
-                  cutOffUsers.add(userId);
+                  if (cutOffUsers.has(userId)) continue;
+                  if (
+                    issuer === null ||
+                    (await tx.userIdentities.listByUser(userId)).some(
+                      (link) => link.provider_id === id && link.issuer === issuer,
+                    )
+                  ) {
+                    cutOffUsers.add(userId);
+                  }
                 }
               }
               for (const id of removed) {
@@ -1532,8 +1547,11 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
                   providers_added: added,
                   providers_removed: removed,
                   links_removed: linksRemoved,
-                  ...(cutOff.size > 0
-                    ? { providers_cut_off: [...cutOff].sort(), sessions_revoked: sessionsRevoked }
+                  ...(cutOff.size > 0 || policyCutOff
+                    ? {
+                        providers_cut_off: [...cutOff.keys()].sort(),
+                        sessions_revoked: sessionsRevoked,
+                      }
                     : {}),
                   client_secrets_changed: [...secretWrites.keys()],
                   ...(providersTrustLowered.length > 0

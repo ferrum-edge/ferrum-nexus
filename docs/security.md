@@ -699,7 +699,9 @@ backend:
 
 So a tightening either commits before the re-read and the sign-in is refused
 with no session, or waits until the session exists. A session issued before a
-change is not ended by a policy save; a disable ends it with the rest. A
+change is not ended by a policy save, except that a single sign-on save cutting
+off a provider ends every session of the accounts linked at it (see **Cutting a
+provider off ends its sessions**); a disable ends it with the rest. A
 sign-in that waits out one of those leases gets `409 CONFLICT` and nothing is
 issued.
 
@@ -723,14 +725,16 @@ The deployment-wide domain list is checked again there too. Every callback
 that commits a sign-in — a returning sign-in, a first-time link or a
 provisioned account — and every settings save hold the same per-provider lease
 (`sso:provider:<id>`). The callback holds it only around the transaction that
-commits, not across the token exchange. A settings save first takes the
+commits (and, for an existing account, the wait for that account's lifecycle
+lease inside it), not across the token exchange. A settings save first takes the
 deployment-wide `sso:settings` key and then the key of every provider it can
 affect, in sorted order, and then, inside its transaction, refuses with
 `409 CONFLICT` unless the stored settings are still the ones it worked that set
 out from. On every backend, and across instances, a save either commits before
 the callback's re-read, which then refuses the attempt, or waits for the
-callback to commit and then removes its new link and revokes its new session
-with the rest
+callback to commit and then sees what it wrote: a removal deletes the new link
+with the provider's others, and a cut-off revokes the new session with the
+linked accounts' others
 ([Cross-instance locks are fenced at commit](#cross-instance-locks-are-fenced-at-commit)).
 The re-read alone would not order a returning sign-in against a save on
 another instance: the save's revocation cannot see a session that the
@@ -739,11 +743,17 @@ callback's still-open transaction has not committed.
 **Cutting a provider off ends its sessions.** A settings save that removes a
 provider, disables it, or turns the login policy to `local_only` ends, in its
 own transaction, every session of every account linked at a provider it cuts
-off (#591). `local_only` cuts off every provider that was in force and enabled,
-`NEXUS_OIDC_PROVIDERS` ones included, whose own `enabled` flag cannot be edited
-through the API. The `admin.settings_update` entry records `providers_cut_off`
-and `sessions_revoked`. Accounts with no link at a cut-off provider keep their
-sessions; other settings changes end no session (see **Losing access**).
+off (#591), password sessions included: a session records neither the provider
+nor the password that opened it. `local_only` cuts off every provider that was
+in force and enabled, `NEXUS_OIDC_PROVIDERS` ones included, whose own `enabled`
+flag cannot be edited through the API; it keeps the links, so turning single
+sign-on back on lets them sign in again. A provider still in force cuts off the
+links at its own issuer only, not those under its id at another issuer (a
+settings row an environment provider shadows). The `admin.settings_update` entry
+records `providers_cut_off` and `sessions_revoked`, on every switch to
+`local_only` even when nothing was in force. Accounts with no link at a cut-off
+provider keep their sessions; other settings changes end no session (see
+**Losing access**).
 
 **Secrets and logs.** A settings provider's client secret:
 
@@ -2266,16 +2276,16 @@ Revoking a `retiring` credential again completes it.
 
 ### Administration
 
-| Action                      | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| --------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `admin.settings_update`     | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it), `client_secrets_changed` (provider ids only), and `providers_trust_lowered` (provider ids whose settings stopped granting admin trust).                             |
-| `settings.encryption_bound` | `settings`       | The one-time startup conversion of unbound legacy (`v1`) encrypted settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). Written once by the system; while it exists no later start converts a `v1` row, so do not delete it. `target_id` is `null`. `details`: `bound_keys`, `changed_keys` (names only); a row the key cannot open stops the start, so none is recorded.                                                                                                                               |
-| `admin.template_update`     | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                                                                                                                                                                                                 |
-| `admin.template_reset`      | `email_template` | An email template override was removed, restoring the built-in default. `target_id` is the template key. `details`: `key`.                                                                                                                                                                                                                                                                                                                                                                                     |
-| `admin.mass_email`          | `mass_email`     | A mass-email campaign was started: written, and counted against `NEXUS_MAX_MASS_EMAILS_PER_DAY`, **before** any outbox row is queued; if it cannot be written nothing is queued. One row per campaign — a retry of the same batch by the same administrator writes none, and is a retry only if its `content_sha256` matches (otherwise `409`). `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `bytes` (rendered size × recipients), `content_sha256`, `phase: "started"`. |
-| `admin.mass_email_complete` | `mass_email`     | What one attempt at a campaign queued, written best-effort after its chunked fan-out. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`, `chunks` (fan-out transactions committed), `failed` (a chunk failed; the retry with the same batch id queues the rest), and `skipped` when present (recipients whose copy the link policy refused even with the fallback name; a retry skips them again).                                                                 |
-| `admin.smtp_test`           | `settings`       | An SMTP test was about to be sent: written, and counted against the hourly budget of 10 per administrator, **before** the relay is contacted; if it cannot be written nothing is sent. `target_id` is `smtp`. `details`: `to_email`, `phase: "started"`.                                                                                                                                                                                                                                                       |
-| `admin.smtp_test_complete`  | `settings`       | The result of that SMTP test, written best-effort after the send. `target_id` is `smtp`. `details`: `to_email`, `ok`, `intent_id` (the `admin.smtp_test` row).                                                                                                                                                                                                                                                                                                                                                 |
+| Action                      | Target type      | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admin.settings_update`     | `settings`       | Portal settings changed. `target_id` is `null`, or `sso` for `PUT /api/admin/sso`. `details`: `changed_keys` (never values), `smtp_password_source_change` when relevant, `captcha_self_test: "passed"` when one ran; for `sso`, `section`, `providers_added`, `providers_removed`, `links_removed` (provider id → links deleted with it), `client_secrets_changed` (provider ids only), `providers_trust_lowered` (provider ids whose settings stopped granting admin trust), and `providers_cut_off` with `sessions_revoked` when the save removed, disabled or shut out a provider by turning the policy to `local_only`. |
+| `settings.encryption_bound` | `settings`       | The one-time startup conversion of unbound legacy (`v1`) encrypted settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). Written once by the system; while it exists no later start converts a `v1` row, so do not delete it. `target_id` is `null`. `details`: `bound_keys`, `changed_keys` (names only); a row the key cannot open stops the start, so none is recorded.                                                                                                                                                                                                                                             |
+| `admin.template_update`     | `email_template` | An email template was overridden. `target_id` is the template key. `details`: `key`, `body_html_sha256`, `body_text_sha256` (hex SHA-256 of the saved bodies).                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `admin.template_reset`      | `email_template` | An email template override was removed, restoring the built-in default. `target_id` is the template key. `details`: `key`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `admin.mass_email`          | `mass_email`     | A mass-email campaign was started: written, and counted against `NEXUS_MAX_MASS_EMAILS_PER_DAY`, **before** any outbox row is queued; if it cannot be written nothing is queued. One row per campaign — a retry of the same batch by the same administrator writes none, and is a retry only if its `content_sha256` matches (otherwise `409`). `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `bytes` (rendered size × recipients), `content_sha256`, `phase: "started"`.                                                                                                               |
+| `admin.mass_email_complete` | `mass_email`     | What one attempt at a campaign queued, written best-effort after its chunked fan-out. `target_id` is the batch id. `details`: `subject`, `audience_scope`, `recipients`, `enqueued`, `chunks` (fan-out transactions committed), `failed` (a chunk failed; the retry with the same batch id queues the rest), and `skipped` when present (recipients whose copy the link policy refused even with the fallback name; a retry skips them again).                                                                                                                                                                               |
+| `admin.smtp_test`           | `settings`       | An SMTP test was about to be sent: written, and counted against the hourly budget of 10 per administrator, **before** the relay is contacted; if it cannot be written nothing is sent. `target_id` is `smtp`. `details`: `to_email`, `phase: "started"`.                                                                                                                                                                                                                                                                                                                                                                     |
+| `admin.smtp_test_complete`  | `settings`       | The result of that SMTP test, written best-effort after the send. `target_id` is `smtp`. `details`: `to_email`, `ok`, `intent_id` (the `admin.smtp_test` row).                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### God mode (`super_admin` only)
 

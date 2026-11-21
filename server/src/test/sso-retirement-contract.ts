@@ -19,7 +19,7 @@ import {
 import { AuditAction } from '../audit/service.js';
 import type { LeaseRepo, NexusStore, SessionRecord, TransactionOptions } from '../db/store.js';
 import { isoInSeconds, newId } from '../lib/ids.js';
-import { ssoProviderLockKey } from '../lib/keyed-serializer.js';
+import { SSO_SETTINGS_LOCK_KEY, ssoProviderLockKey } from '../lib/keyed-serializer.js';
 import { readStoredSsoSettings, SSO_SETTINGS_KEY } from '../sso/settings.js';
 import { buildTestApp, cookieValue, type TestApp, type TestSession } from './helpers.js';
 import { createMockOidcProvider, type MockOidcProvider } from './mock-oidc-provider.js';
@@ -59,6 +59,8 @@ interface RetirementWatch {
   saveReadReached: ReturnType<typeof barrier>;
   resumeSaveRead: ReturnType<typeof barrier>;
   saveReadResumed: ReturnType<typeof barrier>;
+  /** The save took `sso:settings`: next it queues for the provider key the callback holds. */
+  saveHoldsSettingsKey: ReturnType<typeof barrier>;
   authorized: ReturnType<typeof barrier>;
   resumeCallback: ReturnType<typeof barrier>;
 }
@@ -152,9 +154,25 @@ function watchRetirement(base: NexusStore, current: () => RetirementWatch | null
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+  const leases = new Proxy(base.leases, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property);
+      if (property !== 'acquire') {
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+      return async (...args: Parameters<LeaseRepo['acquire']>): Promise<boolean> => {
+        const taken = await target.acquire(...args);
+        const watch = current();
+        if (taken && watch && args[0] === SSO_SETTINGS_LOCK_KEY)
+          watch.saveHoldsSettingsKey.release();
+        return taken;
+      };
+    },
+  });
   return new Proxy(base, {
     get(target, property) {
       if (property === 'settings') return settings;
+      if (property === 'leases') return leases;
       if (property === 'transaction') {
         return async <T>(
           fn: (tx: NexusStore) => Promise<T>,
@@ -371,6 +389,7 @@ export function runSsoRetirementContract(
           saveReadReached: barrier(),
           resumeSaveRead: barrier(),
           saveReadResumed: barrier(),
+          saveHoldsSettingsKey: barrier(),
           authorized: barrier(),
           resumeCallback: barrier(),
         };
@@ -416,7 +435,21 @@ export function runSsoRetirementContract(
           await bounded(race.saveReadResumed.promise, 'concurrent settings read did not resume');
           // The callback holds the provider's key across its transaction, so
           // on every driver the save waits for that key before it can open
-          // its own transaction.
+          // its own transaction. A pooled store lets the save finish its
+          // outer read and take `sso:settings`, the key it holds while it
+          // queues for the provider's; SQLite gates that read until the open
+          // callback transaction commits.
+          if (target.store.driver !== 'sqlite') {
+            await bounded(
+              Promise.race([
+                race.saveHoldsSettingsKey.promise,
+                pendingSave.then(() => {
+                  throw new Error('settings save finished while the callback held its key');
+                }),
+              ]),
+              'settings save did not reach its keys',
+            );
+          }
           assert.equal(saveCompleted, false, 'settings cannot complete while callback is paused');
           assert.equal(race.saveBodyRuns, 0, 'settings body waits behind the callback transaction');
           assert.equal(race.callbackCommitted, false);
@@ -522,11 +555,22 @@ export function runSsoRetirementContract(
     });
 
     after(async () => {
-      await second?.close();
-      await first?.close();
-      await idp?.stop();
-      await peer?.close();
-      await target?.teardown();
+      // Each resource is released even when an earlier release fails.
+      const failures: unknown[] = [];
+      for (const release of [
+        () => second?.close(),
+        () => first?.close(),
+        () => idp?.stop(),
+        () => peer?.close(),
+        () => target?.teardown(),
+      ]) {
+        try {
+          await release();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) throw failures[0];
     });
 
     for (const change of ['disable', 'remove', 'local_only'] as const) {

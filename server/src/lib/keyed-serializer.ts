@@ -178,8 +178,9 @@ export function accountRecoveryLockKey(userId: string): string {
  * and the settings save orders them: whichever commits second sees the other.
  *
  * A callback holds it only around its commit transaction, never across the
- * token exchange, so sign-ins at one provider queue behind each other only for
- * the length of one transaction.
+ * token exchange. For an existing account that includes waiting for the
+ * account's {@link userLifecycleLockKey}, taken inside it: sign-ins at one
+ * provider queue behind each other for one transaction plus that wait.
  *
  * Per provider rather than portal-wide, so sign-ins at different providers
  * never wait for each other. A settings save takes the key of every provider

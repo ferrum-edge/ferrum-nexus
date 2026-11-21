@@ -205,11 +205,11 @@ the same contract with their native primitives.
 
 The transaction queue belongs to one store object, including on PostgreSQL,
 MySQL and MongoDB; independent stores do not share it. Production composes all
-services over one store. In the supported single-serving-instance topology,
-that queue orders a returning SSO callback's transactional settings re-read
-and commit against a settings save. Returning callbacks deliberately hold
-only the account lifecycle lease; they do not promise a provider cutoff at
-commit across independent stores. See
+services over one store. Ordering that must hold across independent stores
+(two instances, or a rolling deploy) comes from the database leases instead:
+every SSO callback commits under its provider's `sso:provider:<id>` lease,
+which a settings save also holds, so a provider cut-off is ordered against a
+returning sign-in's commit on every store. See
 [the SSO authorization boundary](security.md#single-sign-on-openid-connect) and
 [supported topologies](operations.md#supported-topologies).
 
