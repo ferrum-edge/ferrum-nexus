@@ -6039,6 +6039,9 @@ register('mongodb', process.env.NEXUS_TEST_MONGO_URL, 'NEXUS_TEST_MONGO_URL', mo
  * (docs/operations.md, "Schema and upgrades before 1.0").
  */
 const OLDER_LEDGERS: Record<string, string[]> = {
+  // Tables with no record: an earlier release's first start that stopped
+  // before recording anything.
+  'an interrupted earlier release': [],
   'an earlier release': [
     '001_initial',
     '002_api_gateway_plugins',
@@ -6057,6 +6060,7 @@ const OLDER_LEDGERS: Record<string, string[]> = {
   'an earlier base schema': ['base_0000000000000000'],
 };
 const NO_UPGRADE_PATH = /no upgrade path before 1\.0/;
+const BASE_FINGERPRINT = /^base_[0-9a-f]{16}$/;
 
 /** A throwaway database holding `ledger` and an older `users` table. */
 interface OlderDatabase {
@@ -6066,7 +6070,7 @@ interface OlderDatabase {
   drop: () => Promise<void>;
 }
 
-async function olderPostgres(adminUrl: string, ledger: string[]): Promise<OlderDatabase> {
+async function olderPostgres(adminUrl: string, ledger: string[] | null): Promise<OlderDatabase> {
   const database = throwawayDbName();
   const admin = new pg.Client({ connectionString: adminUrl });
   await admin.connect();
@@ -6076,12 +6080,14 @@ async function olderPostgres(adminUrl: string, ledger: string[]): Promise<OlderD
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {
-    await client.query(
-      'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
-    );
-    await client.query('CREATE TABLE users (id TEXT PRIMARY KEY)');
-    for (const id of ledger) {
-      await client.query("INSERT INTO schema_migrations VALUES ($1, 'then')", [id]);
+    if (ledger !== null) {
+      await client.query(
+        'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
+      );
+      await client.query('CREATE TABLE users (id TEXT PRIMARY KEY)');
+      for (const id of ledger) {
+        await client.query("INSERT INTO schema_migrations VALUES ($1, 'then')", [id]);
+      }
     }
   } finally {
     await client.end();
@@ -6114,7 +6120,7 @@ async function olderPostgres(adminUrl: string, ledger: string[]): Promise<OlderD
   };
 }
 
-async function olderMysql(adminUrl: string, ledger: string[]): Promise<OlderDatabase> {
+async function olderMysql(adminUrl: string, ledger: string[] | null): Promise<OlderDatabase> {
   const database = throwawayDbName();
   const admin = await mysql.createConnection(adminUrl);
   await admin.query(`CREATE DATABASE \`${database}\``);
@@ -6122,13 +6128,15 @@ async function olderMysql(adminUrl: string, ledger: string[]): Promise<OlderData
   const url = withDatabase(adminUrl, database);
   const connection = await mysql.createConnection(url);
   try {
-    await connection.query(
-      'CREATE TABLE schema_migrations (id VARCHAR(191) NOT NULL PRIMARY KEY, ' +
-        'applied_at VARCHAR(32) NOT NULL)',
-    );
-    await connection.query('CREATE TABLE users (id VARCHAR(64) NOT NULL PRIMARY KEY)');
-    for (const id of ledger) {
-      await connection.execute("INSERT INTO schema_migrations VALUES (?, 'then')", [id]);
+    if (ledger !== null) {
+      await connection.query(
+        'CREATE TABLE schema_migrations (id VARCHAR(191) NOT NULL PRIMARY KEY, ' +
+          'applied_at VARCHAR(32) NOT NULL)',
+      );
+      await connection.query('CREATE TABLE users (id VARCHAR(64) NOT NULL PRIMARY KEY)');
+      for (const id of ledger) {
+        await connection.execute("INSERT INTO schema_migrations VALUES (?, 'then')", [id]);
+      }
     }
   } finally {
     await connection.end();
@@ -6161,18 +6169,20 @@ async function olderMysql(adminUrl: string, ledger: string[]): Promise<OlderData
   };
 }
 
-async function olderMongo(baseUrl: string, ledger: string[]): Promise<OlderDatabase> {
+async function olderMongo(baseUrl: string, ledger: string[] | null): Promise<OlderDatabase> {
   const database = throwawayDbName();
   const url = withDatabase(baseUrl, database);
   const client = new MongoClient(url);
   await client.connect();
   try {
     const db = client.db(database);
-    await db.collection('users').insertOne({ _id: 'older' } as Document);
-    for (const id of ledger) {
-      await db
-        .collection('schema_migrations')
-        .insertOne({ _id: id, applied_at: 'then' } as Document);
+    if (ledger !== null) {
+      await db.collection('users').insertOne({ _id: 'older' } as Document);
+      for (const id of ledger) {
+        await db
+          .collection('schema_migrations')
+          .insertOne({ _id: id, applied_at: 'then' } as Document);
+      }
     }
   } finally {
     await client.close();
@@ -6216,7 +6226,7 @@ function registerOlderSchemaRefusal(
   driver: DbDriver,
   url: string | undefined,
   variable: string,
-  makeOlder: (url: string, ledger: string[]) => Promise<OlderDatabase>,
+  makeOlder: (url: string, ledger: string[] | null) => Promise<OlderDatabase>,
 ): void {
   describe(`older databases are refused — ${label}`, () => {
     if (url === undefined || url.trim() === '') {
@@ -6236,7 +6246,7 @@ function registerOlderSchemaRefusal(
             await assert.rejects(store.migrate(), (error: unknown) => {
               assert.ok(isNexusError(error), String(error));
               assert.match(error.message, NO_UPGRADE_PATH);
-              assert.ok(error.message.includes(ledger[0]!), error.message);
+              assert.ok(error.message.includes(ledger[0] ?? 'users'), error.message);
               return true;
             });
           } finally {
@@ -6248,6 +6258,29 @@ function registerOlderSchemaRefusal(
         }
       });
     }
+
+    it('lets two instances start on one empty database at once', async () => {
+      const empty = await makeOlder(url, null);
+      try {
+        const first = createStore(testConfig(driver, empty.url));
+        const second = createStore(testConfig(driver, empty.url));
+        try {
+          await Promise.all([first.init(), second.init()]);
+          await Promise.all([first.migrate(), second.migrate()]);
+          await first.migrate();
+        } finally {
+          await Promise.all([first.close(), second.close()]);
+        }
+        const { ledger, tables } = await empty.inspect();
+        assert.equal(ledger.length, 1, JSON.stringify(ledger));
+        assert.match(ledger[0] ?? '', BASE_FINGERPRINT);
+        if (driver !== 'mongodb') {
+          assert.ok(tables.includes('access_gateway_jobs'), JSON.stringify(tables));
+        }
+      } finally {
+        await empty.drop();
+      }
+    });
   });
 }
 

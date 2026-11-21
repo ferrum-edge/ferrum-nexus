@@ -80,6 +80,14 @@ export function createPostgresSchemaDriver(pool: PgPool): SchemaDriver {
       const result = await pool.query(`SELECT id FROM ${SCHEMA_LEDGER_TABLE}`);
       return (result.rows as { id: string }[]).map((row) => String(row.id));
     },
+    async existingTables(schema: BaseSchema): Promise<string[]> {
+      const result = await pool.query(
+        `SELECT table_name FROM information_schema.tables
+          WHERE table_schema = current_schema() AND table_name = ANY($1::text[])`,
+        [[...schema.tables]],
+      );
+      return (result.rows as { table_name: string }[]).map((row) => String(row.table_name));
+    },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
       const client = await pool.connect();
       try {

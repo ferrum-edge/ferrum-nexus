@@ -10,11 +10,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { describe, it } from 'node:test';
 import mysql from 'mysql2/promise';
 import { ensureMysqlSchema } from '../db/adapters/mysql/schema.js';
-import { loadBaseSchema, splitSqlStatements } from '../db/schema.js';
+import { loadBaseSchema, schemaClaim, splitSqlStatements } from '../db/schema.js';
 
 const WHITESPACE_RUN = /\s+/g;
 const HYPHENS = /-/g;
 const NOT_REPLAYABLE = /not a replayable CREATE TABLE IF NOT EXISTS/;
+const NO_UPGRADE_PATH = /no upgrade path before 1\.0/;
 
 const adminUrl = process.env.NEXUS_TEST_MYSQL_URL;
 const base = loadBaseSchema('mysql');
@@ -150,9 +151,13 @@ async function resetDatabase(pool: mysql.Pool): Promise<void> {
     for (const table of tables) {
       await connection.query(`DROP TABLE \`${String(table.TABLE_NAME)}\``);
     }
-    await connection.query('SET FOREIGN_KEY_CHECKS = 1');
   } finally {
-    connection.release();
+    try {
+      await connection.query('SET FOREIGN_KEY_CHECKS = 1');
+      connection.release();
+    } catch {
+      connection.destroy();
+    }
   }
 }
 
@@ -172,7 +177,7 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
             boundary === 'ledger' &&
             method === 'execute' &&
             !after &&
-            sql.startsWith('INSERT INTO schema_migrations ');
+            sql.startsWith('UPDATE schema_migrations ');
           const ddl = method === 'query' && after && normalize(sql) === normalize(boundary);
           if (ledger || ddl) {
             fired = true;
@@ -210,6 +215,36 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
     });
   });
 
+  it("refuses tables another version left without a claim, and another build's claim", async () => {
+    for (const claim of [null, 'creating:base_0000000000000000']) {
+      await fixture(async (pool) => {
+        // An earlier release's first start that stopped after its first CREATE
+        // and before recording anything, or another build's interrupted one.
+        await pool.query(`CREATE TABLE schema_migrations (
+          id VARCHAR(191) NOT NULL, applied_at VARCHAR(32) NOT NULL, PRIMARY KEY (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`);
+        await pool.query('CREATE TABLE organizations (id VARCHAR(64) NOT NULL PRIMARY KEY)');
+        if (claim) await pool.execute("INSERT INTO schema_migrations VALUES (?, 'then')", [claim]);
+        await assert.rejects(() => ensureMysqlSchema(pool), NO_UPGRADE_PATH);
+        const [tables] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT TABLE_NAME AS name FROM information_schema.TABLES ' +
+            'WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME',
+        );
+        assert.deepEqual(
+          tables.map((row) => row.name),
+          ['organizations', 'schema_migrations'],
+        );
+        const [ledger] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT id FROM schema_migrations',
+        );
+        assert.deepEqual(
+          ledger.map((row) => row.id),
+          claim ? [claim] : [],
+        );
+      });
+    }
+  });
+
   it('caps schema metadata waits and restores successful sessions', async () => {
     await fixture(async (pool, url) => {
       const creator = mysql.createPool({ uri: url, connectionLimit: 1 });
@@ -217,6 +252,7 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
         'CREATE TABLE',
         'SELECT id FROM schema_migrations',
         'INSERT INTO schema_migrations',
+        'UPDATE schema_migrations',
       ];
       const observed = new Set<string>();
       try {
@@ -327,8 +363,14 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
             );
             assert.equal(replacement.lockWaitTimeout, Number(settings[0]?.lock_wait_timeout));
             await assertSchemaLockAvailable(pool, url);
-            const [ledgerAfter] = await pool.query('SELECT * FROM schema_migrations ORDER BY id');
-            assert.deepEqual(ledgerAfter, [], 'nothing was recorded');
+            const [ledgerAfter] = await pool.query<mysql.RowDataPacket[]>(
+              'SELECT id FROM schema_migrations ORDER BY id',
+            );
+            assert.deepEqual(
+              ledgerAfter.map((row) => row.id),
+              [schemaClaim(base)],
+              'only the claim was recorded',
+            );
             await ensureMysqlSchema(creator);
           } finally {
             await creator.end();

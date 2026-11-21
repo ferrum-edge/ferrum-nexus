@@ -109,10 +109,14 @@ import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
   ensureBaseSchema,
+  loadBaseSchema,
+  SchemaBusyError,
+  schemaClaim,
   SCHEMA_LEDGER_TABLE,
   schemaFingerprint,
   type BaseSchema,
   type SchemaDriver,
+  type SchemaWaitOptions,
 } from '../../schema.js';
 import type {
   AccessRequestFilter,
@@ -1087,7 +1091,7 @@ export interface IndexDefinition {
  * Collections need no creation step; the first insert makes each one.
  *
  * Until 1.0 this list is edited directly, like `schema/base*.sql`; there are no
- * migration steps. Its fingerprint ({@link MONGO_BASE_SCHEMA}) is what the
+ * migration steps. Its fingerprint ({@link mongoBaseSchema}) is what the
  * ledger records, so a database created from an earlier list is refused at
  * startup rather than run with indexes the code no longer expects
  * (docs/operations.md, "Schema and upgrades before 1.0").
@@ -1463,12 +1467,25 @@ export const BASE_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
-/** The MongoDB base schema's ledger identity: a fingerprint of {@link BASE_INDEXES}. */
-export const MONGO_BASE_SCHEMA: BaseSchema = {
-  id: schemaFingerprint(BASE_INDEXES.map((index) => JSON.stringify(index))),
-  source: 'BASE_INDEXES (server/src/db/adapters/mongodb/index.ts)',
-  sql: '',
-};
+/**
+ * The MongoDB base schema's ledger identity. Documents have no declared
+ * shape, so the fingerprint covers the logical schema too: the SQLite base
+ * schema's fingerprint (the reference the other dialects mirror) and every
+ * index definition. A field or collection added to the SQL schemas without a
+ * MongoDB index therefore still changes it, and an older MongoDB database is
+ * refused like an older SQL one.
+ */
+export function mongoBaseSchema(indexes: readonly IndexDefinition[] = BASE_INDEXES): BaseSchema {
+  return {
+    id: schemaFingerprint([
+      `logical:${loadBaseSchema('sqlite').id}`,
+      ...indexes.map((index) => JSON.stringify(index)),
+    ]),
+    source: 'BASE_INDEXES (server/src/db/adapters/mongodb/index.ts)',
+    sql: '',
+    tables: Object.values(COLLECTIONS),
+  };
+}
 
 /** Create one batch of {@link IndexDefinition}s. */
 async function createIndexes(db: Db, indexes: readonly IndexDefinition[]): Promise<void> {
@@ -1515,14 +1532,18 @@ export function latestMessagesPipeline(threadIds: readonly string[]): Document[]
 
 /**
  * Create the base schema in an empty database, accept one already at it, and
- * refuse any other, under the same protocol as the SQL adapters. `createIndex`
- * is a no-op for an identical index, so a start interrupted before the ledger
- * write simply creates the rest and records it.
+ * refuse any other, under the same protocol as the SQL adapters. Index builds
+ * are not transactional, so the ledger first gets this build's claim, then
+ * the indexes are created (`createIndex` is a no-op for an identical index),
+ * then the fingerprint is recorded and the claim removed. A start interrupted
+ * part-way leaves the claim and the next start finishes; a peer of the same
+ * build that loses the race to insert the claim waits for the winner.
  */
 export async function ensureMongoSchema(
   db: Db,
-  schema: BaseSchema = MONGO_BASE_SCHEMA,
+  schema: BaseSchema = mongoBaseSchema(),
   indexes: readonly IndexDefinition[] = BASE_INDEXES,
+  options: SchemaWaitOptions = {},
 ): Promise<void> {
   const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE);
   const driver: SchemaDriver = {
@@ -1534,12 +1555,41 @@ export async function ensureMongoSchema(
       const docs = await ledger.find({}).toArray();
       return docs.map((doc) => str((doc as Row)._id));
     },
-    createBaseSchema: async (base: BaseSchema): Promise<void> => {
-      await createIndexes(db, indexes);
-      await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
+    existingTables: async (base: BaseSchema): Promise<string[]> => {
+      const names = new Set(base.tables);
+      const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+      return collections.map((collection) => collection.name).filter((name) => names.has(name));
+    },
+    createBaseSchema: async (base: BaseSchema, { resume }): Promise<void> => {
+      const claim = schemaClaim(base);
+      if (!resume) {
+        try {
+          await ledger.insertOne({ _id: claim, applied_at: nowIso() });
+        } catch (error) {
+          if ((error as { code?: unknown }).code === 11000) throw new SchemaBusyError();
+          throw error;
+        }
+      }
+      try {
+        await createIndexes(db, indexes);
+      } catch (error) {
+        // Resuming may mean a peer of this build is building the same indexes
+        // right now; let the caller wait for its record before failing.
+        if (resume)
+          throw new SchemaBusyError(`Index creation failed while resuming: ${String(error)}`);
+        throw error;
+      }
+      try {
+        await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
+      } catch (error) {
+        // A resuming peer recorded it first; the ledger check that follows
+        // decides.
+        if ((error as { code?: unknown }).code !== 11000) throw error;
+      }
+      await ledger.deleteOne({ _id: claim });
     },
   };
-  await ensureBaseSchema(driver, schema);
+  await ensureBaseSchema(driver, schema, options);
 }
 
 /* ── Shared connection state ────────────────────────────────────────────── */

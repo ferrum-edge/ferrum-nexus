@@ -4,9 +4,10 @@ This walkthrough takes you from an empty machine to a client calling a
 published API through the gateway, with a credential the portal issued.
 
 It targets Ferrum Nexus `v0.5.2` with Ferrum Edge `v0.9.15`, the supported pair
-in the [release notes](release-notes.md). Before 1.0 there is no upgrade path:
-a database created by an earlier version is refused at startup and must be
-recreated (see [schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10)).
+in the [release notes](release-notes.md). From `v0.6.0` there is no upgrade
+path before 1.0: a database created by an earlier version is refused at startup
+and must be recreated (see
+[schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10)).
 Start this walkthrough with a new database.
 
 You play three roles in turn: the operator who runs the stack, a **provider**

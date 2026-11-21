@@ -1093,7 +1093,10 @@ Procedure:
 3. **Upgrade Edge to v0.9.20**, the control plane and every data plane together.
 4. **Upgrade Nexus** to the release that pins Edge v0.9.20 in
    [`release/compatibility.env`](../release/compatibility.env), and check
-   `GET /api/health/edge` as an admin.
+   `GET /api/health/edge` as an admin. That release (`v0.6.0`) needs a new,
+   empty database and cannot read an earlier one: follow
+   [moving to a new release](#moving-to-a-new-release), whose paired backup
+   also covers this Edge upgrade.
 
 Nexus `v0.5.2` is qualified against Edge v0.9.15 only and has not been tested
 against v0.9.20, so upgrade Nexus promptly after Edge. **Rolling back** Edge to
@@ -1467,25 +1470,33 @@ listens) Nexus reads the `schema_migrations` table (a collection on MongoDB):
   only row.
 - **Exactly this build's fingerprint:** the schema is current, so nothing
   happens.
+- **Only this build's claim** (`creating:base_…`): a first start of this
+  build that stopped part-way on MySQL or MongoDB, which cannot create the
+  schema in one transaction. Nexus finishes creating it.
 - **Anything else:** a database created by `v0.5.2` or earlier (the table lists
-  migration ids such as `001_initial`), or by a release with a different base
-  schema. Nexus exits non-zero **without changing anything** and prints:
+  migration ids such as `001_initial`), by a release with a different base
+  schema, or holding Nexus tables with no record at all (an earlier version's
+  first start that stopped before recording anything). Nexus exits non-zero
+  **without changing the schema or data** and prints:
 
   ```text
   This database was created by a different Ferrum Nexus schema (it records
   001_initial, 002_api_gateway_plugins, 003_messages_thread_latest,
   004_api_spec_changes and 9 more; this build's schema is base_…). Ferrum Nexus
   has no upgrade path before 1.0: a database created by an earlier version is
-  never migrated, and nothing was changed. Back up anything you need, then start
-  this version against a new, empty database (or drop and recreate this one).
+  never migrated, and its schema and data were not changed. Back up anything
+  you need, then start this version against a new, empty database (or drop and
+  recreate this one).
   ```
 
   Recreate the database as described in
   [moving to a new release](#moving-to-a-new-release).
 
-The fingerprint is a hash of the base schema's statements (comments and
-whitespace excluded), so any schema change produces a new fingerprint. A release
-that changes the base schema refuses every database an earlier release created.
+The fingerprint is a hash of the base schema's statements. Comments and runs
+of whitespace outside quoted literals are excluded, so any change to a statement
+produces a new fingerprint. MongoDB's covers its index list and the SQLite base
+schema, which stands for the logical schema. A release that changes the base
+schema refuses every database an earlier release created.
 A release that leaves the schema unchanged keeps the fingerprint and opens the
 previous release's database as it is. Each release's notes say which applies.
 To see a database's fingerprint, run `SELECT id FROM schema_migrations`.
@@ -1499,31 +1510,39 @@ try to replay their migrations over it.
 
 ### Moving to a new release
 
-When the release notes say the schema changed (every release so far, until 1.0
-says otherwise), the new release needs a new, empty database:
+When the release notes say the schema changed (until 1.0, check each release's
+notes), the new release needs a new, empty database:
 
 1. Read the release notes for the validated Ferrum Edge release.
-2. Stop every Nexus instance, then back up the Nexus database and record its
-   secrets ([§5](#5-backup-and-restore)). The backup is your rollback to the
-   previous release. The new release cannot read it.
+2. Stop every Nexus instance, then **back up Nexus and Edge together**, as one
+   point in time, and record their secrets ([§5](#5-backup-and-restore)). This
+   paired backup is your only way back to the previous release: the new release
+   cannot read the Nexus half, and step 4 may change the Edge half.
 3. Create a new, empty database. For SQLite, delete (or move aside) the
    database file and its `-wal` and `-shm` files. For PostgreSQL, MySQL or
    MongoDB, drop and recreate the dedicated Nexus database, or point
    `NEXUS_DB_URL` at a new one.
 4. Deal with what the old portal created in Edge. Proxies, consumers,
-   credentials and plugin configs in `FERRUM_NAMESPACE` stay in Edge, and the
-   new database does not know about them. Remove them from that namespace, or
-   give the new portal its own namespace (and the gateway access that requires,
-   see [Namespace routability](#namespace-routability)). Then the old
-   resources cannot keep serving traffic or collide with what the new portal
-   creates.
+   credentials and plugin configs in `FERRUM_NAMESPACE` stay in Edge, keep
+   serving their callers, and are unknown to the new database. Either:
+   - **remove them** from that namespace, which stops the old APIs and
+     credentials; or
+   - **leave them** and give the new portal its own namespace (and the gateway
+     access that requires, see [Namespace routability](#namespace-routability)).
+     The old proxies and credentials keep working until you remove them or
+     retire the data plane that serves the old namespace; nothing the new portal
+     does touches them.
 5. Start the new release. It creates the schema, and the next registration
    becomes the founding `super_admin` (see
    [first run and the bootstrap token](#first-run-and-the-bootstrap-token)).
    Then re-create organizations, APIs and access.
 
-To roll back, restore the backup into an empty database and start the previous
-release with the same secrets.
+To roll back, stop the new release and restore the paired backup: the Nexus
+database into an empty database, and the Edge snapshot too if step 4 removed
+anything (credential material cannot be recovered any other way). Then start
+the previous release with the same secrets. If step 4 only added a namespace,
+restoring the Nexus database is enough, and the new namespace's resources can
+be removed.
 
 ### Initializing the schema
 
@@ -2141,12 +2160,17 @@ bodies. The key is derived from `NEXUS_SECRET_KEY` (HKDF info
 The worker opens it immediately before handing the message to SMTP. Other mail
 (access decisions, messaging notifications, mass email) is stored as rendered.
 
-After an upgrade, the worker seals rows queued by an earlier version in place,
-in every status, up to 200 per tick, and stops looking once none are left. It
-logs `Sealed legacy outbox messages` with a `sealed` count while it does. An
-earlier version cannot open a sealed row. If a pre-fix instance claims one, it
-emails ciphertext and burns the link. Before downgrading, fail every queued
-sealed row so an older worker cannot claim it:
+Rows queued unsealed by an earlier version are sealed in place by the worker,
+in every status, up to 200 per tick, and it stops looking once none are left.
+It logs `Sealed legacy outbox messages` with a `sealed` count while it does.
+Since `v0.6.0` a database an earlier release created is refused rather than
+upgraded ([schema and upgrades before 1.0](#schema-and-upgrades-before-10)),
+so on a database created at the base schema there is nothing to seal, and
+downgrading means restoring a backup. The rest of this paragraph applies only
+to an older deployment that still runs a pre-sealing instance beside a sealing
+one. An earlier version cannot open a sealed row. If a pre-fix instance claims
+one, it emails ciphertext and burns the link. Before downgrading such a
+deployment, fail every queued sealed row so an older worker cannot claim it:
 
 ```sql
 UPDATE email_outbox
@@ -3336,8 +3360,11 @@ SELECT ferrum_consumer_id, COUNT(*) AS unconfirmed
   GROUP BY ferrum_consumer_id;
 ```
 
-**Upgrading from `v0.2.0` or earlier.** On the first start after the upgrade,
-Nexus scans the audit log for `credential.append_rollback` rows with
+**Databases written by `v0.2.0` or earlier.** Since `v0.6.0` such a database
+is refused rather than upgraded
+([schema and upgrades before 1.0](#schema-and-upgrades-before-10)), so on a
+database created at the base schema this scan finds nothing. On its first
+start Nexus scans the audit log for `credential.append_rollback` rows with
 `credential_type: "basicauth"` and `withdrawn: false` that no live row
 accounts for: those without `stranded_credential_id` (what earlier releases
 wrote for a lost acknowledgement or a failed row write) and those whose

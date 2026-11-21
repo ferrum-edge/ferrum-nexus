@@ -832,6 +832,12 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver {
     async listRecorded(): Promise<string[]> {
       return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).map((row) => text(row.id));
     },
+    async existingTables(schema: BaseSchema): Promise<string[]> {
+      const names = new Set(schema.tables);
+      return queryAll(db, "SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map((row) => text(row.name))
+        .filter((name) => names.has(name));
+    },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
       const create = db.transaction((base: BaseSchema) => {
         db.exec(base.sql);
