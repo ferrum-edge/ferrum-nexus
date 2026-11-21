@@ -2326,8 +2326,14 @@ IP.
 | `backend.status`         | `healthy` (closed breaker), `failing` (open breaker or ejected target), `recovering` (half-open), `unknown` (read, nothing reported), `unavailable` (could not be read; `detail` says why)                        |
 | `backend.since`          | present only for an ejected target                                                                                                                                                                                |
 
-`unknown` does not mean the backend is down: Edge lists a breaker only for a
-proxy that has one and has been called; `detail` says which. Backend state is
+`unknown` does not mean the backend is down. With `unavailable_code: "no_proxy"`
+there is no proxy to sample and `detail` says so. Otherwise the gateway's
+backend sample lists no breaker or ejected target for the proxy. Edge normally creates a breaker's
+state when a request reaches it, so an enabled breaker can be absent from the
+sample while the cumulative counters show traffic from before it was enabled or
+refused before it. Then `detail` states the API's saved `circuit_breaker`
+setting (off or on) beside that observation, and whether request metrics were
+available; the two are independent facts. Backend state is
 read independently — it may be filled while `available` is `false`, and
 `unavailable` when only it failed.
 

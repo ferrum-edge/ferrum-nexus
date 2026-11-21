@@ -1069,7 +1069,11 @@ export interface ApiUsageLatency {
  * - `recovering` — a half-open breaker probing whether the backend is back.
  * - `unknown` — the gateway reports nothing about this proxy. That is the
  *   normal state for a proxy with no `circuit_breaker` configured, and for one
- *   that has never been called; it is **not** a claim that the backend is down.
+ *   whose breaker no request has reached since it was enabled (Edge creates
+ *   breaker state lazily); it is **not** a claim that the backend is down.
+ *   When a backend sample was read, `detail` states the API's saved
+ *   `circuit_breaker` setting beside that observation; for an API with no
+ *   proxy (`unavailable_code: "no_proxy"`) it says there is nothing to sample.
  * - `unavailable` — the portal could not read the gateway's backend state at
  *   all: unreachable, refused, or unreadable. It says nothing about breakers.
  *   Ferrum Edge v0.9.17 refuses the portal's namespace-scoped admin token on
@@ -1077,7 +1081,7 @@ export interface ApiUsageLatency {
  */
 export interface ApiUsageBackend {
   status: ApiUsageBackendStatus;
-  /** One human-readable sentence explaining `status`, or `null`. */
+  /** A short human-readable explanation of `status`, or `null`. */
   detail: string | null;
   /** Since when the backend has been in a failing state, when Edge reports it. */
   since?: IsoTimestamp;
