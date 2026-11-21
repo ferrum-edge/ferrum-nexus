@@ -1530,7 +1530,7 @@ describe('single sign-on', () => {
     assert.equal((await put([])).statusCode, 200);
   });
 
-  it('orders a first-time link, not a returning sign-in, against a settings save', async () => {
+  it('orders every sign-in against a settings save under the provider key', async () => {
     const provider = {
       id: 'ordered',
       display_name: 'Ordered',
@@ -1568,8 +1568,9 @@ describe('single sign-on', () => {
       'a first-time automatic link takes the account lifecycle lock',
     );
 
-    // A returning sign-in holds only its account's key: sign-ins at one
-    // provider do not queue behind each other deployment-wide.
+    // A returning sign-in commits under the provider's key too, then its
+    // account's: a settings save on another instance that cuts the provider
+    // off must see the session it issues (GHSA-2343-7j5f-mjcv).
     const returning = person('ordered-returning');
     const account = await sessionOf(
       h,
@@ -1581,7 +1582,7 @@ describe('single sign-on', () => {
     const lifecycleKey = userLifecycleLockKey(account.user.id);
     assert.deepEqual(
       leases.taken.filter((key) => key.startsWith('sso:') || key === lifecycleKey),
-      [lifecycleKey],
+      [ssoProviderLockKey('ordered'), lifecycleKey],
     );
 
     // A first-time sign-in provisions under the provider's key. A save that
@@ -1692,6 +1693,51 @@ describe('single sign-on', () => {
     // The unlink already terminated the only session; the role change
     // itself terminates none further.
     assert.equal(row?.details.terminated_sessions, 0);
+  });
+
+  it('re-checks the role under the account lock before an admin unlinks an identity', async () => {
+    const admin = await h.registerUser({ email: 'unlink-race-admin@corp.example.test' });
+    await h.store.users.update(admin.user.id, { role: 'admin' });
+    const target = await h.registerUser({ email: 'unlink-race-target@corp.example.test' });
+    const identity = await h.store.userIdentities.create({
+      user_id: target.user.id,
+      provider_id: 'corp',
+      issuer: corp.issuer,
+      subject: 'unlink-race-subject',
+      email: target.user.email,
+      provisioned: false,
+    });
+    // A promotion commits after the unlink's first role check, while the
+    // unlink is about to open its transaction under the account's key.
+    leases.next = {
+      key: userLifecycleLockKey(target.user.id),
+      run: async () => {
+        await h.store.users.update(target.user.id, { role: 'admin' });
+      },
+    };
+    try {
+      const refused = await h.authed(admin, {
+        method: 'DELETE',
+        url: `/api/users/${target.user.id}/identities/${identity.id}`,
+      });
+      assert.equal(leases.next, null, 'the unlink took the account lifecycle lock');
+      assert.equal(refused.statusCode, 403, refused.body);
+    } finally {
+      leases.next = null;
+    }
+    assert.deepEqual(
+      (await h.store.userIdentities.listByUser(target.user.id)).map((entry) => entry.id),
+      [identity.id],
+    );
+    assert.equal(
+      (await h.authed(target, { method: 'GET', url: '/api/auth/me' })).statusCode,
+      200,
+      'the promoted account keeps its sessions',
+    );
+    const unlinks = (await h.auditRows(AuditAction.AUTH_SSO_UNLINK)).filter(
+      (row) => row.target_id === target.user.id,
+    );
+    assert.deepEqual(unlinks, []);
   });
 
   it('releases a squatted address for a separate rightful admin-mapped SSO account', async () => {
@@ -2137,6 +2183,149 @@ describe('single sign-on login policies', () => {
       const start = await h.app.inject({ method: 'GET', url: '/api/auth/sso/corp/start' });
       assert.equal(ssoError(start), 'sso_disabled');
       assert.equal(cookieValue(start, SSO_TRANSACTION_COOKIE), undefined);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('local_only ends the sessions of accounts linked to providers it shuts out', async () => {
+    const extra = createMockOidcProvider({ clientId: 'nexus-extra', clientSecret: null });
+    let h: TestApp | null = null;
+    try {
+      await extra.start();
+      h = await app();
+      const founder = await h.registerUser({ email: 'cutoff-founder@corp.example.test' });
+      const stored = {
+        id: 'stored-cutoff',
+        display_name: 'Stored',
+        issuer: extra.issuer,
+        client_id: 'nexus-extra',
+        scopes: ['openid', 'email'],
+        enabled: true,
+        jit_provisioning: true,
+        link_existing_accounts: false,
+        require_verified_email: true,
+        allowed_email_domains: [],
+        disable_local_password_for_linked: false,
+        sync_roles: false,
+        default_role: 'client',
+        role_mappings: [],
+        org_mappings: [],
+      };
+      const portal = h;
+      const put = (payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
+        portal.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload });
+      assert.equal((await put({ providers: [stored] })).statusCode, 200);
+
+      // One account through an environment provider (NEXUS_OIDC_PROVIDERS),
+      // one through a stored provider, and one local account with no link.
+      const envPerson = person('cutoff-env');
+      const viaEnv = await sessionOf(
+        h,
+        await signIn(h, corp, 'corp', { ...envPerson, email_verified: true }),
+      );
+      const viaStored = await sessionOf(
+        h,
+        await signIn(h, extra, 'stored-cutoff', {
+          ...person('cutoff-stored'),
+          email_verified: true,
+        }),
+      );
+      const local = await h.registerUser({ email: 'cutoff-local@corp.example.test' });
+      // A link under the environment provider's id but at another issuer (a
+      // stored row the environment provider shadows) never signed anybody in
+      // through it, so the cut-off leaves its account's sessions alone.
+      const shadowed = await h.registerUser({ email: 'cutoff-shadowed@corp.example.test' });
+      await h.store.userIdentities.create({
+        user_id: shadowed.user.id,
+        provider_id: 'corp',
+        issuer: 'https://retired-issuer.example.test',
+        subject: 'cutoff-shadowed-subject',
+        email: shadowed.user.email,
+        provisioned: false,
+      });
+      const status = async (session: TestSession): Promise<number> =>
+        (await portal.authed(session, { method: 'GET', url: '/api/auth/me' })).statusCode;
+
+      const cut = await put({ policy: 'local_only' });
+      assert.equal(cut.statusCode, 200, cut.body);
+      assert.equal(await status(viaEnv), 401, 'the environment provider session ended');
+      assert.equal(await status(viaStored), 401, 'the stored provider session ended');
+      assert.equal(await status(local), 200, 'an account with no link keeps its session');
+      assert.equal(await status(shadowed), 200, 'a link at a shadowed issuer is not cut off');
+      assert.equal(await status(founder), 200);
+      const audited = async (): Promise<Record<string, unknown>[]> =>
+        (await portal.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE))
+          .filter((row) => row.target_id === SSO_SETTINGS_KEY)
+          .map((row) => row.details);
+      const cutRow = (await audited()).find((details) =>
+        (details.changed_keys as string[] | undefined)?.includes('policy'),
+      );
+      assert.deepEqual(cutRow?.providers_cut_off, ['corp', 'partner', 'stored-cutoff']);
+      assert.equal(cutRow?.sessions_revoked, 2);
+
+      // Turning single sign-on back on cuts nothing off; the account signs in again.
+      const reopened = await put({ policy: 'local_and_sso' });
+      assert.equal(reopened.statusCode, 200, reopened.body);
+      const again = await sessionOf(
+        h,
+        await signIn(h, corp, 'corp', { ...envPerson, email_verified: true }),
+      );
+      assert.equal(again.user.id, viaEnv.user.id);
+      assert.equal((await put({ policy: 'local_only' })).statusCode, 200);
+      assert.equal(await status(again), 401);
+      // A save that leaves the policy at local_only has nothing left to cut off.
+      const domains = await put({ allowed_email_domains: ['corp.example.test'] });
+      assert.equal(domains.statusCode, 200, domains.body);
+      assert.equal(
+        (await audited()).filter((details) => details.providers_cut_off !== undefined).length,
+        2,
+        'only the two switches to local_only cut providers off',
+      );
+
+      // An explicit disable still cuts its provider off under local_only: a
+      // session from before the policy changed ends with it.
+      const linked = await h.registerUser({ email: 'cutoff-linked@corp.example.test' });
+      await h.store.userIdentities.create({
+        user_id: linked.user.id,
+        provider_id: 'stored-cutoff',
+        issuer: extra.issuer,
+        subject: 'cutoff-linked-subject',
+        email: linked.user.email,
+        provisioned: false,
+      });
+      const disabled = await put({ providers: [{ ...stored, enabled: false }] });
+      assert.equal(disabled.statusCode, 200, disabled.body);
+      assert.equal(await status(linked), 401, 'the disable ended the linked session');
+      const disableRow = (await audited()).find((details) =>
+        (details.changed_keys as string[] | undefined)?.includes('providers'),
+      );
+      assert.deepEqual(disableRow?.providers_cut_off, ['stored-cutoff']);
+      assert.equal(disableRow?.sessions_revoked, 1);
+    } finally {
+      try {
+        await h?.close();
+      } finally {
+        await extra.stop();
+      }
+    }
+  });
+
+  it('local_only audits an empty cut-off when no provider was in force', async () => {
+    const h = await buildTestApp({ env: { NEXUS_OIDC_PROVIDERS: '[]' } });
+    try {
+      const founder = await h.registerUser({ email: 'empty-cutoff@corp.example.test' });
+      const cut = await h.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/sso',
+        payload: { policy: 'local_only' },
+      });
+      assert.equal(cut.statusCode, 200, cut.body);
+      const row = (await h.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).find(
+        (entry) => entry.target_id === SSO_SETTINGS_KEY,
+      );
+      assert.deepEqual(row?.details.providers_cut_off, []);
+      assert.equal(row?.details.sessions_revoked, 0);
     } finally {
       await h.close();
     }

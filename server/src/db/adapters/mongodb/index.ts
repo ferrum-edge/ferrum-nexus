@@ -2206,16 +2206,20 @@ class MongoStore implements NexusStore {
         this.opts,
       ),
 
-    listUserIdsByProvider: async (providerId) =>
-      (
-        await this.col(COLLECTIONS.userIdentities).distinct(
-          'user_id',
-          { provider_id: providerId } as Filter<NexusDoc>,
-          this.opts,
-        )
-      )
-        .map((value) => String(value))
-        .sort(),
+    // A projected cursor, not `distinct`: `distinct` returns one document,
+    // which the 16 MiB BSON limit caps at a few hundred thousand accounts.
+    // `(user_id, provider_id)` is unique, so each account appears once.
+    listUserIdsByProvider: async (providerId, issuer) => {
+      const ids = new Set<string>();
+      const cursor = this.col(COLLECTIONS.userIdentities).find(
+        (issuer === undefined
+          ? { provider_id: providerId }
+          : { provider_id: providerId, issuer }) as Filter<NexusDoc>,
+        { ...this.opts, projection: { _id: 0, user_id: 1 } },
+      );
+      for await (const row of cursor) ids.add(String(row.user_id));
+      return [...ids].sort();
+    },
 
     touchLogin: async (id, email, at) => {
       const result = await this.col(COLLECTIONS.userIdentities).updateOne(
@@ -2388,6 +2392,20 @@ class MongoStore implements NexusStore {
     deleteForUser: async (userId) =>
       (await this.col(COLLECTIONS.sessions).deleteMany({ user_id: userId }, this.opts))
         .deletedCount,
+
+    deleteForUsers: async (userIds) => {
+      let deleted = 0;
+      for (let start = 0; start < userIds.length; start += 500) {
+        const batch = userIds.slice(start, start + 500);
+        deleted += (
+          await this.col(COLLECTIONS.sessions).deleteMany(
+            { user_id: { $in: batch } } as Filter<NexusDoc>,
+            this.opts,
+          )
+        ).deletedCount;
+      }
+      return deleted;
+    },
 
     deleteExpired: async (now) =>
       (
