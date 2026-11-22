@@ -96,9 +96,9 @@ how to move from `v0.5.2`.
 
 - **Separate credentials for the gateway's fleet-wide metrics reads**
   (ferrum-edge/ferrum-edge#6095). Every admin token Nexus mints carries an `ns`
-  claim, and Ferrum Edge v0.9.16 refuses such a token on `GET /metrics` and
-  `GET /admin/metrics`. Two optional settings restore the Usage card on that
-  release. Ferrum Edge v0.9.15 needs neither.
+  claim, and Ferrum Edge since v0.9.17 refuses such a token on `GET /metrics`
+  and `GET /admin/metrics`. Two optional settings restore the Usage card on
+  those releases. Ferrum Edge v0.9.15 needs neither.
   - `FERRUM_METRICS_BEARER_TOKEN` is the gateway's own metrics bearer token;
     the request-count scrape uses it.
   - `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` is a separate key, set to the
@@ -765,12 +765,12 @@ how to move from `v0.5.2`.
 - **Gateway health without its details is reported as unknown**
   (ferrum-edge/ferrum-edge#6095). Nexus reads `mode`, `admin_writes_enabled`
   and the namespace block from Edge's detailed `/health` tier (v0.9.15) and
-  from its bounded tenant tier (v0.9.16). When a gateway answers only
+  from its bounded tenant tier (since v0.9.17). When a gateway answers only
   `status` and `ready`, those fields read `null` and an earlier "namespace
   served" verdict is dropped. The portal no longer keeps reporting the
   namespace as served without evidence, and logs the minimal tier once.
   When a single-namespace data plane withholds its namespace name from the
-  portal's token (Edge v0.9.16 sends `active: null` when the token's claim does
+  portal's token (Edge since v0.9.17 sends `active: null` when the token's claim does
   not cover it), the portal treats its namespace as unserved: health degrades
   and publishing is refused with `409 EDGE_NAMESPACE_UNSERVED`. `version()`
   reads a `403` as "no version endpoint", as it already did for a `404`, and
@@ -1017,7 +1017,9 @@ how to move from `v0.5.2`.
   bootstrap candidate that loses the founder seat now answers to the
   registration policy like any other registration.
 - **API deletion never names an operator's plugin config.** The sweep after
-  the proxy delete only targets configs the portal recorded as its own.
+  the proxy delete only targets configs the portal recorded as its own. Edge's
+  proxy delete still cascades to every proxy-scoped config on that proxy,
+  including one an operator attached.
 
 ## [0.5.2] - 2026-10-08
 

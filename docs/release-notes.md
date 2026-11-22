@@ -60,8 +60,10 @@ The full list of changes is in the [changelog](https://github.com/ferrum-edge/fe
   startup, before anything reads it; see [schema](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/release-notes.md#schema-no-upgrade-path-before-10).
 - **Pairs with Edge `v0.9.20`.** Includes Edge `v0.9.17`'s fixes for the published
   QUIC advisories that affect `v0.9.15`, and the stricter admission of `v0.9.19` and
-  `v0.9.20`. The palette refuses, before any gateway write, what those releases
-  refuse.
+  `v0.9.20`. The palette refuses, before any gateway write, the compression,
+  CIDR-prefix and built-in reserved-header values those releases refuse; a header
+  reserved only through the gateway's `FERRUM_REAL_IP_HEADER` is refused by Edge
+  at save.
 - **Grant revocations and access approvals are not stranded** (#651). Each
   decision's gateway half is recorded durably (`access_gateway_jobs`). After a
   crash or a failed compensation, a background worker finishes an interrupted
@@ -157,17 +159,22 @@ database do not carry over. Follow
 On the Compose stack the gateway serves only this portal, so the simplest path is
 to start both from empty volumes. From the `v0.5.2` checkout you installed from,
 with the four secrets you saved at install time exported again (never newly
-generated values), after taking the paired backup (step 3):
+generated values), after taking the paired backup (step 3). Commit or stash any
+edits to tracked files first; the block stops before touching the stack if any
+remain, or if the tag cannot be checked out. If you changed your
+`docker-compose.yml`, replace the `cp docker/docker-compose.example.yml` line
+with a hand merge of the `v0.6.0` example into it.
 
 ```bash
 set -e
 git fetch --tags origin
-git rev-parse --verify 'v0.6.0^{commit}'
+test -z "$(git status --porcelain --untracked-files=no)"
+cp docker-compose.yml docker-compose.v0.5.2.yml
 set -a
 . ./release/compatibility.env
 set +a
-docker compose down -v
 git checkout --detach v0.6.0
+docker compose -f docker-compose.v0.5.2.yml down -v
 cp docker/docker-compose.example.yml docker-compose.yml
 set -a
 . ./release/compatibility.env
@@ -175,14 +182,14 @@ set +a
 docker compose up -d --build
 ```
 
-The tag is fetched and verified first, so nothing is torn down if it cannot be
-found. The first `compatibility.env` is the `v0.5.2` one, which `docker compose
-down` needs to read the old Compose file; the second, after the checkout, pins Edge
-`v0.9.20`. Copying the example again picks up the `v0.6.0` Compose pins (skip it
-if you changed your `docker-compose.yml`, and merge by hand). `docker compose
-down -v` deletes both the Nexus database (`pgdata`) and the gateway's database
-(`ferrumdata`), which covers steps 5 and 6; run it only after the backup. Then register the founding administrator again with the bootstrap
-token from `docker compose logs nexus`.
+The stack is torn down only after the `v0.6.0` checkout has succeeded, using the
+saved `v0.5.2` Compose file (kept as `docker-compose.v0.5.2.yml`) and the `v0.5.2`
+`compatibility.env` sourced before the checkout. The second `compatibility.env`
+is the `v0.6.0` one, which pins Edge `v0.9.20`, and copying the example picks up
+the `v0.6.0` Compose pins. `docker compose down -v` deletes both the Nexus
+database (`pgdata`) and the gateway's database (`ferrumdata`), which covers
+steps 5 and 6; run it only after the backup. Then register the founding
+administrator again with the bootstrap token from `docker compose logs nexus`.
 
 ### Behaviour changes to plan for
 
@@ -249,8 +256,9 @@ Fixed in Nexus since `v0.5.2` (details in the
   the deployment; stored scrypt parameters are bounded before verification; the
   Content-Security-Policy admits only the CAPTCHA provider in use; the SMTP password
   is presented only to the relay it was stored for; a recipient's display name can
-  no longer stop a mass-email campaign; API deletion never removes an operator's own
-  plugin config; and private APIs' summaries are no longer shown to an account that
+  no longer stop a mass-email campaign; Nexus's cleanup after an API deletion
+  deletes only plugin configs it created (Edge's proxy delete still cascades to
+  every proxy-scoped config on that proxy, an operator's included); and private APIs' summaries are no longer shown to an account that
   can no longer read the API.
 
 Edge `v0.9.17` fixes the published QUIC advisories that affect Edge `v0.9.15`; see
