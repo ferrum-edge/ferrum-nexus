@@ -94,7 +94,7 @@ async function sessionState(pool: mysql.Pool): Promise<{ id: number; lockWaitTim
 async function assertSchemaLockAvailable(pool: mysql.Pool, url: string): Promise<void> {
   const database = new URL(url).pathname.slice(1);
   const digest = createHash('sha256').update(database).digest('hex').slice(0, 32);
-  const name = `nexus:schema:${digest}`;
+  const name = `nexus:migrations:${digest}`;
   const observer = await pool.getConnection();
   try {
     // A discarded connection may take a moment to disconnect server-side.

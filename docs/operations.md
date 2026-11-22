@@ -1513,7 +1513,10 @@ When the release notes say the schema changed (until 1.0, check each release's
 notes), the new release needs a new, empty database:
 
 1. Read the release notes, including the Ferrum Edge release the new Nexus
-   release is validated against, and settle recovery journals (step 2 of
+   release is validated against. While the old portal still runs, do that Edge
+   release's preflight (for Edge v0.9.20, step 1 of
+   [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920), which fixes saved
+   palette settings in the portal), and settle recovery journals (step 2 of
    [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913)).
 2. Stop every Nexus instance, then **back up Nexus and Edge together**, as one
    point in time, before changing anything on either side, and record their
@@ -1521,8 +1524,8 @@ notes), the new release needs a new, empty database:
    still run the previous qualified pair, is your only way back: the new release
    cannot read the Nexus half, and steps 3 and 5 can change the Edge half.
 3. If the new release pairs with a newer Edge release, upgrade Edge now, the
-   control plane and every data plane together, following that release's
-   upgrade section above.
+   control plane and every data plane together (the gateway upgrade step of
+   that release's section above).
 4. Create a new, empty database. For SQLite, delete (or move aside) the
    database file and its `-wal` and `-shm` files. For PostgreSQL, MySQL or
    MongoDB, drop and recreate the dedicated Nexus database, or point
@@ -1574,8 +1577,10 @@ docker run --rm --env-file .env <image> node server/dist/db/migrate-cli.js
 
 The CLI loads the same environment. It creates the base schema in an empty
 database, or confirms an existing one is at it. It then prints
-`Schema ready (driver: postgres).` and exits `0`. Against a database an
-earlier version created, it prints the refusal above and exits non-zero. It
+`Schema ready (driver: postgres).` and exits `0`. Against a database whose
+ledger holds anything but this build's base schema generation (a pre-0.6
+migration chain or another generation), it prints the refusal above and exits
+non-zero. It
 never upgrades. The name `migrate` is kept for existing scripts.
 
 `npm run build --workspace server` copies `server/src/db/schema/` to

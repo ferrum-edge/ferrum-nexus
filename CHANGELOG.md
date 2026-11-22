@@ -754,8 +754,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   or reopen registration); a first trusted password reset revokes the
   account's credentials; a redeemed verification link does not count as proof
   for single sign-on matching; re-enabling an application cannot fail with a
-  mapping `502`; the MongoDB released-migration guard freezes indexes only;
-  MySQL `1205` is not retried.
+  mapping `502`; MySQL `1205` is not retried.
 - **Runbook and reference corrections** (#599, #600, #601, #602, #603, #607).
   Changing `FERRUM_RATE_LIMIT_SYNC_MODE` on a live portal has a real migration
   procedure, since re-saving an unchanged quota is a no-op and a changed one
@@ -961,8 +960,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   expiry never extends it past that, and the cookies a slide re-issues expire
   with it. Unset or `0` means 7 days, or `NEXUS_SESSION_TTL` when that is
   longer; an explicit value below `NEXUS_SESSION_TTL` is refused at startup.
-  **Upgrade note:** sessions older than the cap end on their next request, so
-  long-lived tabs sign in again once after the upgrade.
+  Every session in a `v0.6.0` database is subject to the cap from sign-in.
 - **Anonymous health checks no longer fingerprint the deployment** (#583).
   For anyone who is not a signed-in admin, `GET /api/health` reports `version`,
   `uptime_seconds` and `database.driver` as `null`, and both health endpoints
@@ -997,13 +995,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   ([GHSA-qm46-qg94-mpg7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-qm46-qg94-mpg7)).
   `app_settings` secrets are written as `v2` blobs authenticated with
   `app_settings:v2:<key>`, so a ciphertext copied to another setting's row no
-  longer opens. Reads refuse unbound `v1` blobs. The first start re-encrypts
-  each `v1` row the key opens, with an atomic compare-and-set per row, and
-  records a `settings.encryption_bound` audit row in the same transaction;
-  later starts convert nothing, and `rotate-secret-key` then refuses `v1` too,
-  so a `v1` blob injected after the upgrade stays refused. A `v1` row the key
-  cannot open stops the start with nothing converted. Upgrade every instance
-  together.
+  longer opens. Reads refuse unbound `v1` blobs, and `rotate-secret-key`
+  refuses them too. (A start that finds `v1` rows re-encrypts each one the key
+  opens and records `settings.encryption_bound`; a database created at the
+  `v0.6.0` base schema has none.)
 - **Registration re-checks its policy when it commits**
   ([GHSA-9cr4-49fg-gfcx](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-9cr4-49fg-gfcx)).
   A registration in flight when an administrator closes registration, removes

@@ -2147,8 +2147,9 @@ export interface NexusStore {
   init(): Promise<void>;
   /**
    * Create the base schema in an empty database, or confirm an existing one is
-   * at it; idempotent, safe to call on every boot. Never upgrades: a database
-   * created by an earlier version is refused (`db/schema.ts`).
+   * at it; idempotent, safe to call on every boot. Never upgrades: a ledger
+   * holding anything but the current base schema generation (a pre-0.6
+   * migration chain or another generation) is refused (`db/schema.ts`).
    */
   migrate(): Promise<void>;
   /** Close pools/handles. Safe to call more than once. */

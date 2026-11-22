@@ -93,7 +93,9 @@ export async function ensureMysqlSchema(
     const [rows] = await connection.query<mysql.RowDataPacket[]>('SELECT DATABASE() AS db');
     if (typeof rows[0]?.db !== 'string')
       throw new Error('MySQL schema setup requires a selected database');
-    const name = `nexus:schema:${digest(rows[0].db).slice(0, 32)}`;
+    // The pre-0.6 runner's lock name: an older process provisioning the same
+    // database serializes with this one rather than interleaving.
+    const name = `nexus:migrations:${digest(rows[0].db).slice(0, 32)}`;
     // Acquisition can commit server-side before a transport error reaches us.
     lockName = name;
     const [locks] = await connection.execute<mysql.RowDataPacket[]>(

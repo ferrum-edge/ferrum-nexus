@@ -6112,7 +6112,7 @@ const NO_UPGRADE_PATH = /no upgrade path before 1\.0/;
 interface OlderDatabase {
   url: string;
   /** The ledger ids and table names left in the database. */
-  inspect: () => Promise<{ ledger: string[]; tables: string[] }>;
+  inspect: () => Promise<{ ledger: string[]; tables: string[]; users: string[] }>;
   drop: () => Promise<void>;
 }
 
@@ -6130,6 +6130,7 @@ async function olderPostgres(adminUrl: string, ledger: string[]): Promise<OlderD
       'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
     );
     await client.query('CREATE TABLE users (id TEXT PRIMARY KEY)');
+    await client.query("INSERT INTO users VALUES ('older')");
     for (const id of ledger) {
       await client.query("INSERT INTO schema_migrations VALUES ($1, 'then')", [id]);
     }
@@ -6142,14 +6143,24 @@ async function olderPostgres(adminUrl: string, ledger: string[]): Promise<OlderD
       const reader = new pg.Client({ connectionString: url });
       await reader.connect();
       try {
-        const ids = await reader.query('SELECT id FROM schema_migrations ORDER BY id');
+        const ids = await reader.query('SELECT id, applied_at FROM schema_migrations ORDER BY id');
         const tables = await reader.query(
           "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' " +
             'ORDER BY table_name',
         );
+        const columns = await reader.query(
+          "SELECT column_name FROM information_schema.columns WHERE table_name = 'users' " +
+            'ORDER BY column_name',
+        );
+        const users = await reader.query('SELECT * FROM users ORDER BY id');
         return {
-          ledger: ids.rows.map((row: { id: string }) => row.id),
+          ledger: ids.rows.map((row: unknown) => JSON.stringify(row)),
           tables: tables.rows.map((row: { table_name: string }) => row.table_name),
+          // The pre-existing table's columns and rows, which a refusal must leave as they were.
+          users: [
+            ...columns.rows.map((row: { column_name: string }) => `column:${row.column_name}`),
+            ...users.rows.map((row: unknown) => JSON.stringify(row)),
+          ],
         };
       } finally {
         await reader.end();
@@ -6177,6 +6188,7 @@ async function olderMysql(adminUrl: string, ledger: string[]): Promise<OlderData
         'applied_at VARCHAR(32) NOT NULL)',
     );
     await connection.query('CREATE TABLE users (id VARCHAR(64) NOT NULL PRIMARY KEY)');
+    await connection.query("INSERT INTO users VALUES ('older')");
     for (const id of ledger) {
       await connection.execute("INSERT INTO schema_migrations VALUES (?, 'then')", [id]);
     }
@@ -6189,15 +6201,27 @@ async function olderMysql(adminUrl: string, ledger: string[]): Promise<OlderData
       const reader = await mysql.createConnection(url);
       try {
         const [ids] = await reader.query<mysql.RowDataPacket[]>(
-          'SELECT id FROM schema_migrations ORDER BY id',
+          'SELECT id, applied_at FROM schema_migrations ORDER BY id',
         );
         const [tables] = await reader.query<mysql.RowDataPacket[]>(
           'SELECT TABLE_NAME AS name FROM information_schema.TABLES ' +
             'WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME',
         );
+        const [columns] = await reader.query<mysql.RowDataPacket[]>(
+          'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS ' +
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' ORDER BY COLUMN_NAME",
+        );
+        const [users] = await reader.query<mysql.RowDataPacket[]>(
+          'SELECT * FROM users ORDER BY id',
+        );
         return {
-          ledger: ids.map((row) => String(row.id)),
+          ledger: ids.map((row) => JSON.stringify(row)),
           tables: tables.map((row) => String(row.name)),
+          // The pre-existing table's columns and rows, which a refusal must leave as they were.
+          users: [
+            ...columns.map((row) => `column:${String(row.name)}`),
+            ...users.map((row) => JSON.stringify(row)),
+          ],
         };
       } finally {
         await reader.end();
@@ -6237,8 +6261,12 @@ async function olderMongo(baseUrl: string, ledger: string[]): Promise<OlderDatab
         const ids = await db.collection('schema_migrations').find({}).sort({ _id: 1 }).toArray();
         const collections = await db.listCollections({}, { nameOnly: true }).toArray();
         const users = await db.collection('users').indexes();
+        const users = await db.collection('users').find({}).sort({ _id: 1 }).toArray();
         return {
-          ledger: ids.map((doc) => String(doc._id)),
+          // Whole ledger documents and the pre-existing documents, which a
+          // refusal must leave as they were.
+          ledger: ids.map((doc) => JSON.stringify(doc)),
+          users: users.map((doc) => JSON.stringify(doc)),
           // Collections, plus any index beyond `_id` the refused start created.
           tables: [
             ...collections.map((collection) => collection.name),
