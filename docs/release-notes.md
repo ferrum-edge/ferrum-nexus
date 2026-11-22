@@ -193,9 +193,7 @@ same files and project as the running stack, with the `v0.5.2`
 is the `v0.6.0` one, which pins Edge `v0.9.20`, and copying the example picks up
 the `v0.6.0` Compose pins. `docker compose down -v` deletes both the Nexus
 database (`pgdata`) and the gateway's database (`ferrumdata`), which covers
-steps 5 and 6; run it only after the backup. It removes named volumes only: if
-an override stores either database in a host directory, empty that directory
-before `up`. Then register the founding
+steps 5 and 6; run it only after the backup. It removes the project's own named and anonymous volumes, not external volumes or host directories: if an override keeps either database in one, point that service at fresh storage before `up`. Then register the founding
 administrator again with the bootstrap token from `docker compose logs nexus`.
 
 ### Behaviour changes to plan for
