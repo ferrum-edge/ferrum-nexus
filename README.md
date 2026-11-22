@@ -27,11 +27,12 @@ row before calling Edge.
 
 ## Development status
 
-`v0.5.2` is the current release, paired with Ferrum Edge `v0.9.15`, a security
-release; `v0.1.0` was the first supported release. The
-[release notes](docs/release-notes.md) list the supported pair, how to upgrade from
-`v0.5.1`, and the known limitations; see also
-[upgrading to Edge v0.9.15](docs/operations.md#upgrading-to-edge-v0915).
+`v0.6.0` is the current release, paired with Ferrum Edge `v0.9.20`; `v0.1.0` was the
+first supported release. `v0.6.0` folds every earlier migration into one base schema
+and does not open a database an earlier version created. The
+[release notes](docs/release-notes.md) list the supported pair, how to move from
+`v0.5.2` (a new, empty database), and the known limitations; see also
+[upgrading to Edge v0.9.20](docs/operations.md#upgrading-to-edge-v0920).
 
 Since `v0.4.0` the supported Node range is `^22.22.2 || ^24.15.0 || >=26.0.0`.
 Node 22 remains supported; older Node 22/24 patches and Node 23/25 are excluded.
@@ -271,10 +272,10 @@ The bootstrap token is printed to the container log (`docker logs`). Pass
 
 The Compose example runs Nexus, PostgreSQL and Ferrum Edge. The
 [compatibility record](release/compatibility.env) selects the Edge image by
-digest — `v0.9.20` on `main`, `v0.9.15` at the `v0.5.2` tag — the same image
-CI tests for that checkout. The Nexus image is built from your
+digest — `v0.9.20` at the `v0.6.0` tag, `v0.9.15` at the `v0.5.2` tag — the same
+image CI tests for that checkout. The Nexus image is built from your
 checkout, so check out the release tag first
-(`git checkout --detach v0.5.2`).
+(`git checkout --detach v0.6.0`).
 
 The four secrets and the Edge image are required. Keep the secrets stable for
 the life of the stack: store them in a secret manager instead of generating new

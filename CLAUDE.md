@@ -16,8 +16,8 @@ server (`server/`), which enforces RBAC and writes the audit log before forwardi
 
 ## Release status
 
-`v0.5.2` is the current release, paired with Ferrum Edge `v0.9.15`; `main` already pins Edge
-`v0.9.20` for the next release (`release/compatibility.env`).
+`v0.6.0` is the current release, paired with Ferrum Edge `v0.9.20` (`release/compatibility.env`).
+`v0.5.2` paired with Edge `v0.9.15`.
 
 **The app is in buildout: until v1, edit the base schema directly; no migrations.** No upgrade
 paths will be designed before 1.0:

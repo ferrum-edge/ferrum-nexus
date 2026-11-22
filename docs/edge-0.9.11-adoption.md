@@ -1,6 +1,6 @@
 # Edge v0.9.20 adoption
 
-The next Nexus release pairs with published Edge v0.9.20 and `contracts-edge-0.9.20`.
+Nexus `v0.6.0` pairs with published Edge v0.9.20 and `contracts-edge-0.9.20`.
 Nexus `v0.5.2` pairs with Edge v0.9.15 and `contracts-edge-0.9.15`, Nexus
 `v0.5.0` and `v0.5.1` paired with Edge v0.9.14 and `contracts-edge-0.9.14`,
 and Nexus `v0.4.0` paired with Edge v0.9.13 and `contracts-edge-0.9.13`. The
@@ -282,7 +282,7 @@ See
 ## Release status
 
 [`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.20 image
-above for the next Nexus release, and the packaged acceptance suite runs against it. The record
+above for Nexus `v0.6.0`, and the packaged acceptance suite runs against it. The record
 at the `v0.5.2` tag pins Edge v0.9.15, at the `v0.5.1` and `v0.5.0` tags Edge v0.9.14, and at the
 `v0.4.0` tag Edge v0.9.13. The
 [controlled public-only fixture](../e2e/public-only/README.md) runs a packaged Nexus
