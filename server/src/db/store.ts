@@ -1903,7 +1903,7 @@ export interface AccessGatewayJobRepo {
    * `pending`, due at `now`, `attempts = 0`. An existing row — owned by a live
    * decision or already queued — is left exactly as it is. Resolves to
    * whether this call inserted the row. Used by the one-time repair that
-   * queues gateway work decisions made before migration `015` stranded.
+   * queues gateway work that decisions made before `access_gateway_jobs` stranded.
    */
   enqueueIfAbsent(input: AccessGatewayJobInput, now: IsoTimestamp): Promise<boolean>;
   findBySubject(subjectId: Uuid): Promise<AccessGatewayJobRecord | null>;
@@ -2145,7 +2145,12 @@ export interface NexusStore {
 
   /** Open connections and validate the deployment (e.g. Mongo replica-set check). */
   init(): Promise<void>;
-  /** Apply every pending migration; idempotent, safe to call on every boot. */
+  /**
+   * Create the base schema in an empty database, or confirm an existing one is
+   * at it; idempotent, safe to call on every boot. Never upgrades: a ledger
+   * holding anything but the current base schema generation (a pre-0.6
+   * migration chain or another generation) is refused (`db/schema.ts`).
+   */
   migrate(): Promise<void>;
   /** Close pools/handles. Safe to call more than once. */
   close(): Promise<void>;

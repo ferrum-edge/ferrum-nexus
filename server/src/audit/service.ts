@@ -336,8 +336,8 @@ export const AuditAction = {
    */
   ACCESS_REVOKE_COMPLETE: 'access.revoke_complete',
   /**
-   * The one-time repair after migration `015` queued access gateway jobs for
-   * decisions an earlier release may have left half-applied: revoked grants
+   * The one-time repair queued access gateway jobs for decisions a release
+   * before `access_gateway_jobs` may have left half-applied: revoked grants
    * whose group may still be on the consumer, and approved requests with no
    * grant. Written by the system once; its presence is what stops later
    * starts from scanning again.

@@ -15,7 +15,7 @@ see [docs/contributing.md](docs/contributing.md).
 ```bash
 npm install
 cp .env.example .env   # set NEXUS_SECRET_KEY, FERRUM_ADMIN_URL, FERRUM_ADMIN_JWT_SECRET
-npm run migrate        # builds shared, then applies the schema
+npm run migrate        # builds shared, then creates the schema
 npm run dev            # backend on :8787, web on :5173 (override with NEXUS_PORT / NEXUS_WEB_PORT)
 ```
 
@@ -62,11 +62,13 @@ coverage changes visible.
 
 ## Schema policy
 
-`v0.1.0` froze the `001_initial` schema baseline. A schema change is a new forward migration with
-a higher id in every backend, never an edit to a released one (CI rejects that), and it must
-upgrade a retained database in place. See
-[schema versioning and upgrades](docs/operations.md#schema-versioning-and-upgrades). A development
-database created before `v0.1.0` is disposable: recreate it.
+**Until v1, edit the base schema directly; there are no migrations.** Each backend has one base
+schema (`server/src/db/schema/base.sql`, `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in the
+MongoDB adapter), and a schema change edits all four in the same change. No upgrade paths are
+designed before 1.0: bump `BASE_SCHEMA_ID` in `server/src/db/schema.ts` with every schema edit, and
+a database created at an earlier schema generation is refused at startup and must be
+recreated, development databases included. See
+[schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10).
 
 ## Ground rules
 

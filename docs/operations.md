@@ -1085,15 +1085,26 @@ is needed. What changes for Nexus:
 
 Procedure:
 
-1. **Check the gateway** with both Edge guide sections. In the portal, fix or
-   remove every palette `compression`, `correlation_id` and `ip_restriction`
-   setting listed above, and tell JWT clients to drop any `aud` claim.
+1. **Check the gateway** with both Edge guide sections, and with the checks of
+   every earlier Edge release you cross: coming from Edge v0.9.15 (Nexus
+   `v0.5.2`), also step 1 of [Upgrading to Edge v0.9.17](#upgrading-to-edge-v0917),
+   which renames any `correlation_id` `header_name` set to `X-Ferrum-Hops`. In
+   the portal, fix or remove every palette `compression`, `correlation_id` and
+   `ip_restriction` setting listed above, and tell JWT clients to drop any
+   `aud` claim. Edge refuses to start on a saved config it rejects, so do this
+   while the old portal still runs.
 2. **Settle journals** as in step 2 of the v0.9.13 procedure, so that no
    conversion or restore spans the gateway upgrade.
-3. **Upgrade Edge to v0.9.20**, the control plane and every data plane together.
-4. **Upgrade Nexus** to the release that pins Edge v0.9.20 in
-   [`release/compatibility.env`](../release/compatibility.env), and check
-   `GET /api/health/edge` as an admin.
+3. **Stop Nexus and take the paired Nexus and Edge backup** before changing
+   Edge (step 2 of [moving to a new release](#moving-to-a-new-release)). The
+   release that pins Edge v0.9.20 (`v0.6.0`) needs a new, empty database and
+   cannot read an earlier one, so this backup is the way back to the previous
+   pair.
+4. **Upgrade Edge to v0.9.20**, the control plane and every data plane together.
+5. **Move Nexus** to the release that pins Edge v0.9.20 in
+   [`release/compatibility.env`](../release/compatibility.env), following
+   steps 4 to 6 of [moving to a new release](#moving-to-a-new-release), and
+   check `GET /api/health/edge` as an admin.
 
 Nexus `v0.5.2` is qualified against Edge v0.9.15 only and has not been tested
 against v0.9.20, so upgrade Nexus promptly after Edge. **Rolling back** Edge to
@@ -1365,7 +1376,7 @@ so a failed attempt leaves nothing behind.
 
 - **`NEXUS_BOOTSTRAP_TOKEN` set:** that value is the token. It is never logged.
 - **Unset:** each process generates a 32-byte random token and logs it at `warn`
-  if the portal has no active super admin after migrations:
+  if the portal has no active super admin once the schema is ready:
 
   ```text
   ============================================================================
@@ -1446,326 +1457,115 @@ without CAPTCHA, turn it off in settings, where the change is audited.
 
 ---
 
-## 2. Databases and migrations
+## 2. Databases and the schema
 
-### Migration behaviour
+### Schema and upgrades before 1.0
 
-Migrations run automatically at startup (`store.init()` then `store.migrate()`)
-before the server listens. Applied ids are recorded in `schema_migrations` and
-skipped on later boots. A failed migration stops startup; see
-[Upgrade failures and rollback](#upgrade-failures-and-rollback).
+Ferrum Nexus is in buildout. **Until 1.0 there is no upgrade path between
+releases, and a database an earlier version created is never migrated.**
 
-[Schema versioning and upgrades](#schema-versioning-and-upgrades) is the
-production contract. The [buildout schema policy](#buildout-schema-policy) is a
-development-only reset that destroys data.
+Each backend has one base schema: `server/src/db/schema/base.sql` (SQLite),
+`base.pg.sql` (PostgreSQL), `base.mysql.sql` (MySQL) and the `BASE_INDEXES`
+list in `server/src/db/adapters/mongodb/index.ts` (MongoDB). `v0.6.0` folded
+the earlier migration chain (`001_initial` to `015_access_gateway_jobs`) into
+it, and later schema changes edit it directly. There are no migration files.
 
-### Schema versioning and upgrades
+**At startup** (`store.init()`, then `store.migrate()`, before the server
+listens) Nexus reads the `schema_migrations` table (a collection on MongoDB),
+the same ledger the pre-0.6 migration runner kept:
 
-**The released baseline.** `001_initial` (three SQL files in
-`server/src/db/migrations/` plus the MongoDB step of the same id in
-`server/src/db/adapters/mongodb/index.ts`) is frozen in `v0.1.0`.
-`server/src/db/released-migrations.ts` records it with per-backend SHA-256
-checksums and `release: 'v0.1.0'`, the forward migrations
-`002_api_gateway_plugins` and `003_messages_thread_latest` with
-`release: 'v0.2.0'`, `004_api_spec_changes`,
-`005_notification_preferences` and `006_user_identities` with
-`release: 'v0.3.0'`, and `007_outbox_recipient`, `008_email_lifecycle_fence`,
-`009_outbox_priority`, `010_api_agents` and `011_mcp_tool_subsets` with
-`release: 'v0.4.0'`, `012_access_request_grant` with `release: 'v0.5.0'`, and
-`013_account_recovery_jobs` with `release: 'v0.5.1'`. `v0.5.2` adds no migration.
-`014_mysql_text_capacity` and `015_access_gateway_jobs` are listed with
-`release: null` until the next release ships them.
+- **Empty or missing:** a new database. Nexus creates the base schema and
+  records the base schema's generation, `000_base_v0_6` in this release, as the
+  ledger's only entry.
+- **Exactly this build's generation:** the schema is current, so nothing
+  happens.
+- **Anything else:** a database created by `v0.5.2` or earlier (the ledger
+  lists migration ids such as `001_initial`), or at a different base schema
+  generation. Nexus exits non-zero **without changing the schema or data** and
+  prints:
 
-**A released migration never changes.** A database only applies migrations its
-ledger lacks, so editing an applied one would make fresh and upgraded installs
-diverge. Every schema change is a **new forward migration**:
+  ```text
+  This database was created by a different Ferrum Nexus schema (it records
+  001_initial, 002_api_gateway_plugins, 003_messages_thread_latest,
+  004_api_spec_changes and 9 more; this build's schema is 000_base_v0_6).
+  Ferrum Nexus has no upgrade path before 1.0: a database created by an earlier
+  version is never migrated, and its schema and data were not changed. Back up
+  anything you need, then start this version against a new, empty database (or
+  drop and recreate this one).
+  ```
 
-1. Give it the next id (`002_description`, …). It must sort after every
-   released id; migrations run in id order.
-2. Implement it for every backend: `NNN_description.sql`, `.pg.sql`,
-   `.mysql.sql`, and a `MONGO_MIGRATIONS` step that declares its indexes.
-3. Make it safe to re-run where the backend cannot roll it back (MySQL DDL,
-   MongoDB steps), and do not depend on data a portal may not have.
-4. In the same change, add it to `RELEASED_MIGRATIONS` with `release: null` and
-   its checksums, and commit `server/src/db/released/NNN_description.mongodb.json`
-   (its MongoDB index snapshot). The release that ships it sets `release` to its
-   tag, which freezes it.
+  Recreate the database as described in
+  [moving to a new release](#moving-to-a-new-release).
 
-The MongoDB guard freezes the declared indexes in that snapshot only; it does
-not freeze document-transform code (an intentional limit). The immutability
-policy above still forbids editing a released transform — review, not the
-test, enforces that half.
+The generation (`BASE_SCHEMA_ID` in `server/src/db/schema.ts`) is bumped in
+the same change as any edit to the base schema. A release whose generation
+changed refuses every database an earlier generation created. A release that
+keeps the generation opens the previous release's database as it is. Each
+release's notes say which applies. To see a database's generation, run
+`SELECT id FROM schema_migrations` (SQL backends) or
+`db.schema_migrations.find({})` (MongoDB).
 
-**Released forward migrations.** `002_api_gateway_plugins` (shipped in
-`v0.2.0`) adds the `api_gateway_plugins` table, which records the Edge plugin
-config id of each config the portal creates for an API (auth, `access_control`,
-`rate_limiting`, `cors`). Settings changes then only touch configs the portal
-owns. It copies no data:
+Never edit `schema_migrations` to get past the refusal: Nexus would then run
+against, or create tables over, a schema it was not written for. Do not point an
+older release at a database a newer one created either: releases before
+`v0.6.0` do not know the generation and would try to replay their migrations
+over it. Give Nexus a dedicated database; creating the schema in one that
+already holds unrelated tables or indexes with the same names is not supported.
 
-- An API published before the upgrade has no records. On its first
-  gateway-touching change, Nexus recognizes its configs by the values it wrote
-  and records them role by role. A role the API does not use is recorded as
-  owning nothing (`NULL` config id).
-- Configs of the same plugin name that the portal does not own are listed in the
-  audit row under `unowned_same_name_configs`.
-- If a proxy has two matching configs for one role, or an auth,
-  `access_control` or `cors` config that no longer matches the API's settings
-  and none that does, a `PATCH` touching that role answers `409 CONFLICT` naming
-  the plugin until the operator removes or fixes the config. Other fields keep
-  working.
-- A `rate_limiting` config an operator edited by hand is left alone; the portal
-  creates its own next to it.
-- A leftover auth config beside the portal's stays attached after an
-  `auth_plugin` change and is listed under `outgoing_auth_configs_remaining`.
+### Moving to a new release
 
-`005_notification_preferences` (shipped in `v0.3.0`) adds the
-`user_notification_preferences` table: one row per account that changed a
-notification preference, keyed by the account. It copies no data, so every
-existing account gets the defaults (the spec-change notice in-app, no email)
-until it changes one. On MongoDB
-the collection is keyed by `_id` and the step declares no index.
+When the release notes say the schema changed (until 1.0, check each release's
+notes), the new release needs a new, empty database:
 
-`004_api_spec_changes` (shipped in `v0.3.0`) adds the
-`api_spec_changes` table: one consumer-facing change summary per published
-revision, keyed by revision and by publication order, with no foreign key to
-`api_specs` so that it outlives retention. It copies no data. Revisions
-published before the upgrade have no summary, so each API's change history
-starts with its first revision after it.
+1. Read the release notes, including the Ferrum Edge release the new Nexus
+   release is validated against. While the old portal still runs, do the
+   preflight of every Edge release between the one you run and that one (for
+   Nexus `v0.5.2` on Edge v0.9.15 moving to Edge v0.9.20, step 1 of
+   [Upgrading to Edge v0.9.17](#upgrading-to-edge-v0917) and of
+   [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920), which fix saved
+   palette settings in the portal), and settle recovery journals (step 2 of
+   [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913)).
+2. Stop every Nexus instance, then **back up Nexus and Edge together**, as one
+   point in time, before changing anything on either side, and record their
+   secrets ([§5](#5-backup-and-restore)). This paired backup, taken while both
+   still run the previous qualified pair, is your only way back: the new release
+   cannot read the Nexus half, and steps 3 and 5 can change the Edge half.
+3. If the new release pairs with a newer Edge release, upgrade Edge now, the
+   control plane and every data plane together (the gateway upgrade step of
+   that release's section above).
+4. Create a new, empty database. For SQLite, delete (or move aside) the
+   database file and its `-wal` and `-shm` files. For PostgreSQL, MySQL or
+   MongoDB, drop and recreate the dedicated Nexus database, or point
+   `NEXUS_DB_URL` at a new one.
+5. Deal with what the old portal created in Edge. Proxies, consumers,
+   credentials and plugin configs in `FERRUM_NAMESPACE` stay in Edge, keep
+   serving their callers, and are unknown to the new database. Either:
+   - **remove them** from that namespace, which stops the old APIs and
+     credentials; or
+   - **leave them** and give the new portal its own namespace (and the gateway
+     access that requires, see [Namespace routability](#namespace-routability)).
+     The old proxies and credentials keep working until you remove them or
+     retire the data plane that serves the old namespace; nothing the new portal
+     does touches them. That includes its retired-key cleanup: before you
+     upgrade the gateway that serves the old namespace past Edge v0.9.20, edit
+     or remove its configs yourself (see
+     [palette keys the next Edge release removes](#palette-keys-the-next-edge-release-removes)).
+6. Start the new release. It creates the schema, and the next registration
+   becomes the founding `super_admin` (see
+   [first run and the bootstrap token](#first-run-and-the-bootstrap-token)).
+   Then re-create organizations, APIs and access.
 
-`006_user_identities` (shipped in `v0.3.0`) adds the single sign-on tables:
-`user_identities` (one row per linked provider subject, unique on provider,
-issuer and subject, and on account and provider), `user_email_proofs` (the
-recorded proof of an account's address) and `user_password_locks` (accounts
-that may not use a password). It only adds tables and copies no data, so an
-upgraded account has no linked identity, no recorded address proof and no
-password lock. See [§14](#14-single-sign-on-openid-connect) for what a missing
-proof means for linking.
-
-`007_outbox_recipient` (shipped in `v0.4.0`) adds a nullable `recipient_user_id`
-column to the outbox on SQL backends and backfills that field to `null` on
-retained MongoDB documents. Existing messages and delivery state are kept.
-New account mail names its original recipient; the sender refuses delivery
-when that account no longer holds the address. Address recovery cancels all
-pending messages to the old address, including unbound legacy rows, and refuses
-while any is sending. Upgrade every mail-producing instance before using it.
-
-`008_email_lifecycle_fence` (shipped in `v0.4.0`) adds an internal string fence to
-each account, initialized to the empty string on SQL and retained MongoDB
-documents. It preserves account IDs, addresses, history and delivery state.
-Every account-bound enqueue, claim and SMTP authorization writes a fresh fence
-in its transaction while the account still holds the intended address. This
-orders them with address release even when its cancellation scan found no mail,
-or the producer's transaction had already read the old address. A stale enqueue
-is retained as `failed` with `recipient-address-changed`, rather than made
-deliverable to a replacement account. The field is internal and absent from user
-responses. Upgrade all producers and senders before enabling address recovery;
-an older instance does not participate in this fence or SMTP cancellation.
-
-`009_outbox_priority` (shipped in `v0.4.0`) adds an integer priority on all four
-backends: low `0`, normal `1`, high `2`. Retained rows default to normal,
-including campaigns. The migration promotes only exact, case-sensitive
-`verify:` and `reset:` idempotency-key prefixes to high: these durable
-namespaces identify registration/resend verification and password recovery,
-even when the bodies are sealed. There is no stored template key, so messages
-without those keys remain normal rather than being classified from editable
-subjects or bodies. All statuses are retained, with no change to attempts,
-schedules, errors, timestamps, account bindings or claim generations.
-The existing `ix_email_outbox_due` remains; `ix_email_outbox_priority` adds
-`(status, priority DESC, next_attempt_at ASC, created_at ASC, id ASC)` claim
-ordering (`NULLS FIRST` on PostgreSQL and `_id` on MongoDB). Building the new
-index and backfilling a large outbox can delay startup and writes during the
-upgrade. Upgrade all producers and workers to get priority ordering throughout
-the deployment: older SQL writers use the normal default, older MongoDB writers
-omit the field, and older workers still claim by due time. The address recovery
-rollout and atomic-transaction requirements from 007/008 still apply.
-
-`010_api_agents` (shipped in `v0.4.0`) adds a nullable `agents_json` column to
-`apis` on SQL backends and backfills `agents: null` on retained MongoDB documents.
-`null` means agent exposure is off, so every retained API stays unexposed to agents
-until its provider turns exposure on. It changes no other API data.
-
-`011_mcp_tool_subsets` (shipped in `v0.4.0`) adds nullable `requested_tools_json`
-and `approved_tools_json` columns to `access_requests` and `approved_tools_json` to
-`grants` on SQL backends, and backfills the same fields to `null` on retained MongoDB
-documents. `null` keeps the meaning every retained request and grant had: all
-published tools. Before deploying it, stop and drain every older Nexus request
-handler and background writer: an older publisher can overwrite tool policy, and an
-older consumer-group rebuild does not understand subset membership. Do not roll back
-while explicit subset grants exist. See the
-[MCP subset rollout](mcp-subsets-migration-draft.md).
-
-`012_access_request_grant` (shipped in `v0.5.0`) adds a nullable `grant_id` column to
-`access_requests` on SQL backends and backfills `grant_id: null` on retained
-MongoDB documents. A set `grant_id` marks a request for more MCP tools on that
-existing grant; `null` keeps every retained request a request for access. The
-column has no foreign key: a grant row is only deleted with its API or
-application, which removes the request too. It changes no other data. Before
-deploying it, stop and drain every older Nexus request handler and background
-writer: an older instance does not read `grant_id`, so it would list and decide a
-request for more tools as a request for access.
-
-`013_account_recovery_jobs` (shipped in `v0.5.1`) adds the `account_recovery_jobs`
-table (a collection on MongoDB, with the same two indexes): at most one row per
-account, holding the credential revocation a trusted password reset owes until a
-worker lands it (see [session security](security.md#2-session-security)). On SQL
-backends its foreign key to `users` cascades on delete. It only adds an empty table and copies no data, so no
-retained account owes a revocation after the upgrade. Before deploying it, stop and
-drain every older Nexus request handler and background writer: an older instance
-neither writes the row when it completes a password reset nor checks it before
-issuing a credential, so it would skip the revocation or issue a credential while
-one is owed, and it runs no worker to drain the table.
-
-`014_mysql_text_capacity` (not yet released) changes only MySQL. It widens
-eight columns to `LONGTEXT`, keeping each column's nullability, default and
-collation:
-
-- `audit_logs.details_json` and `apis.description`, from `TEXT`;
-- `api_specs.parsed_title`, from `VARCHAR(255)`;
-- `api_specs.parsed_version`, `api_specs.version`, `apis.version`,
-  `api_spec_changes.version` and `api_spec_changes.previous_version`, from
-  `VARCHAR(64)`.
-
-Those columns were narrower than what the API accepts. An MCP agents update can
-audit 256 tool descriptions of 2,048 characters each. An OpenAPI document's
-`info.title`, `info.version` and `info.description` have no length limit of
-their own, and `info.version` and `info.description` become the API's version
-and description when the request names none. Strict-mode MySQL refused such writes, and non-strict mode truncated them.
-Retained values are unchanged. It also adds the
-`ck_apis_circuit_breaker CHECK (circuit_breaker IN (0, 1))` constraint that the
-SQLite and PostgreSQL baselines declare and the MySQL baseline omitted; retained
-rows already hold 0 or 1. On SQLite, PostgreSQL and MongoDB the migration
-is recorded and does nothing. `MODIFY COLUMN` rebuilds each table on MySQL, so
-plan for the copy time and disk space on a large `audit_logs` table. The runner
-skips a column that is already `LONGTEXT` on a replay, and refuses one whose
-type, nullability, default, generation or collation it does not expect. It
-likewise skips the CHECK when it already exists, and refuses a constraint of that
-name with another condition or on another table, or one that is not enforced.
-
-`015_access_gateway_jobs` (not yet released) adds the `access_gateway_jobs`
-table (a collection on MongoDB, with the same two indexes): at most one row per
-grant or access request, holding the gateway work a targeted revocation or an
-approval owes until it lands (see
-[access gateway jobs](#access-gateway-jobs)). On SQL backends its foreign keys
-to `users` cascade (`user_id`) and set null (`requested_by`) on delete. The
-migration itself copies no data, but a database an earlier release wrote may
-already hold decisions whose gateway half never ran, and an empty table does
-not mean nothing is owed. So the first start after it queues the
-[stranded-decision repair](#repairing-decisions-stranded-before-015) in the
-background. Before deploying it, stop and drain every older
-Nexus request handler and background writer: an older instance neither writes
-the row when it claims a revocation or an approval nor deletes it when the
-decision settles, and it runs no worker to drain the table.
-
-`003_messages_thread_latest` (shipped in `v0.2.0`) replaces the messages index
-`ix_messages_thread (thread_id, created_at)` with `ix_messages_thread_latest`,
-which adds the message id (`_id` descending on MongoDB), so finding each
-thread's newest message is one index seek per thread. It changes no data. On
-MySQL it is a no-op, because InnoDB already appends the primary key to the
-existing index. On MongoDB the step also drops `ix_messages_thread`. On a
-large `messages` table, building the index can take a while at startup, and on
-PostgreSQL and SQLite the build blocks writes to `messages` until it finishes,
-so during a rolling deploy message sends stall briefly while the new instance
-migrates.
-
-**CI enforces this.** `server/src/db/released-migrations.test.ts` fails when a
-released migration's file or MongoDB snapshot no longer matches its checksum,
-when a released migration is deleted or renamed, when a new migration sorts
-before a released one, when backends disagree on ids, or when a released MongoDB
-step's indexes drift. Never update a released checksum to make it pass.
-
-**Upgrade coverage.** `server/src/test/baseline-upgrade.test.ts` builds a
-database as each release in the manifest left it (`v0.1.0`, `v0.2.0`, `v0.3.0`,
-`v0.4.0`, `v0.5.0`, then `v0.5.1`; every release is a supported upgrade source, and a
-`v0.5.2` database is a `v0.5.1` one), seeds it with
-baseline-shaped rows, migrates with the current code, reads every value back,
-and migrates again to prove the re-run is a no-op. SQLite runs in every CI job;
-PostgreSQL, MySQL and MongoDB run in the `store-contracts` job. Per backend:
-
-- **SQLite, PostgreSQL:** each migration and its ledger row commit in one
-  transaction. A failed migration leaves no trace; earlier ones stay applied.
-- **MySQL:** DDL commits statement by statement. The runner accepts replayable
-  `CREATE TABLE IF NOT EXISTS` statements, additive `VARCHAR` columns that
-  are nullable or have an empty-string default, and `INT` columns with a
-  nonnegative default. It checks live column type, nullability, default,
-  collation and generated-column metadata before replaying an ALTER. Added
-  indexes are checked for columns/order, direction, uniqueness, prefixes,
-  visibility and type, and an added `CHECK (<column> IN (0, 1))` for its table,
-  condition and enforcement. A mismatched existing definition stops the upgrade
-  without recording that step. The exact 009 security-priority assignment is
-  idempotent and may replay; arbitrary data changes are still refused.
-  An advisory lock serializes metadata checks, DDL and ledger writes across
-  instances ([details](#retrying-interrupted-mysql-initialization)). Other ALTERs
-  or data changes need a replay-safe strategy before the runner accepts them.
-- **MongoDB:** a replica set is required. A step is recorded only after it
-  completes, so every step must be idempotent. The CI guard freezes a step's
-  declared indexes, not document-transforming code; review such steps by hand.
-  Standalone mode (`NEXUS_DB_ALLOW_STANDALONE=true`) has no upgrade guarantee.
-
-**Downgrades are not supported.** An older binary does not refuse a newer
-database; it ignores unknown ledger ids and runs against a schema it was not
-written for. Roll back by restoring the pre-upgrade backup.
-
-#### Production upgrade procedure
-
-1. Read the release notes: supported upgrade sources and the validated Ferrum
-   Edge release.
-2. Back up the Nexus database and record its secrets ([§5](#5-backup-and-restore)).
-   This backup is your rollback.
-3. Stop every Nexus instance.
-4. Run the migration once from the **new** image with the production environment
-   (and, for SQLite, the same data volume):
-
-   ```bash
-   docker run --rm --env-file nexus.env <new-image> node server/dist/db/migrate-cli.js
-   ```
-
-   It prints `Migrations applied (driver: …).` and exits `0`, or exits non-zero.
-   Re-running it is safe.
-
-5. Start the new release on every instance.
-6. Verify: `GET /api/health` is `ok`, `schema_migrations` lists the release's
-   ids, an administrator can sign in, and a known client can call an API through
-   the gateway (see [Verifying a restore](#verifying-a-restore)).
-
-#### Upgrade failures and rollback
-
-A failed migration exits non-zero, names the migration, and leaves earlier
-migrations applied.
-
-- **SQLite, PostgreSQL:** the failed migration was rolled back. Fix the cause
-  and re-run step 4.
-- **MySQL:** some statements may have committed. Re-run only if the migration
-  is replay-safe; otherwise restore the backup.
-- **MongoDB:** re-run; steps are idempotent.
-- **A failure that repeats** is a release defect. Restore the backup, redeploy
-  the previous release, and report it.
-
-Never edit `schema_migrations` to get past a failure. Rolling back is a
-restore, with the [limits in §5](#recovery-and-rollback-limits).
-
-### Buildout schema policy
-
-**Development only.** This destroys data and never applies to a database a
-supported release created; for those, see
-[Schema versioning and upgrades](#schema-versioning-and-upgrades).
-
-Before `v0.1.0`, the `001_initial` baselines were edited in place (they replaced
-an earlier 001–017 history). A development database created before `v0.1.0`
-must be recreated, even if its ledger already lists `001_initial`:
-
-1. Stop all Nexus instances.
-2. For SQLite, delete the database file and its `-wal` and `-shm` files. For
-   PostgreSQL, MySQL or MongoDB, drop and recreate only the dedicated
-   development database.
-3. Run the migration (or start Nexus) and register the first administrator
-   again.
-
-Never delete only `schema_migrations`: replaying `CREATE TABLE IF NOT EXISTS`
-does not update an existing table. Nexus never resets a database by itself.
+To roll back, stop the new release and restore the previous qualified pair from
+the paired backup: the Edge snapshot into the Edge release it came from, and
+the Nexus database into an empty database for the previous Nexus release, with
+the same secrets. Only when step 3 did not change the Edge release and step 5
+only added a namespace (the old namespace and its resources are intact) is
+restoring the Nexus database alone enough; then remove the new namespace's
+resources.
 
 ### Initializing the schema
 
-To run migrations as a separate step:
+The server creates the schema at startup. To create it as a separate step:
 
 ```bash
 npm run migrate                      # from a checkout, at the repo root
@@ -1782,11 +1582,16 @@ docker exec <container> node server/dist/db/migrate-cli.js
 docker run --rm --env-file .env <image> node server/dist/db/migrate-cli.js
 ```
 
-The CLI loads the same environment, applies pending migrations, prints
-`Migrations applied (driver: postgres).` and exits non-zero on failure.
+The CLI loads the same environment. It creates the base schema in an empty
+database, or confirms an existing one is at it. It then prints
+`Schema ready (driver: postgres).` and exits `0`. Against a database whose
+ledger holds anything but this build's base schema generation (a pre-0.6
+migration chain or another generation), it prints the refusal above and exits
+non-zero. It
+never upgrades. The name `migrate` is kept for existing scripts.
 
-`npm run build --workspace server` copies `server/src/db/migrations/` to
-`server/dist/db/migrations/`, replacing stale files. The loader finds them
+`npm run build --workspace server` copies `server/src/db/schema/` to
+`server/dist/db/schema/`, replacing stale files. The loader finds them
 relative to its own module, not the working directory.
 
 ### SQLite
@@ -1833,17 +1638,14 @@ NEXUS_DB_URL=mysql://nexus:secret@db.internal:3306/nexus
 
 ### Retrying interrupted MySQL initialization
 
-MySQL DDL commits outside the migration ledger. Released migrations use
-`CREATE TABLE IF NOT EXISTS` with indexes and constraints inline. Released
-`007` and `008` add string columns: the runner checks `information_schema.COLUMNS`
-and skips only an exact matching definition after an interrupted ALTER (later
-replay cases for `009` and `014` are covered under
-[Schema versioning and upgrades](#schema-versioning-and-upgrades)).
-Re-running finishes an interrupted initialization or upgrade without replacing
-tables or changing retained rows. A database-scoped advisory lock
-(`GET_LOCK`) serializes migrators across instances, and a migration is recorded
-only after all its steps succeed. The runner refuses unsupported statements
-([Schema versioning and upgrades](#schema-versioning-and-upgrades)).
+MySQL DDL commits on its own, outside the schema ledger, so the base schema
+cannot be created in one transaction. Every statement in `base.mysql.sql` is a
+`CREATE TABLE IF NOT EXISTS` with its indexes and constraints inline, and
+Nexus refuses the file before running any of it if one is not. The ledger
+entry is written only after every table exists, so a start that stops part-way
+leaves the ledger empty and the next start replays the file: tables that
+already exist are skipped, with their rows. A database-scoped advisory lock
+(`GET_LOCK`) serializes schema creation across instances.
 
 ### MongoDB
 
@@ -1886,9 +1688,11 @@ transactions run their steps in order but without atomic commit, so a failure
 part-way (for example during an approval) leaves partial writes. Do not use it
 in production.
 
-Indexes are created by `migrate()` and tracked in `schema_migrations` like the
-SQL backends. Each `MONGO_MIGRATIONS` step declares its indexes, and released
-steps are frozen by snapshots in `server/src/db/released/`.
+Indexes are created by `migrate()` from `BASE_INDEXES` and the generation is
+recorded in `schema_migrations` like the SQL backends'. Collections are created
+by their first insert. `createIndex` is a no-op for an existing identical
+index, so a start interrupted before the ledger write finishes on the next
+start.
 
 ### Transactions and contention retries
 
@@ -2210,11 +2014,11 @@ rotated in that window ([§12](#12-the-credential-mirror)).
 
 ### Compatible versions
 
-- **Nexus:** restore into the **same** Nexus release that wrote the backup,
-  confirm it works, then upgrade with the
-  [production upgrade procedure](#production-upgrade-procedure). Never restore
-  into an older release. Pre-`v0.1.0` development databases cannot be restored
-  into a release.
+- **Nexus:** restore into the **same** Nexus release that wrote the backup.
+  Before 1.0 a release refuses a database created by a release with a different
+  base schema, so a backup cannot be carried forward
+  ([schema and upgrades before 1.0](#schema-and-upgrades-before-10)). Never
+  restore into an older release.
 - **Ferrum Edge:** restore into the Edge release that wrote it, or one Edge
   documents as compatible. Nexus is validated against the release pinned in
   `release/compatibility.env`.
@@ -2243,7 +2047,7 @@ It is the only way to keep issued credentials working.
 4. Start the **same** Nexus release with the same `NEXUS_SECRET_KEY`,
    `FERRUM_ADMIN_JWT_SECRET`, `FERRUM_ADMIN_JWT_ISSUER` and `FERRUM_NAMESPACE`,
    and `FERRUM_ADMIN_URL` pointing at the restored gateway. The startup
-   migration should do nothing.
+   schema check should find the schema current and do nothing.
 5. [Verify](#verifying-a-restore) before reopening the portal.
 
 **Without an Edge backup**, credentials cannot be recovered: Nexus stores only a
@@ -2376,12 +2180,17 @@ bodies. The key is derived from `NEXUS_SECRET_KEY` (HKDF info
 The worker opens it immediately before handing the message to SMTP. Other mail
 (access decisions, messaging notifications, mass email) is stored as rendered.
 
-After an upgrade, the worker seals rows queued by an earlier version in place,
-in every status, up to 200 per tick, and stops looking once none are left. It
-logs `Sealed legacy outbox messages` with a `sealed` count while it does. An
-earlier version cannot open a sealed row. If a pre-fix instance claims one, it
-emails ciphertext and burns the link. Before downgrading, fail every queued
-sealed row so an older worker cannot claim it:
+Rows queued unsealed by an earlier version are sealed in place by the worker,
+in every status, up to 200 per tick, and it stops looking once none are left.
+It logs `Sealed legacy outbox messages` with a `sealed` count while it does.
+Since `v0.6.0` a database an earlier release created is refused rather than
+upgraded ([schema and upgrades before 1.0](#schema-and-upgrades-before-10)),
+so on a database created at the base schema there is nothing to seal, and
+downgrading means restoring a backup. The rest of this paragraph applies only
+to an older deployment that still runs a pre-sealing instance beside a sealing
+one. An earlier version cannot open a sealed row. If a pre-fix instance claims
+one, it emails ciphertext and burns the link. Before downgrading such a
+deployment, fail every queued sealed row so an older worker cannot claim it:
 
 ```sql
 UPDATE email_outbox
@@ -3338,10 +3147,13 @@ worker finishes its removal.
 #### Repairing decisions stranded before 015
 
 Releases before `015_access_gateway_jobs` kept no record of a decision's
-gateway half, so an upgraded database may hold a revoked grant whose ACL group
+gateway half, so a database they wrote may hold a revoked grant whose ACL group
 is still on its consumer, or an approved request that no grant was ever made
-from. The first start after the migration (any instance, under a lease) scans
-for both, a page at a time, and queues ordinary jobs for the worker:
+from. Since `v0.6.0` such a database is refused rather than upgraded
+([schema and upgrades before 1.0](#schema-and-upgrades-before-10)), so on a
+database created at the base schema this scan finds nothing; it still runs
+once. The first start (any instance, under a lease) scans for both, a page at
+a time, and queues ordinary jobs for the worker:
 
 - one `revoke` job per identity and API that has a revoked grant, no active
   grant and a consumer. The worker reads the consumer and takes the API's
@@ -3567,8 +3379,11 @@ SELECT ferrum_consumer_id, COUNT(*) AS unconfirmed
   GROUP BY ferrum_consumer_id;
 ```
 
-**Upgrading from `v0.2.0` or earlier.** On the first start after the upgrade,
-Nexus scans the audit log for `credential.append_rollback` rows with
+**Databases written by `v0.2.0` or earlier.** Since `v0.6.0` such a database
+is refused rather than upgraded
+([schema and upgrades before 1.0](#schema-and-upgrades-before-10)), so on a
+database created at the base schema this scan finds nothing. On its first
+start Nexus scans the audit log for `credential.append_rollback` rows with
 `credential_type: "basicauth"` and `withdrawn: false` that no live row
 accounts for: those without `stranded_credential_id` (what earlier releases
 wrote for a lost acknowledgement or a failed row write) and those whose

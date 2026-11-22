@@ -2318,8 +2318,8 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     await onGatewayVolume('rm -rf /data/* /data/.[!.]*');
 
     // The restore: both stores back from the same backup, then Edge before
-    // Nexus, with every secret unchanged. Nexus migrates the restored database
-    // on boot, which must be a no-op.
+    // Nexus, with every secret unchanged. Nexus checks the restored database's
+    // schema on boot, which must find it current and change nothing.
     await inPostgres('pg_restore', '-U', 'nexus', '-d', 'nexus', '--exit-on-error', dump);
     await onGatewayVolume('cp -a /backup/edge/. /data/ && chown -R 65532:65532 /data');
     await compose('start', 'ferrum-edge');

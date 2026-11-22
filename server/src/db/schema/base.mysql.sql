@@ -1,8 +1,13 @@
--- Ferrum Nexus initial schema — MySQL 8 dialect.
+-- Ferrum Nexus base schema — MySQL 8 dialect.
 --
--- Buildout baseline: edit this schema directly; recreate development databases.
+-- Until Ferrum Nexus 1.0 this file is the whole schema: there are no
+-- migrations and no upgrade path between releases. Change the schema by
+-- editing this file (and its other dialect variants) directly, and bump
+-- BASE_SCHEMA_ID in server/src/db/schema.ts in the same change. A database
+-- created at an earlier generation is refused at startup, never migrated, and
+-- must be recreated (docs/operations.md, "Schema and upgrades before 1.0").
 --
--- Mirrors 001_initial.sql table for table, column for column and index for
+-- Mirrors base.sql table for table, column for column and index for
 -- index. The conventions are identical to the SQLite variant:
 --   * every id is a string UUID (VARCHAR(64), never a native UUID/BINARY type);
 --   * every timestamp is an ISO-8601 string in a VARCHAR column — deliberately
@@ -46,7 +51,7 @@
 --
 -- MySQL does not support `CREATE INDEX IF NOT EXISTS`, so every index is
 -- declared inline in its `CREATE TABLE IF NOT EXISTS` statement — which keeps
--- the whole migration idempotent. The declared index set matches the SQLite
+-- the whole schema replayable. The declared index set matches the SQLite
 -- one exactly; InnoDB additionally auto-creates a helper index for any foreign
 -- key column not already covered, which is a storage-engine requirement rather
 -- than a schema difference.
@@ -77,6 +82,7 @@ CREATE TABLE IF NOT EXISTS users (
   last_login_at  VARCHAR(32)  DEFAULT NULL,
   created_at     VARCHAR(32)  NOT NULL,
   updated_at     VARCHAR(32)  NOT NULL,
+  email_lifecycle_fence VARCHAR(36) NOT NULL DEFAULT '',
   PRIMARY KEY (id),
   -- Email uniqueness is case-insensitive; the adapter also lowercases on write.
   UNIQUE KEY ux_users_email ((lower(email))),
@@ -118,11 +124,11 @@ CREATE TABLE IF NOT EXISTS apis (
   spec_enforcement     VARCHAR(32) NOT NULL DEFAULT 'docs_only',
   name                 VARCHAR(255) NOT NULL,
   slug                 VARCHAR(255) NOT NULL,
-  description          TEXT,
+  description          LONGTEXT     DEFAULT NULL,
   owner_user_id        VARCHAR(64)  NOT NULL,
   ferrum_proxy_id      VARCHAR(128) DEFAULT NULL,
   namespace            VARCHAR(128) NOT NULL,
-  version              VARCHAR(64)  NOT NULL,
+  version              LONGTEXT     NOT NULL,
   spec_format          VARCHAR(32)  NOT NULL DEFAULT 'openapi',
   requestable          TINYINT      NOT NULL DEFAULT 0,
   auth_plugin          VARCHAR(32)  NOT NULL,
@@ -132,6 +138,7 @@ CREATE TABLE IF NOT EXISTS apis (
   gateway_state        VARCHAR(32)  NOT NULL DEFAULT 'deployed',
   created_at           VARCHAR(32)  NOT NULL,
   updated_at           VARCHAR(32)  NOT NULL,
+  agents_json          LONGTEXT DEFAULT NULL,
   CONSTRAINT ck_apis_spec_enforcement CHECK (spec_enforcement IN ('docs_only', 'routes')),
   PRIMARY KEY (id),
   UNIQUE KEY ux_apis_slug ((lower(slug))),
@@ -142,6 +149,7 @@ CREATE TABLE IF NOT EXISTS apis (
   KEY ix_apis_status_visibility (status, visibility),
   KEY ix_apis_created_at (created_at),
   KEY ix_apis_gateway_state (namespace, gateway_state),
+  CONSTRAINT ck_apis_circuit_breaker CHECK (circuit_breaker IN (0, 1)),
   CONSTRAINT ck_apis_spec_format CHECK (spec_format IN ('openapi')),
   CONSTRAINT ck_apis_requestable CHECK (requestable IN (0, 1)),
   CONSTRAINT ck_apis_auth_plugin CHECK (auth_plugin IN ('key_auth', 'basic_auth', 'jwt_auth')),
@@ -195,10 +203,10 @@ CREATE TABLE IF NOT EXISTS api_viewers (
 CREATE TABLE IF NOT EXISTS api_specs (
   id             VARCHAR(64)  NOT NULL,
   api_id         VARCHAR(64)  NOT NULL,
-  version        VARCHAR(64)  NOT NULL,
+  version        LONGTEXT     NOT NULL,
   raw_spec       LONGTEXT     NOT NULL,
-  parsed_title   VARCHAR(255) DEFAULT NULL,
-  parsed_version VARCHAR(64)  DEFAULT NULL,
+  parsed_title   LONGTEXT     DEFAULT NULL,
+  parsed_version LONGTEXT     DEFAULT NULL,
   is_current     TINYINT      NOT NULL DEFAULT 0,
   revision_seq   INT          NOT NULL,
   created_by     VARCHAR(64)  DEFAULT NULL,
@@ -238,6 +246,9 @@ CREATE TABLE IF NOT EXISTS access_requests (
   decision_note TEXT,
   created_at    VARCHAR(32) NOT NULL,
   updated_at    VARCHAR(32) NOT NULL,
+  requested_tools_json LONGTEXT DEFAULT NULL,
+  approved_tools_json  LONGTEXT DEFAULT NULL,
+  grant_id      VARCHAR(64) NULL,
   -- One open request per API and identity; emulates SQLite's
   -- `... (api_id, user_id, COALESCE(application_id, '')) WHERE status = 'pending'`.
   -- `COALESCE` rather than the bare column for the same reason SQLite needs
@@ -279,6 +290,7 @@ CREATE TABLE IF NOT EXISTS grants (
   revoked_at        VARCHAR(32)  DEFAULT NULL,
   created_at        VARCHAR(32)  NOT NULL,
   updated_at        VARCHAR(32)  NOT NULL,
+  approved_tools_json LONGTEXT DEFAULT NULL,
   -- At most one active grant per API and identity; emulates SQLite's
   -- `... (api_id, user_id, COALESCE(application_id, '')) WHERE status = 'active'`.
   active_key        VARCHAR(240)
@@ -395,6 +407,9 @@ CREATE TABLE IF NOT EXISTS messages (
   CONSTRAINT ck_messages_broadcast CHECK (broadcast IN (0, 1)),
   KEY ix_messages_sender (sender_user_id, created_at),
   PRIMARY KEY (id),
+  -- InnoDB appends the primary key to every secondary index, so this is
+  -- (thread_id, created_at, id): the newest-message lookup's `id` tie-break
+  -- is served by the index, as `ix_messages_thread_latest` does elsewhere.
   KEY ix_messages_thread (thread_id, created_at),
   CONSTRAINT fk_messages_thread
     FOREIGN KEY (thread_id) REFERENCES message_threads (id) ON DELETE CASCADE,
@@ -437,11 +452,15 @@ CREATE TABLE IF NOT EXISTS email_outbox (
   idempotency_key VARCHAR(255) DEFAULT NULL,
   created_at      VARCHAR(32)  NOT NULL,
   updated_at      VARCHAR(32)  NOT NULL,
+  recipient_user_id VARCHAR(36) NULL,
+  priority        INT NOT NULL DEFAULT 1,
   PRIMARY KEY (id),
   -- At-most-once semantics for keyed sends; NULLs are exempt, exactly like
   -- SQLite's `WHERE idempotency_key IS NOT NULL` partial unique index.
   UNIQUE KEY ux_email_outbox_idempotency (idempotency_key),
   KEY ix_email_outbox_due (status, next_attempt_at),
+  -- Claim order; ix_email_outbox_due stays for due-time filtering.
+  KEY ix_email_outbox_priority (status, priority DESC, next_attempt_at, created_at, id),
   CONSTRAINT ck_email_outbox_status CHECK (status IN ('pending', 'sending', 'sent', 'failed'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
@@ -453,7 +472,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   action        VARCHAR(128) NOT NULL,
   target_type   VARCHAR(64)  NOT NULL,
   target_id     VARCHAR(128) DEFAULT NULL,
-  details_json  TEXT         NOT NULL DEFAULT ('{}'),
+  details_json  LONGTEXT     NOT NULL DEFAULT ('{}'),
   ip            VARCHAR(64)  DEFAULT NULL,
   created_at    VARCHAR(32)  NOT NULL,
   PRIMARY KEY (id),
@@ -579,4 +598,194 @@ CREATE TABLE IF NOT EXISTS gateway_identities (
   UNIQUE KEY ux_gateway_identities_username (namespace, ferrum_username),
   KEY ix_gateway_identities_user (user_id, namespace),
   CONSTRAINT fk_gateway_identities_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── API gateway plugins (first-class plugin ownership) ─────────────────────
+--
+-- The Edge plugin config id Nexus created for each of an API's first-class
+-- plugins: the auth plugin, the `access_control` gate, the `rate_limiting`
+-- quota and the `cors` policy. Edge lets a proxy carry several configs of one
+-- plugin name, so the portal addresses these by recorded id rather than by
+-- name, exactly as `api_plugins.ferrum_plugin_config_id` does for the palette.
+-- Every published API has one row per role, with a NULL config id where the
+-- portal owns no config in that role.
+CREATE TABLE IF NOT EXISTS api_gateway_plugins (
+  api_id                  VARCHAR(64) NOT NULL,
+  role                    VARCHAR(32) NOT NULL,
+  ferrum_plugin_config_id VARCHAR(254) NULL,
+  created_at              VARCHAR(32) NOT NULL,
+  updated_at              VARCHAR(32) NOT NULL,
+  PRIMARY KEY (api_id, role),
+  CONSTRAINT ck_api_gateway_plugins_role
+    CHECK (role IN ('auth', 'access_control', 'rate_limit', 'cors')),
+  CONSTRAINT fk_api_gateway_plugins_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── API specification changes ──────────────────────────────────────────────
+--
+-- One row per revision that replaced another (an upload or a rollback), holding
+-- the consumer-facing comparison of the two documents as JSON. It is kept
+-- apart from `api_specs` so that it outlives the documents
+-- `NEXUS_SPEC_HISTORY_LIMIT` prunes, which is why `spec_id` and
+-- `previous_spec_id` are plain references rather than foreign keys. Retention
+-- is bounded separately, by `SPEC_CHANGE_HISTORY_LIMIT` rows per API.
+CREATE TABLE IF NOT EXISTS api_spec_changes (
+  id               VARCHAR(64) NOT NULL,
+  api_id           VARCHAR(64) NOT NULL,
+  spec_id          VARCHAR(64) NOT NULL,
+  previous_spec_id VARCHAR(64) NULL,
+  kind             VARCHAR(16) NOT NULL,
+  version          LONGTEXT    NOT NULL,
+  previous_version LONGTEXT    DEFAULT NULL,
+  revision_seq     INT         NOT NULL,
+  report_json      LONGTEXT    NOT NULL,
+  created_at       VARCHAR(32) NOT NULL,
+  updated_at       VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_api_spec_changes_spec (spec_id),
+  UNIQUE KEY ux_api_spec_changes_seq (api_id, revision_seq),
+  CONSTRAINT ck_api_spec_changes_kind CHECK (kind IN ('update', 'rollback')),
+  CONSTRAINT fk_api_spec_changes_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Notification preferences ───────────────────────────────────────────────
+--
+-- One row per account that has changed a preference; an account without one
+-- gets each notice's default, which is what each column defaults to. The first
+-- preferences are the spec-change notice's two channels (issue #447): in-app,
+-- on by default, and email, off until the account turns it on.
+CREATE TABLE IF NOT EXISTS user_notification_preferences (
+  user_id                 VARCHAR(64) NOT NULL,
+  api_spec_updated_in_app TINYINT     NOT NULL DEFAULT 1,
+  api_spec_updated_email  TINYINT     NOT NULL DEFAULT 0,
+  created_at              VARCHAR(32) NOT NULL,
+  updated_at              VARCHAR(32) NOT NULL,
+  PRIMARY KEY (user_id),
+  CONSTRAINT ck_user_notification_preferences_in_app CHECK (api_spec_updated_in_app IN (0, 1)),
+  CONSTRAINT ck_user_notification_preferences_email CHECK (api_spec_updated_email IN (0, 1)),
+  CONSTRAINT fk_user_notification_preferences_user
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Identity-provider links, address proofs and password locks ────────────
+--
+-- `user_identities`: one row per portal account linked to one subject (`sub`)
+-- at one OpenID Connect provider. A returning single sign-on is matched on
+-- `(provider_id, issuer, subject)`, never on the email address, so the first
+-- unique key is what decides whose account a sign-in opens — and a provider
+-- id reused for another issuer matches none of the old links. The second keeps
+-- an account to one identity per provider. `provisioned` marks the identity
+-- that created the account, which then has no local password to fall back on.
+--
+-- `user_email_proofs`: evidence that an account's holder controls its address
+-- — a redeemed verification link, a completed password reset, or a provider
+-- that asserted the address verified. `users.email_verified` alone is not
+-- evidence: with verification off a registration is marked verified without
+-- any. Only a proof for the account's current address allows single sign-on
+-- to link to it.
+--
+-- `user_password_locks`: accounts that may never use a local password, because
+-- an identity provider created them. Kept apart from the links on purpose:
+-- removing the provider or unlinking the identity must not hand the account a
+-- password (through a reset) that outlives the provider's offboarding.
+CREATE TABLE IF NOT EXISTS user_identities (
+  id            VARCHAR(64)  NOT NULL,
+  user_id       VARCHAR(64)  NOT NULL,
+  provider_id   VARCHAR(64)  NOT NULL,
+  issuer        VARCHAR(255) NOT NULL,
+  subject       VARCHAR(255) NOT NULL,
+  email         VARCHAR(320) DEFAULT NULL,
+  provisioned   TINYINT      NOT NULL DEFAULT 0,
+  last_login_at VARCHAR(32)  DEFAULT NULL,
+  created_at    VARCHAR(32)  NOT NULL,
+  updated_at    VARCHAR(32)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_user_identities_subject (provider_id, issuer, subject),
+  UNIQUE KEY ux_user_identities_user_provider (user_id, provider_id),
+  CONSTRAINT ck_user_identities_provisioned CHECK (provisioned IN (0, 1)),
+  CONSTRAINT fk_user_identities_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS user_email_proofs (
+  user_id    VARCHAR(64)  NOT NULL,
+  email      VARCHAR(320) NOT NULL,
+  method     VARCHAR(32)  NOT NULL,
+  proven_at  VARCHAR(32)  NOT NULL,
+  created_at VARCHAR(32)  NOT NULL,
+  updated_at VARCHAR(32)  NOT NULL,
+  PRIMARY KEY (user_id),
+  CONSTRAINT ck_user_email_proofs_method
+    CHECK (method IN ('verification_link', 'password_reset', 'identity_provider')),
+  CONSTRAINT fk_user_email_proofs_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS user_password_locks (
+  user_id     VARCHAR(64) NOT NULL,
+  provider_id VARCHAR(64) NOT NULL,
+  created_at  VARCHAR(32) NOT NULL,
+  PRIMARY KEY (user_id),
+  CONSTRAINT fk_user_password_locks_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Account recovery jobs ──────────────────────────────────────────────────
+--
+-- The credential revocation a trusted password reset owes, made durable.
+-- The row is written in the same transaction as the reset, so a reset can
+-- never commit without its revocation; a worker drains it with retry until it
+-- succeeds, and credential issuance is refused while a row is outstanding.
+-- unblocked_at records when a job that kept failing stopped refusing
+-- issuance; its eventual success revokes only credentials created before it.
+CREATE TABLE IF NOT EXISTS account_recovery_jobs (
+  id              VARCHAR(64) NOT NULL,
+  generation      VARCHAR(64) NOT NULL DEFAULT '',
+  user_id         VARCHAR(64) NOT NULL,
+  status          VARCHAR(16) NOT NULL DEFAULT 'pending',
+  attempts        INT         NOT NULL DEFAULT 0,
+  next_attempt_at VARCHAR(32) DEFAULT NULL,
+  last_error      TEXT,
+  unblocked_at    VARCHAR(32) DEFAULT NULL,
+  created_at      VARCHAR(32) NOT NULL,
+  updated_at      VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_account_recovery_jobs_user (user_id),
+  KEY ix_account_recovery_jobs_due (status, next_attempt_at),
+  CONSTRAINT ck_account_recovery_jobs_status CHECK (status IN ('pending', 'sending')),
+  CONSTRAINT fk_account_recovery_jobs_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Access gateway jobs ────────────────────────────────────────────────────
+--
+-- The gateway half of a targeted grant revocation or an access approval, made
+-- durable (issue #651). The row is written in the transaction that claims the
+-- decision: a grant moving active to revoked (kind 'revoke'), or a request
+-- moving pending to approved (kind 'approve'). It is deleted once the Edge ACL
+-- write it owes has landed, or, for an approval, in the transaction that
+-- commits the grant. A row a crash or a failed compensation leaves behind is
+-- driven to completion by the access gateway worker: a revocation's group
+-- comes off, and an approval whose grant never committed has its groups taken
+-- back and its request returned to pending.
+-- subject_id is the grant (revoke) or the access request (approve); both are
+-- UUIDs, so one unique key covers both kinds.
+CREATE TABLE IF NOT EXISTS access_gateway_jobs (
+  id              VARCHAR(64) NOT NULL,
+  generation      VARCHAR(64) NOT NULL DEFAULT '',
+  kind            VARCHAR(16) NOT NULL,
+  subject_id      VARCHAR(64) NOT NULL,
+  api_id          VARCHAR(64) NOT NULL,
+  user_id         VARCHAR(64) NOT NULL,
+  application_id  VARCHAR(64) DEFAULT NULL,
+  requested_by    VARCHAR(64) DEFAULT NULL,
+  status          VARCHAR(16) NOT NULL DEFAULT 'pending',
+  attempts        INT         NOT NULL DEFAULT 0,
+  next_attempt_at VARCHAR(32) DEFAULT NULL,
+  last_error      TEXT,
+  created_at      VARCHAR(32) NOT NULL,
+  updated_at      VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_access_gateway_jobs_subject (subject_id),
+  KEY ix_access_gateway_jobs_due (status, next_attempt_at),
+  CONSTRAINT ck_access_gateway_jobs_kind CHECK (kind IN ('revoke', 'approve')),
+  CONSTRAINT ck_access_gateway_jobs_status CHECK (status IN ('pending', 'sending')),
+  CONSTRAINT fk_access_gateway_jobs_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_access_gateway_jobs_requested_by FOREIGN KEY (requested_by) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

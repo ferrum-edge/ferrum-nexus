@@ -8,10 +8,10 @@
  * - an {@link SqlExecutor} that runs statements through
  *   {@link formatSql} (`?` → `$1 … $n`) and reports `rowCount` as the affected
  *   row count;
- * - the migration runner, applying the `.pg.sql` files and recording them in
- *   `schema_migrations` under the same protocol as the sqlite adapter —
- *   PostgreSQL has transactional DDL, so each migration's statements and its
- *   bookkeeping row commit or roll back together;
+ * - the base schema primitives, creating `schema/base.pg.sql` and recording
+ *   it in `schema_migrations` under the same protocol as the sqlite adapter —
+ *   PostgreSQL has transactional DDL, so the schema's statements and its
+ *   ledger row commit or roll back together;
  * - `transaction()`, which is a real `BEGIN`/`COMMIT`/`ROLLBACK` on a
  *   dedicated client checked out of the pool for the duration of the body.
  *   Nested `transaction()` calls join the outer one, and bodies are serialised,
@@ -29,13 +29,13 @@ import type { DbDriver } from '@ferrum-nexus/shared';
 import type { NexusConfig } from '../../../config/index.js';
 import { nowIso } from '../../../lib/ids.js';
 import {
-  loadMigrations,
-  runMigrations,
-  SCHEMA_MIGRATIONS_TABLE,
+  ensureBaseSchema,
+  loadBaseSchema,
+  SCHEMA_LEDGER_TABLE,
   splitSqlStatements,
-  type MigrationDriver,
-  type MigrationFile,
-} from '../../migrate.js';
+  type BaseSchema,
+  type SchemaDriver,
+} from '../../schema.js';
 import type { NexusStore, StoreHealth } from '../../store.js';
 import { formatSql, type Row, type SqlExecutor, type SqlParam } from '../sql-common.js';
 import { createSqlStore, type SqlStoreBackend } from '../sql-repos.js';
@@ -65,32 +65,32 @@ function pgExecutor(queryable: PgQueryable): SqlExecutor {
   };
 }
 
-/** The PostgreSQL migration primitives; exported for the baseline upgrade tests. */
-export function createPostgresMigrationDriver(pool: PgPool): MigrationDriver {
+/** The PostgreSQL schema primitives; exported for the schema tests. */
+export function createPostgresSchemaDriver(pool: PgPool): SchemaDriver {
   return {
-    async ensureMigrationsTable(): Promise<void> {
+    async ensureLedger(): Promise<void> {
       await pool.query(
-        `CREATE TABLE IF NOT EXISTS ${SCHEMA_MIGRATIONS_TABLE} (
+        `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
            id TEXT PRIMARY KEY,
            applied_at TEXT NOT NULL
          )`,
       );
     },
-    async listApplied(): Promise<string[]> {
-      const result = await pool.query(`SELECT id FROM ${SCHEMA_MIGRATIONS_TABLE}`);
+    async listRecorded(): Promise<string[]> {
+      const result = await pool.query(`SELECT id FROM ${SCHEMA_LEDGER_TABLE}`);
       return (result.rows as { id: string }[]).map((row) => String(row.id));
     },
-    async applyMigration(migration: MigrationFile): Promise<void> {
+    async createBaseSchema(schema: BaseSchema): Promise<void> {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        for (const statement of splitSqlStatements(migration.sql)) {
+        for (const statement of splitSqlStatements(schema.sql)) {
           await client.query(statement);
         }
-        await client.query(
-          `INSERT INTO ${SCHEMA_MIGRATIONS_TABLE} (id, applied_at) VALUES ($1, $2)`,
-          [migration.id, nowIso()],
-        );
+        await client.query(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES ($1, $2)`, [
+          schema.id,
+          nowIso(),
+        ]);
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined);
@@ -125,7 +125,7 @@ class PostgresBackend implements SqlStoreBackend {
   }
 
   async migrate(): Promise<void> {
-    await runMigrations(createPostgresMigrationDriver(this.db), loadMigrations('pg'));
+    await ensureBaseSchema(createPostgresSchemaDriver(this.db), loadBaseSchema('pg'));
   }
 
   async close(): Promise<void> {

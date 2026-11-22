@@ -6,7 +6,7 @@ import BetterSqlite3 from 'better-sqlite3';
 import { loadConfig } from '../../../config/index.js';
 import { isNexusError } from '../../../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../../../lib/ids.js';
-import { runMigrations, splitSqlStatements, type MigrationFile } from '../../migrate.js';
+import { splitSqlStatements } from '../../schema.js';
 import type { NexusStore, UserRecord } from '../../store.js';
 import { createSqliteStore, isGuardedRepo } from './index.js';
 
@@ -62,35 +62,12 @@ describe('sqlite store', () => {
     await store.close();
   });
 
-  describe('migrations', () => {
-    it('is idempotent — migrating twice changes nothing', async () => {
+  describe('schema', () => {
+    it('is idempotent — ensuring the schema twice changes nothing', async () => {
       await store.migrate();
       await store.migrate();
       const user = await makeUser();
       assert.ok(user.id);
-    });
-
-    it('applies each migration once and skips it thereafter', async () => {
-      const applied: string[] = [];
-      const driver = {
-        ensureMigrationsTable: async (): Promise<void> => undefined,
-        listApplied: async (): Promise<string[]> => [...applied],
-        applyMigration: async (migration: MigrationFile): Promise<void> => {
-          applied.push(migration.id);
-        },
-      };
-      const migrations: MigrationFile[] = [
-        { id: '002_second', filename: '002_second.sql', sql: '' },
-        { id: '001_first', filename: '001_first.sql', sql: '' },
-      ];
-
-      const first = await runMigrations(driver, migrations);
-      assert.deepEqual(first.applied, ['001_first', '002_second']);
-      assert.deepEqual(first.skipped, []);
-
-      const second = await runMigrations(driver, migrations);
-      assert.deepEqual(second.applied, []);
-      assert.deepEqual(second.skipped, ['001_first', '002_second']);
     });
 
     it('splits SQL into statements, ignoring comments and quoted semicolons', () => {
