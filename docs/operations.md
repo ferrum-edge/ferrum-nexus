@@ -1076,8 +1076,8 @@ What changes for Nexus:
   `aud` out. `jwt_auth` gains `hide_credentials`, which defaults to `false`;
   Nexus does not set it, so the bearer token still reaches the backend.
 - **One credential per request** (v0.9.19). A request with two
-  `Authorization` field lines, or two credentials in one, is refused with
-  `400`.
+  `Authorization` field lines, or two credentials in one, is refused: `400` on
+  HTTP and WebSocket, a gRPC error status on native gRPC and gRPC-Web.
 - **Agent APIs** (v0.9.19). An MCP tool call no longer carries the caller's
   `Authorization`, `Cookie`, route credential headers or query string to the
   API's backend. The gateway also gates MCP prompts and resources by policy;

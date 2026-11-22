@@ -123,8 +123,8 @@ how to move from `v0.5.2`.
   serialization the validator cannot read is refused at import (Nexus keeps
   request validation off, so `routes` APIs still enforce paths and methods
   only, not parameters or `format`), `jwt_auth` refuses a token whose `aud`
-  is not configured (leave `aud` out), a request carrying two credentials is
-  refused, MCP tool calls no longer forward the caller's credentials to the
+  is not configured (leave `aud` out), a request with two `Authorization`
+  field lines or two credentials in one is refused, MCP tool calls no longer forward the caller's credentials to the
   backend, and idempotency records written before the upgrade are not
   replayed after it.
   `jwt_auth` gains `hide_credentials`, which defaults to `false`; Nexus does

@@ -161,9 +161,11 @@ to start both from empty volumes. From the `v0.5.2` checkout you installed from,
 with the four secrets you saved at install time exported again (never newly
 generated values), after taking the paired backup (step 3). Commit or stash any
 edits to tracked files first; the block stops before touching the stack if any
-remain, or if the tag cannot be checked out. If you changed your
-`docker-compose.yml`, replace the `cp docker/docker-compose.example.yml` line
-with a hand merge of the `v0.6.0` example into it.
+remain, or if the tag cannot be checked out. Run it the way you run the stack:
+if you pass `-f`, `-p` or `COMPOSE_FILE`, pass the same to both `docker compose`
+commands. If you changed your `docker-compose.yml`, replace the
+`cp docker/docker-compose.example.yml` line with a hand merge of the `v0.6.0`
+example into it.
 
 ```bash
 set -e
@@ -174,7 +176,7 @@ set -a
 . ./release/compatibility.env
 set +a
 git checkout --detach v0.6.0
-docker compose -f docker-compose.v0.5.2.yml down -v
+docker compose down -v
 cp docker/docker-compose.example.yml docker-compose.yml
 set -a
 . ./release/compatibility.env
@@ -182,13 +184,18 @@ set +a
 docker compose up -d --build
 ```
 
-The stack is torn down only after the `v0.6.0` checkout has succeeded, using the
-saved `v0.5.2` Compose file (kept as `docker-compose.v0.5.2.yml`) and the `v0.5.2`
-`compatibility.env` sourced before the checkout. The second `compatibility.env`
+The stack is torn down only after the `v0.6.0` checkout has succeeded. The
+checkout leaves the untracked `docker-compose.yml` (and any
+`docker-compose.override.yml`) in place, so `docker compose down -v` reads the
+same files and project as the running stack, with the `v0.5.2`
+`compatibility.env` sourced before the checkout; the copy saved as
+`docker-compose.v0.5.2.yml` keeps your old file. The second `compatibility.env`
 is the `v0.6.0` one, which pins Edge `v0.9.20`, and copying the example picks up
 the `v0.6.0` Compose pins. `docker compose down -v` deletes both the Nexus
 database (`pgdata`) and the gateway's database (`ferrumdata`), which covers
-steps 5 and 6; run it only after the backup. Then register the founding
+steps 5 and 6; run it only after the backup. It removes named volumes only: if
+an override stores either database in a host directory, empty that directory
+before `up`. Then register the founding
 administrator again with the bootstrap token from `docker compose logs nexus`.
 
 ### Behaviour changes to plan for
@@ -214,8 +221,9 @@ All are listed in the [changelog](https://github.com/ferrum-edge/ferrum-nexus/bl
   `ip_restriction` no longer has an evaluation order (`mode`), which the next Edge
   release removes.
 - **JWT clients must leave out `aud`** (Edge `v0.9.19`): `jwt_auth` refuses a token
-  whose `aud` is not configured, and Nexus configures none. A request carrying two
-  credentials is refused with `400`.
+  whose `aud` is not configured, and Nexus configures none. A request with two
+  `Authorization` field lines, or two credentials in one, is refused (`400` on
+  HTTP and WebSocket; a gRPC error status on native gRPC and gRPC-Web).
 - **Request parameters on `routes` APIs** (Edge `v0.9.19`). A document whose
   required parameter uses a serialization the gateway's validator cannot read is
   refused at import. Nexus keeps request validation off, so a `routes` API still
