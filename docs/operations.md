@@ -275,9 +275,9 @@ The fleet-global reads are affected like this:
 | `GET /version` (not on Edge) | Best-effort version probe                    | `403` instead of `404`; still reads as no version.                                                                                                         | Nothing to set.                                                                                                      |
 
 Neither setting is needed against Ferrum Edge v0.9.15, where the admin JWT
-still reads both metrics endpoints; each is used as soon as it is set. On the
-pinned Edge v0.9.17, set `FERRUM_METRICS_BEARER_TOKEN` before upgrading or the
-Usage card reports its counts unavailable.
+still reads both metrics endpoints; each is used as soon as it is set. On Edge
+v0.9.17 and later, including the pinned v0.9.20, set
+`FERRUM_METRICS_BEARER_TOKEN` or the Usage card reports its counts unavailable.
 
 Adding the portal's IP to the gateway's `FERRUM_METRICS_ALLOWED_CIDRS` does not
 restore `GET /metrics`. Nexus always presents a credential on the scrape, its
@@ -957,8 +957,9 @@ Procedure:
 3. **Upgrade Edge to v0.9.15**, the control plane and every data plane together.
 4. **Upgrade Nexus** to `v0.5.2`, which pins Edge v0.9.15 in
    [the `v0.5.2` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.2/release/compatibility.env),
-   and check `GET /api/health/edge` as an admin. Then continue with
-   [Upgrading to Edge v0.9.17](#upgrading-to-edge-v0917).
+   and check `GET /api/health/edge` as an admin. To go on to Nexus `v0.6.0`,
+   follow [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920), whose step 1
+   includes the v0.9.17 checks.
 
 Nexus `v0.5.1` reads Edge v0.9.15 unchanged, and `v0.5.2` still reads v0.9.14, so the
 order of steps 3 and 4 does not matter for compatibility. **Rolling back** Edge to
@@ -969,7 +970,11 @@ to restore service.
 
 No Nexus release pairs with Edge v0.9.17: Nexus `v0.6.0` pairs with v0.9.20,
 which includes v0.9.17's fixes for the published QUIC advisories affecting
-v0.9.15. This section reviews what v0.9.17 changed for Nexus. There is no
+v0.9.15. This section reviews what v0.9.17 changed for Nexus; its procedure is
+kept for reference. To move from Nexus `v0.5.2` to `v0.6.0`, do only its step 1
+(as part of step 1 of [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920)) and
+go straight to v0.9.20 after the paired backup, without an intermediate Edge
+v0.9.17. There is no
 published v0.9.16; v0.9.17 is its replacement. Read the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.17/docs/upgrade_guide.md#upgrading-to-0917)
 for the gateway-wide changes. Every contract Nexus depends on is unchanged:
@@ -1012,10 +1017,10 @@ Procedure:
 4. **Continue with [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920).**
    No Nexus release pins v0.9.17; `v0.6.0` pins v0.9.20.
 
-Nexus `v0.5.2` already works with Edge v0.9.17's bounded-token behavior, so
-the order of steps 3 and 4 does not matter for compatibility. **Rolling back**
-Edge to v0.9.15 keeps Nexus working, but reopens the QUIC vulnerabilities
-v0.9.17 fixes; do it only to restore service.
+Nexus `v0.5.2` already works with Edge v0.9.17's bounded-token behavior, so a
+deployment that did stop at v0.9.17 keeps working until it moves on.
+**Rolling back** Edge to v0.9.15 keeps Nexus `v0.5.2` working, but reopens the
+QUIC vulnerabilities v0.9.17 fixes; do it only to restore service.
 
 ### Upgrading to Edge v0.9.20
 
@@ -1031,8 +1036,10 @@ previous release accepted, and stored configuration they refuse fails
 validation when it is loaded. Every contract Nexus depends on is unchanged:
 egress policy schema 2 and its data-plane attestation, deployment snapshot v2
 and its `deployment_snapshot.v2` tokens, and the acknowledgement shape. The
-ConfigSync protocol revision stays `3`. No Nexus migration or journal change
-is needed. What changes for Nexus:
+ConfigSync protocol revision stays `3`. Edge v0.9.20 itself needs no Nexus
+journal change, but Nexus `v0.6.0`, which pairs with it, needs a new, empty
+database ([schema and upgrades before 1.0](#schema-and-upgrades-before-10)).
+What changes for Nexus:
 
 - **Plugin configs are closed at every depth** (v0.9.20). Edge refuses an
   unknown key in any nested plugin-config object, not only at the root. Every
@@ -1044,8 +1051,8 @@ is needed. What changes for Nexus:
   or content type listed twice (content types compare case-insensitively), an
   empty `content_types` list (leave the key out for the default list), a
   content type with `*` anywhere but a whole subtype (`*/*`, `*/json`,
-  `application/*+json`; `text/*` is accepted and now matches), `X-Real-IP` or
-  `X-Geo-Country` (any case, `_` or `-`) as a `correlation_id` `header_name`,
+  `application/*+json`; `text/*` is accepted and now matches), `X-Geo-Country`
+  (any case, `_` or `-`) or `X-Real-IP` (any case) as a `correlation_id` `header_name`,
   and an `ip_restriction` prefix length that is not canonical decimal (`/08`).
   A palette row saved earlier with one of these values fails on the gateway;
   edit or remove it before upgrading.
@@ -1106,7 +1113,8 @@ Procedure:
    check `GET /api/health/edge` as an admin.
 
 Nexus `v0.5.2` is qualified against Edge v0.9.15 only and has not been tested
-against v0.9.20, so upgrade Nexus promptly after Edge. **Rolling back** Edge to
+against v0.9.20, so do not restart `v0.5.2` against v0.9.20; move to `v0.6.0`
+right after the Edge upgrade. **Rolling back** Edge to
 v0.9.17 is not qualified for Nexus `v0.6.0`.
 
 ### Palette keys the next Edge release removes
