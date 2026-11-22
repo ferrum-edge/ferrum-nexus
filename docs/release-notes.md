@@ -1,7 +1,7 @@
 # Ferrum Nexus v0.6.0 — release notes
 
 **Released 2026-11-21.** Paired with Ferrum Edge `v0.9.20`. The pair is recorded in
-[`release/compatibility.env`](../release/compatibility.env), which the README
+[`release/compatibility.env`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/release/compatibility.env), which the README
 quickstart, the Compose example, the getting-started walkthrough and the real-stack
 `acceptance` CI job all read, so every one of them runs the same gateway build.
 
@@ -11,19 +11,19 @@ quickstart, the Compose example, the getting-started walkthrough and the real-st
 > base schema per backend, and **a database created by `v0.5.2` or earlier is not
 > migrated**: Nexus refuses to start against it, changes nothing, and tells you to
 > start against a new, empty database. Read
-> [moving from v0.5.2](#moving-from-v052) before you start `v0.6.0` anywhere that
+> [moving from v0.5.2](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/release-notes.md#moving-from-v052) before you start `v0.6.0` anywhere that
 > keeps data.
 
-The full list of changes is in the [changelog](../CHANGELOG.md#060---2026-11-21).
+The full list of changes is in the [changelog](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/CHANGELOG.md#060---2026-11-21).
 
 ## Supported combination
 
-| Component      | Version                                | Pinned as                                                                                                |
-| -------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Ferrum Nexus   | `v0.6.0`                               | Git tag `v0.6.0`; build `docker/Dockerfile` from that checkout                                           |
-| Ferrum Edge    | `v0.9.20`                              | `ferrumedge/ferrum-edge:v0.9.20@sha256:32a0b0574bb2ed105d315888fab12e33242e1cec3ae9f1ae34c1fb4d0c9a2689` |
-| Node.js        | `^22.22.2 \|\| ^24.15.0 \|\| >=26.0.0` | Source installs; the image uses a digest-pinned Node 22 base (22.23.5)                                   |
-| Nexus database | PostgreSQL 17 (Compose sample)         | Also supported: SQLite, MySQL, MongoDB replica set — see [schema](#schema-no-upgrade-path-before-10)     |
+| Component      | Version                                | Pinned as                                                                                                                                                                         |
+| -------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ferrum Nexus   | `v0.6.0`                               | Git tag `v0.6.0`; build `docker/Dockerfile` from that checkout                                                                                                                    |
+| Ferrum Edge    | `v0.9.20`                              | `ferrumedge/ferrum-edge:v0.9.20@sha256:32a0b0574bb2ed105d315888fab12e33242e1cec3ae9f1ae34c1fb4d0c9a2689`                                                                          |
+| Node.js        | `^22.22.2 \|\| ^24.15.0 \|\| >=26.0.0` | Source installs; the image uses a digest-pinned Node 22 base (22.23.5)                                                                                                            |
+| Nexus database | PostgreSQL 17 (Compose sample)         | Also supported: SQLite, MySQL, MongoDB replica set — see [schema](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/release-notes.md#schema-no-upgrade-path-before-10) |
 
 - **Ferrum Edge `v0.9.20`** is the
   [published release](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.20)
@@ -41,9 +41,9 @@ The full list of changes is in the [changelog](../CHANGELOG.md#060---2026-11-21)
   snapshot v2 and its `deployment_snapshot.v2` tokens, and the acknowledgement shape.
   The ConfigSync protocol revision stays `3`. But `v0.9.17`, `v0.9.19` and `v0.9.20`
   each refuse configuration and traffic the previous release accepted; see
-  [behaviour changes](#behaviour-changes-to-plan-for), and
-  [Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917) and
-  [Upgrading to Edge v0.9.20](operations.md#upgrading-to-edge-v0920), which review
+  [behaviour changes](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/release-notes.md#behaviour-changes-to-plan-for), and
+  [Upgrading to Edge v0.9.17](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#upgrading-to-edge-v0917) and
+  [Upgrading to Edge v0.9.20](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#upgrading-to-edge-v0920), which review
   every change Nexus consumes.
 - **Other Edge versions are unverified.** Nexus `v0.6.0` is tested only against Edge
   `v0.9.20`. Edge `v0.9.12` or earlier is refused.
@@ -57,28 +57,35 @@ The full list of changes is in the [changelog](../CHANGELOG.md#060---2026-11-21)
 
 - **One base schema; no upgrade path before 1.0.** A new database is created directly
   at the final schema. A database created by an earlier version is refused at
-  startup, before anything reads it; see [schema](#schema-no-upgrade-path-before-10).
+  startup, before anything reads it; see [schema](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/release-notes.md#schema-no-upgrade-path-before-10).
 - **Pairs with Edge `v0.9.20`.** Includes Edge `v0.9.17`'s fixes for the published
   QUIC advisories that affect `v0.9.15`, and the stricter admission of `v0.9.19` and
   `v0.9.20`. The palette refuses, before any gateway write, what those releases
   refuse.
-- **Grant revocations and access approvals are finished, not stranded** (#651). Each
-  decision's gateway half is recorded durably (`access_gateway_jobs`) and a
-  background worker completes it after a crash or a failed compensation.
+- **Grant revocations and access approvals are not stranded** (#651). Each
+  decision's gateway half is recorded durably (`access_gateway_jobs`). After a
+  crash or a failed compensation, a background worker finishes an interrupted
+  revocation, and rolls back an approval whose grant never committed (its groups
+  come off and the request returns to pending, so it must be approved again).
 - **Safer credential changes.** Credential deletes are conditioned on the exact
   Edge read they were decided from (`If-Match`, ferrum-edge#7393), `keyauth` and
   `jwt` credentials are deleted by identity rather than by position, and Nexus
   honours Edge's 500-ACL-group cap per consumer.
-- **Security fixes in Nexus itself**; see [security](#security).
+- **Security fixes in Nexus itself**; see [security](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/release-notes.md#security).
 
 ## Install
 
-From a clean shell, with Docker Compose v2 and `openssl`:
+From a clean shell, with Docker Compose v2 and `openssl`, check out the tag:
 
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
 git checkout --detach v0.6.0
+```
+
+Then run the README's full-stack block, exactly as written:
+
+```bash
 cp docker/docker-compose.example.yml docker-compose.yml
 set -a
 . ./release/compatibility.env
@@ -93,7 +100,7 @@ docker compose up -d
 Save the four secrets in a secret manager before going further: a restart or
 restore needs the same values. The portal is at <http://127.0.0.1:8787> and
 `docker compose logs nexus` prints the first-run bootstrap token. The
-[getting-started walkthrough](getting-started.md) continues from there to a
+[getting-started walkthrough](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/getting-started.md) continues from there to a
 published API and an authenticated request through the gateway.
 
 ## Moving from v0.5.2
@@ -104,7 +111,7 @@ prints that the database was created by a different Ferrum Nexus schema and that
 there is no upgrade path before 1.0. Accounts, organizations, APIs, approvals,
 grants, credentials metadata, messages, settings and the audit history in the old
 database do not carry over. Follow
-[moving to a new release](operations.md#moving-to-a-new-release):
+[moving to a new release](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#moving-to-a-new-release):
 
 1. **Check the prerequisites.**
    - **Node.** Unchanged since `v0.4.0`: a source install needs Node
@@ -117,14 +124,15 @@ database do not carry over. Follow
      for anything Nexus does not manage.
    - **Saved palette settings, while the `v0.5.2` portal still runs.** Edge
      refuses to start on a saved config it rejects. Rename any `correlation_id`
-     `header_name` set to `X-Ferrum-Hops`, `X-Real-IP` or `X-Geo-Country`, and fix
+     `header_name` set to `X-Ferrum-Hops` or `X-Geo-Country` (any case, `_` or
+     `-`), `X-Real-IP` (any case) or the gateway's `FERRUM_REAL_IP_HEADER`, and fix
      or remove the `compression` and `ip_restriction` values Edge `v0.9.19`
-     refuses (step 1 of [Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917)
-     and of [Upgrading to Edge v0.9.20](operations.md#upgrading-to-edge-v0920)).
+     refuses (step 1 of [Upgrading to Edge v0.9.17](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#upgrading-to-edge-v0917)
+     and of [Upgrading to Edge v0.9.20](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#upgrading-to-edge-v0920)).
      Settle recovery journals too.
 2. **Stop every Nexus instance**, request handlers and background workers alike.
 3. **Back up Nexus and Edge together**, as one point in time, following the
-   [backup and restore runbook](operations.md#5-backup-and-restore). This backup is
+   [backup and restore runbook](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#5-backup-and-restore). This backup is
    your only way back to `v0.5.2`; `v0.6.0` cannot read it.
 4. **Upgrade Edge to `v0.9.20`**, the control plane and every data plane together.
 5. **Create a new, empty Nexus database.** For SQLite, delete (or move aside) the
@@ -132,10 +140,11 @@ database do not carry over. Follow
    drop and recreate the dedicated Nexus database, or point `NEXUS_DB_URL` at a new
    one.
 6. **Deal with what the old portal created in Edge.** Its proxies, consumers,
-   credentials and plugin configs in `FERRUM_NAMESPACE` stay in Edge, and the new
-   database does not know them. Remove them from that namespace, or give the new
-   portal its own namespace (and the gateway access that needs), so that nothing
-   left over keeps serving traffic or collides with what the new portal creates.
+   credentials and plugin configs in `FERRUM_NAMESPACE` stay in Edge, keep serving
+   their callers, and are unknown to the new database. To stop old traffic, remove
+   them from that namespace, or retire the data plane that serves it. Giving the new
+   portal its own namespace (and the gateway access that needs) only keeps the two
+   apart: the old APIs and credentials keep working until you remove them.
 7. **Start `v0.6.0`** on every instance. It creates the schema; register the
    founding `super_admin` with the bootstrap token, then re-create organizations,
    APIs and access. Verify that `GET /api/health/edge`, read as an administrator,
@@ -143,40 +152,50 @@ database do not carry over. Follow
    a credential the new portal issued.
 
 On the Compose stack the gateway serves only this portal, so the simplest path is
-to start both from empty volumes. From the checkout you installed from, with the
-four secrets you saved at install time exported again (never newly generated
-values), after taking the paired backup (step 3):
+to start both from empty volumes. From the `v0.5.2` checkout you installed from,
+with the four secrets you saved at install time exported again (never newly
+generated values), after taking the paired backup (step 3):
 
 ```bash
+set -e
+set -a
+. ./release/compatibility.env
+set +a
 docker compose down -v
 git fetch --tags origin
 git checkout --detach v0.6.0
+cp docker/docker-compose.example.yml docker-compose.yml
 set -a
 . ./release/compatibility.env
 set +a
 docker compose up -d --build
 ```
 
-`docker compose down -v` deletes both the Nexus database (`pgdata`) and the
-gateway's database (`ferrumdata`), which covers steps 5 and 6; run it only after
-the backup. Then register the founding administrator again with the bootstrap
+The first `compatibility.env` is the `v0.5.2` one, which `docker compose down`
+needs to read the old Compose file; the second, after the checkout, pins Edge
+`v0.9.20`. Copying the example again picks up the `v0.6.0` Compose pins (skip it
+if you changed your `docker-compose.yml`, and merge by hand). `docker compose
+down -v` deletes both the Nexus database (`pgdata`) and the gateway's database
+(`ferrumdata`), which covers steps 5 and 6; run it only after the backup. Then register the founding administrator again with the bootstrap
 token from `docker compose logs nexus`.
 
 ### Behaviour changes to plan for
 
-All are listed in the [changelog](../CHANGELOG.md#060---2026-11-21) and reviewed in
-[Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917) and
-[Upgrading to Edge v0.9.20](operations.md#upgrading-to-edge-v0920).
+All are listed in the [changelog](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/CHANGELOG.md#060---2026-11-21) and reviewed in
+[Upgrading to Edge v0.9.17](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#upgrading-to-edge-v0917) and
+[Upgrading to Edge v0.9.20](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#upgrading-to-edge-v0920).
 
 - **The schema.** A database created by an earlier version is refused; see
-  [schema](#schema-no-upgrade-path-before-10).
+  [schema](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/release-notes.md#schema-no-upgrade-path-before-10).
 - **Namespace-bounded admin tokens** (Edge `v0.9.17`). Every admin token Nexus
   mints carries an `ns` claim, so Edge refuses it on the fleet-wide metrics reads.
-  The Usage card needs `FERRUM_METRICS_BEARER_TOKEN` (and optionally
-  `FERRUM_ADMIN_FLEET_READ_JWT_SECRET`) to show request counts.
-- **Reserved header names.** `X-Ferrum-Hops`, `X-Real-IP` and `X-Geo-Country` (any
-  case, `_` or `-`) are refused as a `correlation_id` `header_name`, as
-  `X-Authenticated-Identity` already was.
+  The Usage card needs `FERRUM_METRICS_BEARER_TOKEN` to show request counts and
+  latency, and optionally `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` for circuit-breaker
+  state.
+- **Reserved header names.** `X-Ferrum-Hops` and `X-Geo-Country` (any case, `_` or
+  `-`) and `X-Real-IP` (any case) are refused as a `correlation_id` `header_name`,
+  as `X-Authenticated-Identity` already was. Edge also refuses the gateway's own
+  `FERRUM_REAL_IP_HEADER`, which the portal cannot know.
 - **Stricter palette admission** (Edge `v0.9.19`). Duplicate or wildcard-misplaced
   `compression` algorithms and content types, an empty `content_types` list, and a
   non-canonical `ip_restriction` prefix length are `400 VALIDATION_FAILED`.
@@ -207,25 +226,20 @@ migrations over it.
 ## Security
 
 Fixed in Nexus since `v0.5.2` (details in the
-[changelog](../CHANGELOG.md#060---2026-11-21)):
+[changelog](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/CHANGELOG.md#060---2026-11-21)):
 
-- An SMTP relay configured for STARTTLS no longer falls back to plaintext
-  ([GHSA-v7p7-85wx-8wrp](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v7p7-85wx-8wrp)).
+- An SMTP relay configured for STARTTLS no longer falls back to plaintext.
 - Encrypted settings are bound to their row, so a ciphertext cannot be transplanted
-  to another secret
-  ([GHSA-qm46-qg94-mpg7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-qm46-qg94-mpg7)).
-- Registration re-checks its policy when it commits
-  ([GHSA-9cr4-49fg-gfcx](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-9cr4-49fg-gfcx)).
-- Turning the login policy to `local_only` ends the sessions of every account
-  linked at a provider it shuts out
-  ([GHSA-627m-vcp5-v2p7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-627m-vcp5-v2p7));
-  a returning single sign-on commits under the provider's lease, so a concurrent
-  settings change that cuts the provider off also cuts that session off
-  ([GHSA-2343-7j5f-mjcv](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-2343-7j5f-mjcv));
-  and unlinking an identity re-checks the account's role inside its transaction
-  ([GHSA-3qj2-5wrm-hgr4](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-3qj2-5wrm-hgr4)).
-- A grant revocation or access approval interrupted between its decision and its
-  Edge write is finished by a worker instead of leaving gateway access live (#651).
+  to another secret.
+- Registration re-checks its policy when it commits.
+- Single sign-on cut-offs (#744): turning the login policy to `local_only` ends
+  the sessions of every account linked at a provider it shuts out; a returning
+  single sign-on commits under the provider's lease, so a concurrent settings change
+  that cuts the provider off also cuts that session off; and unlinking an identity
+  re-checks the account's role inside its transaction.
+- A grant revocation interrupted between its decision and its Edge write is
+  finished by a worker instead of leaving gateway access live, and an interrupted
+  approval is rolled back rather than left half-applied (#651).
 - Sessions have an absolute lifetime; anonymous health checks no longer fingerprint
   the deployment; stored scrypt parameters are bounded before verification; the
   Content-Security-Policy admits only the CAPTCHA provider in use; the SMTP password
@@ -257,7 +271,7 @@ and the Edge [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20
 - **Later releases.** The generation is bumped whenever the base schema changes,
   so a release that changes it refuses databases created by earlier ones; a
   release that keeps it opens the previous release's database. Each release's notes say which. See
-  [schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10).
+  [schema and upgrades before 1.0](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#schema-and-upgrades-before-10).
 - **Downgrades are not supported.** Roll back by restoring the backup into the
   release that wrote it.
 
@@ -270,7 +284,7 @@ and the Edge [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20
   tree. Recovery journals are encrypted under `NEXUS_SECRET_KEY` and take part in
   its key rotation.
 - **Backup and restore.** Back up Nexus and Edge together, as one point in
-  time, following the [backup and restore runbook](operations.md#5-backup-and-restore).
+  time, following the [backup and restore runbook](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#5-backup-and-restore).
   Restore into the same Nexus release that wrote the backup. The Nexus database
   alone cannot rebuild Edge consumers, credentials, proxies or plugins: without an
   Edge backup, show-once credentials must be re-issued.
@@ -279,11 +293,11 @@ and the Edge [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20
   proxy, set `NEXUS_PUBLIC_URL` to the HTTPS origin and
   `NEXUS_COOKIE_SECURE=true`, configure trusted proxies, and keep the Edge
   Admin API private. See
-  [TLS operations](operations.md#4-running-behind-tls-and-a-reverse-proxy).
+  [TLS operations](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#4-running-behind-tls-and-a-reverse-proxy).
 - **Topology.** Run one active Nexus writer. An active/passive standby must
   serve no requests and run no gateway-mutating background work until it is
   promoted. Active-active Nexus is unsupported; see
-  [supported topologies](operations.md#supported-topologies).
+  [supported topologies](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#supported-topologies).
 
 ## Known limitations
 
@@ -312,7 +326,7 @@ and the Edge [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20
   or moving the gateway, is left to Edge's request-time egress screening
   (`FERRUM_BACKEND_ALLOW_IPS`).
 - The public-only DNS-rebinding fixture
-  ([`e2e/public-only/`](../e2e/public-only/README.md)) runs on demand with a
+  ([`e2e/public-only/`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/e2e/public-only/README.md)) runs on demand with a
   packaged image and covers the local data-plane profile only; it is not part
   of the required CI checks.
 - A namespace past Edge's conditional bound (64 MiB of canonical
@@ -320,7 +334,7 @@ and the Edge [changelog](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20
   enforcement conversions, restores, and credential and access changes are
   refused there until it shrinks.
 - An unconfirmed gateway deployment mutation is never resolved automatically;
-  the [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation)
+  the [operator runbook](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/operations.md#resolving-an-unconfirmed-gateway-deployment-mutation)
   resolves it by observation.
 - Gateway compensation other than grant revocations, access approvals and account
   recovery is held in memory: a process that dies between Edge applying such a
@@ -354,7 +368,7 @@ and
    hosted runner it checks out the tag, runs the README's full-stack block —
    the lines between the `compose-quickstart` markers, exactly as written —
    waits a bounded time for PostgreSQL, Nexus and the gateway to be healthy,
-   then follows the [getting-started walkthrough](getting-started.md) on that
+   then follows the [getting-started walkthrough](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/getting-started.md) on that
    stack: the founding registration with the logged bootstrap token, a
    published `key_auth` API, an approved access request, an issued key, a
    `200` through the gateway on `:8000` carrying the expected body, a `401`

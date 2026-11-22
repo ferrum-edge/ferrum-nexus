@@ -15,9 +15,9 @@ and the stricter configuration and traffic admission of `v0.9.19` and `v0.9.20`.
 **Breaking: Ferrum Nexus is in buildout, and no upgrade paths will be designed
 until 1.0.** Every earlier migration is folded into one base schema per backend,
 and a database created by `v0.5.2` or earlier is refused at startup rather than
-migrated: `v0.6.0` needs a new, empty database. Also in this release: grant
-revocations and access approvals whose gateway half was interrupted are finished by
-a durable worker, credential deletes are conditioned on the Edge read they were
+migrated: `v0.6.0` needs a new, empty database. Also in this release: a durable
+worker finishes grant revocations whose gateway half was interrupted and rolls back
+interrupted approvals, credential deletes are conditioned on the Edge read they were
 decided from, and several Nexus security fixes. See
 [`docs/release-notes.md`](docs/release-notes.md) for the supported combination and
 how to move from `v0.5.2`.
@@ -91,6 +91,20 @@ how to move from `v0.5.2`.
   wrapper) dispatches Gemini 4 Neon (`gemini-4-neon`) workers through the standalone Google
   Antigravity `agy` CLI. `--effort` takes `low`, `medium`, `high` or `xhigh` (default `high`);
   there is no fast tier.
+
+- **Separate credentials for the gateway's fleet-wide metrics reads**
+  (ferrum-edge/ferrum-edge#6095). Every admin token Nexus mints carries an `ns`
+  claim, and Ferrum Edge v0.9.16 refuses such a token on `GET /metrics` and
+  `GET /admin/metrics`. Two optional settings restore the Usage card on that
+  release. Ferrum Edge v0.9.15 needs neither.
+  - `FERRUM_METRICS_BEARER_TOKEN` is the gateway's own metrics bearer token;
+    the request-count scrape uses it.
+  - `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` is a separate key, set to the
+    gateway's `FERRUM_ADMIN_JWT_VIEWER_SECRET`. Nexus signs only the
+    circuit-breaker read with it, as a `viewer` token with no `ns` claim.
+    Without a `FERRUM_ADMIN_JWT_VIEWER_NAMESPACES` ceiling that key reads every
+    namespace, so it is off by default; docs/operations.md describes the
+    trade-off. Nexus refuses to start if it equals `FERRUM_ADMIN_JWT_SECRET`.
 
 ### Changed
 
@@ -289,6 +303,67 @@ how to move from `v0.5.2`.
   row names no file, or the tree holds a symbolic link, instead of comparing the
   rows with a hard-coded list. The vendored directory is marked `-text` in
   `.gitattributes` so no checkout rewrites its bytes.
+
+- **Pinned Ferrum Edge v0.9.17** (#592):
+  `ferrumedge/ferrum-edge:v0.9.17@sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1`
+  (tag source `669c574c1d1e88e84dccb26a8159939e6694644d`), with every vendored
+  contract re-copied byte for byte from `contracts-edge-0.9.17`
+  (`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`). No schema changes its wire
+  rules and the plugin and `ErrorClass` name sets are unchanged; the
+  vocabularies add the gateway-owned `X-Ferrum-Hops` header and the
+  `loop_detected` error token for Edge's proxy hop budget, and Nexus now
+  refuses `X-Ferrum-Hops` as a `correlation_id`
+  `header_name`, as Edge does. v0.9.17 replaces the
+  unpublished v0.9.16, fixes the published QUIC advisories affecting v0.9.15,
+  and makes an `ns`-claim admin JWT namespace-bounded: set
+  `FERRUM_METRICS_BEARER_TOKEN` before upgrading or the Usage card reports its
+  counts unavailable. See
+  [Upgrading to Edge v0.9.17](docs/operations.md#upgrading-to-edge-v0917).
+
+- **`style-src` no longer allows `'unsafe-inline'`** (#587). The SPA shell's
+  Content-Security-Policy names a nonce that is fresh on every response, and
+  the server templates `index.html` with it instead of serving the file, so
+  the shell is now sent `Cache-Control: no-store` without an `ETag`. Radix's
+  runtime `<style>` elements (the dialog, select and menu scroll lock, and the
+  select viewport) carry the nonce. Every other response gets
+  `style-src 'self'`. The server refuses to start on a web build without the
+  nonce placeholder, so the web and server images must come from the same
+  build.
+- **MongoDB support is documented as 4.4.2 through 9.0, and CI tests the
+  floor.** The `mongodb` driver is already at the latest release (7.7.0),
+  which rejects servers older than 4.4; `init()` also needs the `hello`
+  command from 4.4.2. The standalone-refusal check now runs on MongoDB 4.4.29.
+  The store contracts run on MongoDB 9.0 (`mongo:9` 9.0.4) with
+  `GLIBC_TUNABLES=glibc.pthread.rseq=1`, which keeps mongod clear of its
+  kernel 6.19–7.0.13 startup check on the `ubuntu-26.04` runners
+  (ferrum-edge/ferrum-edge#6589). `docs/operations.md` lists the supported
+  range, that kernel limitation and the override.
+- **Mass-email outbox keys name the administrator** (#565). Rows are keyed
+  `mass:<actor_id>:<batch>:<user_id>`, the same `(administrator, batch)` scope
+  the campaign digest check and the daily charge already used, so two
+  administrators who pick the same `idempotency_key` run separate campaigns
+  instead of aliasing each other's rows.
+- **Documentation corrections** (#560, #561, #562, #567, #568, #569). Closed
+  registration has no manual account creation (onboard through single sign-on
+  or reopen registration); a first trusted password reset revokes the
+  account's credentials; a redeemed verification link does not count as proof
+  for single sign-on matching; re-enabling an application cannot fail with a
+  mapping `502`; MySQL `1205` is not retried.
+- **Runbook and reference corrections** (#599, #600, #601, #602, #603, #607).
+  Changing `FERRUM_RATE_LIMIT_SYNC_MODE` on a live portal has a real migration
+  procedure, since re-saving an unchanged quota is a no-op and a changed one
+  never removes Redis keys. Replacing `NEXUS_SECRET_KEY` without the rotation
+  command is limited to a lost key, lists what cannot be recovered and keeps a
+  sign-in route open first, including on `sso_only` portals. The
+  single-container Docker recipe keeps its master key in a reusable env file
+  and reads the generated bootstrap token from the log. An Upstream URL equal
+  to the document's `servers[0].url` is not a pin. MCP approvals cover all
+  tools, a subset or REST only, and a refused revocation can restore the
+  pending tool request. The service-manifest preview's oversized body is a
+  `400`; whole-consumer writes carry `If-Match`; consumer verification and
+  deployment snapshots are named as the credential-complete Edge reads; spec-change email is
+  normal-priority outbox mail; and `/metrics` and `/admin/metrics` authenticate
+  differently.
 
 ### Removed
 
@@ -608,186 +683,6 @@ how to move from `v0.5.2`.
   revision's own paths and components, as a failed revision's compensation
   restores them, rather than an empty document.
 
-### Security
-
-- Turning the login policy to `local_only` now ends the sessions of every
-  account linked at a provider it shuts out, in the same transaction, like
-  removing or disabling the provider does (#591)
-  ([GHSA-627m-vcp5-v2p7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-627m-vcp5-v2p7)).
-  It covers `NEXUS_OIDC_PROVIDERS` providers, whose `enabled` flag cannot be
-  edited through the API, so the policy is the runtime switch that cuts them
-  off. The `admin.settings_update` entry records `providers_cut_off` and
-  `sessions_revoked`.
-
-- A returning single sign-on now commits under the provider's
-  `sso:provider:<id>` lease, as first-time links and provisioning already did
-  ([GHSA-2343-7j5f-mjcv](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-2343-7j5f-mjcv)).
-  A settings save on another instance that removed, disabled or shut out the
-  provider could commit between the callback's settings re-read and its
-  commit, and its revocation could not see the session the callback then
-  issued. The lease spans only the commit transaction, not the token exchange.
-
-- Unlinking a user's single sign-on identity takes the account's
-  `users:lifecycle` lease and re-checks the account's role inside its
-  transaction
-  ([GHSA-3qj2-5wrm-hgr4](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-3qj2-5wrm-hgr4)).
-  An `admin` could unlink an account promoted to `admin` after the first check;
-  the unlink now answers `403` and leaves the identity and sessions in place.
-
-- A grant revocation or an access approval that stops between its decision
-  and its Edge write is now finished, not stranded (#651). A targeted revoke
-  committed `revoked` and its `access.revoke` row before taking the
-  `nexus:api:<id>:approved` group off the consumer, so a process that exited
-  in between (deploy, OOM, SIGKILL), or a failed removal whose rollback also
-  failed, left the grantee's gateway access working with nothing to retry it.
-  An approval likewise committed `approved` before its group and grant, and
-  could leave the request `approved` with no grant and a group no grant stood
-  behind. Each claim now commits a durable `access_gateway_jobs` row
-  (a new table in the base schema), which the request deletes once the
-  gateway matches. A new background worker finishes what is left: it takes a
-  revoked grant's groups off (`access.revoke_complete`), unless the grant is
-  active again or a newer grant holds them, and compensates an approval whose
-  grant never committed, removing its groups and returning the request to
-  `pending` (`access.approve_rollback` with `recovered: true`). A tool
-  approval cancelled because its grant is gone now clears the approver's
-  `decided_by` and `decided_at`. A request that stalls until the worker takes
-  its job over writes nothing to the gateway. The first start also scans,
-  once, for revoked grants and grantless approvals an earlier release may have
-  stranded and queues jobs for them (`access.stranded_repair_queued`). Since a
-  database an earlier release created is now refused rather than upgraded,
-  the scan finds nothing on a database created at the base schema. See
-  [operations](docs/operations.md#access-gateway-jobs).
-
-- Access requests, grants and message threads no longer show a `private`
-  API's current summary to an account that can no longer read the API. The
-  embedded `api` (name, slug, version, owner, listen path, invoke URL and agent
-  tools) was read from the API's live row on every listing and checked against
-  the private rule only when the row was written, so a former authorized
-  viewer, a former grantee, or an account whose request or thread predates a
-  switch to `private` kept seeing later renames, version bumps and tool changes
-  through `GET /api/access-requests`, `GET /api/grants`, `GET /api/threads`
-  and `GET /api/threads/:id` while the catalog answered `404`. The summary is
-  now omitted for such a reader and the row keeps only `api_id`; owners,
-  admins, active grantees and authorized viewers see it as before. The same
-  rule now governs the denial notice and email: declining a request whose
-  requester can no longer read the `private` API names the request id
-  instead of the API's current name, slug and catalog link.
-
-- Ignore the root `nexus.env` generated by the single-container Docker
-  recipe so ordinary Git staging excludes its master key and deployment
-  credentials. The runbook explains how to handle an already tracked file.
-
-- Unlinking an SSO identity revokes the account's sessions in the same
-  transaction, and removing or disabling an SSO provider revokes the
-  sessions of every account linked at it (#591). Sessions established
-  through an identity or provider no longer outlive it; unlinking signs
-  the account out everywhere, like a password change.
-
-- Password sign-in and password-reset redemption re-check eligibility in
-  the transaction that commits them. A sign-in re-reads the login policy
-  and break-glass, the local-password block, the account's role and status
-  and the email-verification rule before issuing its session, under the
-  account's `users:lifecycle` lease and the `auth:registration-policy`
-  lease that single sign-on and registration policy saves commit under,
-  and issues the session only after a conditional write that still finds
-  the account active with the verified password. A reset re-reads the
-  local-password block before writing the new password. A tightening saved
-  while the password was being checked or hashed refuses the operation: no
-  session is issued, and a refused reset leaves the password, address
-  proof, link and sessions unchanged. A sign-in or reset that waits out
-  one of these leases answers `409 CONFLICT` in its own words. Super-admin
-  exceptions are unchanged.
-
-- The one-time legacy `basicauth` scan no longer treats a whole-type
-  `keyauth` or `jwt` revoke as having cleared `basicauth`
-  (GHSA-jhjw-5g7j-m528). It asked only whether the consumer had a
-  `scope: 'whole-type'` `credential.revoke` after the historical append, of
-  any credential type, and then skipped the `retiring` placeholder for an
-  entry that may still be on the gateway with no row, leaving a later
-  positional revoke free to delete a different password. The check now
-  requires `credential_type: 'basicauth'`, as its reconcile check already did.
-
-### Added
-
-- **Separate credentials for the gateway's fleet-wide metrics reads**
-  (ferrum-edge/ferrum-edge#6095). Every admin token Nexus mints carries an `ns`
-  claim, and Ferrum Edge v0.9.16 refuses such a token on `GET /metrics` and
-  `GET /admin/metrics`. Two optional settings restore the Usage card on that
-  release. Ferrum Edge v0.9.15 needs neither.
-  - `FERRUM_METRICS_BEARER_TOKEN` is the gateway's own metrics bearer token;
-    the request-count scrape uses it.
-  - `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` is a separate key, set to the
-    gateway's `FERRUM_ADMIN_JWT_VIEWER_SECRET`. Nexus signs only the
-    circuit-breaker read with it, as a `viewer` token with no `ns` claim.
-    Without a `FERRUM_ADMIN_JWT_VIEWER_NAMESPACES` ceiling that key reads every
-    namespace, so it is off by default; docs/operations.md describes the
-    trade-off. Nexus refuses to start if it equals `FERRUM_ADMIN_JWT_SECRET`.
-
-### Changed
-
-- **Pinned Ferrum Edge v0.9.17** (#592):
-  `ferrumedge/ferrum-edge:v0.9.17@sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1`
-  (tag source `669c574c1d1e88e84dccb26a8159939e6694644d`), with every vendored
-  contract re-copied byte for byte from `contracts-edge-0.9.17`
-  (`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`). No schema changes its wire
-  rules and the plugin and `ErrorClass` name sets are unchanged; the
-  vocabularies add the gateway-owned `X-Ferrum-Hops` header and the
-  `loop_detected` error token for Edge's proxy hop budget, and Nexus now
-  refuses `X-Ferrum-Hops` as a `correlation_id`
-  `header_name`, as Edge does. v0.9.17 replaces the
-  unpublished v0.9.16, fixes the published QUIC advisories affecting v0.9.15,
-  and makes an `ns`-claim admin JWT namespace-bounded: set
-  `FERRUM_METRICS_BEARER_TOKEN` before upgrading or the Usage card reports its
-  counts unavailable. See
-  [Upgrading to Edge v0.9.17](docs/operations.md#upgrading-to-edge-v0917).
-
-- **`style-src` no longer allows `'unsafe-inline'`** (#587). The SPA shell's
-  Content-Security-Policy names a nonce that is fresh on every response, and
-  the server templates `index.html` with it instead of serving the file, so
-  the shell is now sent `Cache-Control: no-store` without an `ETag`. Radix's
-  runtime `<style>` elements (the dialog, select and menu scroll lock, and the
-  select viewport) carry the nonce. Every other response gets
-  `style-src 'self'`. The server refuses to start on a web build without the
-  nonce placeholder, so the web and server images must come from the same
-  build.
-- **MongoDB support is documented as 4.4.2 through 9.0, and CI tests the
-  floor.** The `mongodb` driver is already at the latest release (7.7.0),
-  which rejects servers older than 4.4; `init()` also needs the `hello`
-  command from 4.4.2. The standalone-refusal check now runs on MongoDB 4.4.29.
-  The store contracts run on MongoDB 9.0 (`mongo:9` 9.0.4) with
-  `GLIBC_TUNABLES=glibc.pthread.rseq=1`, which keeps mongod clear of its
-  kernel 6.19–7.0.13 startup check on the `ubuntu-26.04` runners
-  (ferrum-edge/ferrum-edge#6589). `docs/operations.md` lists the supported
-  range, that kernel limitation and the override.
-- **Mass-email outbox keys name the administrator** (#565). Rows are keyed
-  `mass:<actor_id>:<batch>:<user_id>`, the same `(administrator, batch)` scope
-  the campaign digest check and the daily charge already used, so two
-  administrators who pick the same `idempotency_key` run separate campaigns
-  instead of aliasing each other's rows.
-- **Documentation corrections** (#560, #561, #562, #567, #568, #569). Closed
-  registration has no manual account creation (onboard through single sign-on
-  or reopen registration); a first trusted password reset revokes the
-  account's credentials; a redeemed verification link does not count as proof
-  for single sign-on matching; re-enabling an application cannot fail with a
-  mapping `502`; MySQL `1205` is not retried.
-- **Runbook and reference corrections** (#599, #600, #601, #602, #603, #607).
-  Changing `FERRUM_RATE_LIMIT_SYNC_MODE` on a live portal has a real migration
-  procedure, since re-saving an unchanged quota is a no-op and a changed one
-  never removes Redis keys. Replacing `NEXUS_SECRET_KEY` without the rotation
-  command is limited to a lost key, lists what cannot be recovered and keeps a
-  sign-in route open first, including on `sso_only` portals. The
-  single-container Docker recipe keeps its master key in a reusable env file
-  and reads the generated bootstrap token from the log. An Upstream URL equal
-  to the document's `servers[0].url` is not a pin. MCP approvals cover all
-  tools, a subset or REST only, and a refused revocation can restore the
-  pending tool request. The service-manifest preview's oversized body is a
-  `400`; whole-consumer writes carry `If-Match`; consumer verification and
-  deployment snapshots are named as the credential-complete Edge reads; spec-change email is
-  normal-priority outbox mail; and `/metrics` and `/admin/metrics` authenticate
-  differently.
-
-### Fixed
-
 - **Provider and catalog pages keep their state where it belongs** (#650).
   - Opening another API in place no longer carries the previous API's Settings,
     Plugins, Specification or Test consumer drafts over. Before, saving could
@@ -932,6 +827,103 @@ how to move from `v0.5.2`.
   key.
 
 ### Security
+
+- Turning the login policy to `local_only` now ends the sessions of every
+  account linked at a provider it shuts out, in the same transaction, like
+  removing or disabling the provider does (#591)
+  ([GHSA-627m-vcp5-v2p7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-627m-vcp5-v2p7)).
+  It covers `NEXUS_OIDC_PROVIDERS` providers, whose `enabled` flag cannot be
+  edited through the API, so the policy is the runtime switch that cuts them
+  off. The `admin.settings_update` entry records `providers_cut_off` and
+  `sessions_revoked`.
+
+- A returning single sign-on now commits under the provider's
+  `sso:provider:<id>` lease, as first-time links and provisioning already did
+  ([GHSA-2343-7j5f-mjcv](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-2343-7j5f-mjcv)).
+  A settings save on another instance that removed, disabled or shut out the
+  provider could commit between the callback's settings re-read and its
+  commit, and its revocation could not see the session the callback then
+  issued. The lease spans only the commit transaction, not the token exchange.
+
+- Unlinking a user's single sign-on identity takes the account's
+  `users:lifecycle` lease and re-checks the account's role inside its
+  transaction
+  ([GHSA-3qj2-5wrm-hgr4](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-3qj2-5wrm-hgr4)).
+  An `admin` could unlink an account promoted to `admin` after the first check;
+  the unlink now answers `403` and leaves the identity and sessions in place.
+
+- A grant revocation or an access approval that stops between its decision
+  and its Edge write is now finished, not stranded (#651). A targeted revoke
+  committed `revoked` and its `access.revoke` row before taking the
+  `nexus:api:<id>:approved` group off the consumer, so a process that exited
+  in between (deploy, OOM, SIGKILL), or a failed removal whose rollback also
+  failed, left the grantee's gateway access working with nothing to retry it.
+  An approval likewise committed `approved` before its group and grant, and
+  could leave the request `approved` with no grant and a group no grant stood
+  behind. Each claim now commits a durable `access_gateway_jobs` row
+  (a new table in the base schema), which the request deletes once the
+  gateway matches. A new background worker finishes what is left: it takes a
+  revoked grant's groups off (`access.revoke_complete`), unless the grant is
+  active again or a newer grant holds them, and compensates an approval whose
+  grant never committed, removing its groups and returning the request to
+  `pending` (`access.approve_rollback` with `recovered: true`). A tool
+  approval cancelled because its grant is gone now clears the approver's
+  `decided_by` and `decided_at`. A request that stalls until the worker takes
+  its job over writes nothing to the gateway. The first start also scans,
+  once, for revoked grants and grantless approvals an earlier release may have
+  stranded and queues jobs for them (`access.stranded_repair_queued`). Since a
+  database an earlier release created is now refused rather than upgraded,
+  the scan finds nothing on a database created at the base schema. See
+  [operations](docs/operations.md#access-gateway-jobs).
+
+- Access requests, grants and message threads no longer show a `private`
+  API's current summary to an account that can no longer read the API. The
+  embedded `api` (name, slug, version, owner, listen path, invoke URL and agent
+  tools) was read from the API's live row on every listing and checked against
+  the private rule only when the row was written, so a former authorized
+  viewer, a former grantee, or an account whose request or thread predates a
+  switch to `private` kept seeing later renames, version bumps and tool changes
+  through `GET /api/access-requests`, `GET /api/grants`, `GET /api/threads`
+  and `GET /api/threads/:id` while the catalog answered `404`. The summary is
+  now omitted for such a reader and the row keeps only `api_id`; owners,
+  admins, active grantees and authorized viewers see it as before. The same
+  rule now governs the denial notice and email: declining a request whose
+  requester can no longer read the `private` API names the request id
+  instead of the API's current name, slug and catalog link.
+
+- Ignore the root `nexus.env` generated by the single-container Docker
+  recipe so ordinary Git staging excludes its master key and deployment
+  credentials. The runbook explains how to handle an already tracked file.
+
+- Unlinking an SSO identity revokes the account's sessions in the same
+  transaction, and removing or disabling an SSO provider revokes the
+  sessions of every account linked at it (#591). Sessions established
+  through an identity or provider no longer outlive it; unlinking signs
+  the account out everywhere, like a password change.
+
+- Password sign-in and password-reset redemption re-check eligibility in
+  the transaction that commits them. A sign-in re-reads the login policy
+  and break-glass, the local-password block, the account's role and status
+  and the email-verification rule before issuing its session, under the
+  account's `users:lifecycle` lease and the `auth:registration-policy`
+  lease that single sign-on and registration policy saves commit under,
+  and issues the session only after a conditional write that still finds
+  the account active with the verified password. A reset re-reads the
+  local-password block before writing the new password. A tightening saved
+  while the password was being checked or hashed refuses the operation: no
+  session is issued, and a refused reset leaves the password, address
+  proof, link and sessions unchanged. A sign-in or reset that waits out
+  one of these leases answers `409 CONFLICT` in its own words. Super-admin
+  exceptions are unchanged.
+
+- The one-time legacy `basicauth` scan no longer treats a whole-type
+  `keyauth` or `jwt` revoke as having cleared `basicauth`
+  (GHSA-jhjw-5g7j-m528). It asked only whether the consumer had a
+  `scope: 'whole-type'` `credential.revoke` after the historical append, of
+  any credential type, and then skipped the `retiring` placeholder for an
+  entry that may still be on the gateway with no row, leaving a later
+  positional revoke free to delete a different password. The check now
+  requires `credential_type: 'basicauth'`, as its reconcile check already did.
 
 - **A recipient's display name can no longer stop a mass-email campaign.** A
   personalized mass template interpolates `{{recipient_name}}`, and the link
