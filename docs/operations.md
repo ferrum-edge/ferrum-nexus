@@ -127,7 +127,7 @@ See the README for a two-stack example.
 | `FERRUM_ADMIN_JWT_TTL`               | `60`                    | Admin JWT lifetime in seconds, 5–3600.                                                                                                                                                                                                                                    |
 | `FERRUM_ADMIN_JWT_ISSUER`            | `ferrum-edge`           | The `iss` claim. Must equal the gateway's configured issuer.                                                                                                                                                                                                              |
 | `FERRUM_ADMIN_JWT_AUDIENCE`          | _(unset)_               | Set only if the gateway configures an audience; otherwise `aud` is omitted.                                                                                                                                                                                               |
-| `FERRUM_METRICS_BEARER_TOKEN`        | _(unset)_               | The gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32 characters). Presented on `GET /metrics` instead of the admin JWT, which Ferrum Edge v0.9.17 refuses there. See [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).         |
+| `FERRUM_METRICS_BEARER_TOKEN`        | _(unset)_               | The gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32 characters). Presented on `GET /metrics` instead of the admin JWT, which Edge v0.9.17 and later refuse there. See [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).       |
 | `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` | _(unset)_               | Optional separate key for `GET /admin/metrics` only: `viewer` tokens without an `ns` claim. Set it to the gateway's `FERRUM_ADMIN_JWT_VIEWER_SECRET`; never `FERRUM_ADMIN_JWT_SECRET` (refused). **A fleet-wide read credential**; see the trade-off below.               |
 | `FERRUM_NAMESPACE`                   | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` and as the `ns` claim. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, at most 128 characters. Also the first segment of every listen path (`/<namespace>/<slug>`). See [Namespace routability](#namespace-routability). |
 | `FERRUM_GATEWAY_PUBLIC_URL`          | _(unset)_               | Public origin of the gateway's **proxy listener**, used for each API's `invoke_url`. The `gateway.public_url` admin setting overrides it; with neither, `invoke_url` is `null`.                                                                                           |
@@ -266,7 +266,7 @@ claim-less token signed with `FERRUM_ADMIN_JWT_SECRET` has authority over the
 whole fleet. Everything the portal writes is namespace-scoped and keeps working.
 The fleet-global reads are affected like this:
 
-| Read                         | Used for                                     | On Edge v0.9.17, with no extra setting                                                                                                                     | To restore it                                                                                                        |
+| Read                         | Used for                                     | On Edge v0.9.17 and later, with no extra setting                                                                                                           | To restore it                                                                                                        |
 | ---------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `GET /metrics`               | Usage card request counts and latency        | `403`. The card shows "Gateway metrics are unavailable" with the reason; `unavailable_code` is `refused`.                                                  | `FERRUM_METRICS_BEARER_TOKEN`, equal to the gateway's own value. Allowlisting the portal's IP does not help (below). |
 | `GET /admin/metrics`         | Usage card circuit breakers, ejected targets | `403`. `backend.status` is `unavailable` with the reason; it never reads as "no circuit breaker".                                                          | Optional `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (see below).                                                           |
@@ -274,15 +274,18 @@ The fleet-global reads are affected like this:
 | `GET /namespaces`            | Not used by the portal                       | Lists only `FERRUM_NAMESPACE`.                                                                                                                             | Nothing to set.                                                                                                      |
 | `GET /version` (not on Edge) | Best-effort version probe                    | `403` instead of `404`; still reads as no version.                                                                                                         | Nothing to set.                                                                                                      |
 
-Neither setting is needed against Ferrum Edge v0.9.15, where the admin JWT
-still reads both metrics endpoints; each is used as soon as it is set. On Edge
-v0.9.17 and later, including the pinned v0.9.20, set
-`FERRUM_METRICS_BEARER_TOKEN` or the Usage card reports its counts unavailable.
+Neither setting was needed against Ferrum Edge v0.9.15, where the admin JWT
+still read both metrics endpoints; each is used as soon as it is set. On Edge
+v0.9.17 and later — including the current pairing in
+[`release/compatibility.env`](../release/compatibility.env) (Edge v0.9.20 for
+Nexus `v0.6.0`) — set `FERRUM_METRICS_BEARER_TOKEN` or the Usage card reports
+its counts unavailable.
 
 Adding the portal's IP to the gateway's `FERRUM_METRICS_ALLOWED_CIDRS` does not
 restore `GET /metrics`. Nexus always presents a credential on the scrape, its
-namespace-scoped admin JWT when no bearer token is set, and Edge v0.9.17 refuses
-that JWT from an allowlisted address too. Set the bearer token instead.
+namespace-scoped admin JWT when no bearer token is set, and Edge v0.9.17 and
+later refuse that JWT from an allowlisted address too. Set the bearer token
+instead.
 
 **The metrics bearer token is a fleet-wide observability credential; treat it
 as one.** It is the gateway's own `FERRUM_METRICS_BEARER_TOKEN` (at least 32
@@ -343,7 +346,7 @@ route. While the namespace is unrouted:
   `PATCH`es and deletes still work, so you can clean up.
 - The startup check logs `MISCONFIGURED NAMESPACE: …` at `error`.
 
-To see the gateway's side (on Ferrum Edge v0.9.17, with an admin JWT that
+To see the gateway's side (on Ferrum Edge v0.9.17 and later, with an admin JWT that
 carries no `ns` claim; the portal's own token sees `active: null` whenever its
 claim does not cover the active namespace):
 
@@ -363,7 +366,7 @@ The released namespace-routing policy accepts a control plane with
 `data_plane_single_namespace: false` and `active: null`; a missing namespace
 block is unknown, not a mismatch. A block that stops appearing ends an earlier
 "served" verdict; it becomes unknown. An earlier "unserved" verdict stays until
-the gateway reports the namespace as served. On Ferrum Edge v0.9.17 the
+the gateway reports the namespace as served. On Ferrum Edge v0.9.17 and later, the
 portal's namespace-scoped token gets the block with `active` withheld (`null`)
 whenever its claim does not cover the gateway's active namespace (see
 [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917)).
@@ -789,13 +792,18 @@ remove individual chunk rows of a journal that is kept.
 
 ### Upgrading to Edge v0.9.13
 
-Nexus `v0.4.0` pairs with Edge v0.9.13 only, and Edge v0.9.13 refuses every
+_Historical procedure for Nexus `v0.4.0` and Edge v0.9.13. The current pairing is
+recorded in [`release/compatibility.env`](../release/compatibility.env)._
+
+Nexus `v0.4.0` paired with Edge v0.9.13 only, and Edge v0.9.13 refused every
 deployment token an earlier Edge issued (see the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/docs/upgrade_guide.md#upgrading-to-0913)).
-A conversion or restore that is still in flight across the upgrade cannot finish on
-its own: its journal holds authority the new gateway would answer with `412`, so
-Nexus refuses to send it and never refreshes it. Drain and settle them first, then
-upgrade both sides in one maintenance window:
+A conversion or restore still in flight across that upgrade could not finish on
+its own: its journal held authority the new gateway answered with `412`, so
+Nexus refused to send it and never refreshed it. Draining and settling journals
+first, then upgrading both sides in one maintenance window, followed this
+sequence (step 2 is also the journal-settling step referenced by later
+procedures):
 
 1. **Stop new conversions.** Ask providers not to change `spec_enforcement` or
    restore gateways until the upgrade is done.
@@ -808,225 +816,246 @@ upgrade both sides in one maintenance window:
    going on. Repeat the listing until it is empty.
 3. **Drain writers and take a paired backup**: stop every Nexus instance and follow
    [Ordering and consistency](#ordering-and-consistency).
-4. **Upgrade Edge to v0.9.13.** Control plane and data planes must run the same build.
-5. **Start Nexus `v0.4.0`** with the Edge image its
-   [`release/compatibility.env`](../release/compatibility.env) pins. Check
-   `GET /api/health/edge` as an admin: `status: "ok"`, and
+4. **Upgrade Edge to v0.9.13.** Control plane and data planes had to run the same build.
+5. **Start Nexus `v0.4.0`** with the Edge image pinned in
+   [the `v0.4.0` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.4.0/release/compatibility.env).
+   Check `GET /api/health/edge` as an admin: `status: "ok"`, and
    `public_egress_guaranteed: true` for a local public-only data plane. A CP/DP
-   pairing reads `degraded`; see
+   pairing read `degraded`; see
    [CP/DP pairings on Edge v0.9.13](#backend-egress-admission-and-the-public-only-guarantee).
 
-Between steps 4 and 5 neither side can talk to the other: an older Nexus refuses
-egress policy schema 2, and this release refuses schema 1. Backend writes are refused
-rather than guessed, so keep Nexus stopped for that window.
+Between steps 4 and 5 neither side could talk to the other: an older Nexus
+refused egress policy schema 2, and `v0.4.0` (and every later release) refuses
+schema 1. Backend writes were refused rather than guessed, so Nexus had to stay
+stopped for that window.
 
-A journal that was missed in step 2 stays readable. If its recorded operations are
-all acknowledged and the live deployment already matches the catalog, a restore
-completes it by observation. Anything that would act on its v0.9.12 authority is
-refused before a request is sent (`details.kind: "legacy_deployment_authority"`), and
-an operation that was still pending is refused locally as unconfirmed ("A gateway
-deployment mutation is unconfirmed") and never sent again; resolve either with
+A journal missed in step 2 stayed readable. If its recorded operations were all
+acknowledged and the live deployment already matched the catalog, a restore
+completed it by observation. Anything that would act on its v0.9.12 authority
+was refused before a request was sent (`details.kind: "legacy_deployment_authority"`),
+and an operation that was still pending was refused locally as unconfirmed
+("A gateway deployment mutation is unconfirmed") and never sent again; either
+was resolved with
 [the runbook](#resolving-an-unconfirmed-gateway-deployment-mutation).
 
 A namespace near Edge's conditional bound (64 MiB of canonical representation with
-spec bytes excluded, or 256 MiB of base64 spec content) answers `507` on the snapshot
+spec bytes excluded, or 256 MiB of base64 spec content) answered `507` on the snapshot
 read and on conditional mutations after the upgrade, so enforcement conversions and
-restores that need deployment authority are refused there until it shrinks. Consumer
-verification reads answer `507` the same way, so credential and access changes for
-that namespace fail closed with `details.kind: "namespace_snapshot_too_large"`.
+restores that needed deployment authority were refused there until it shrank. Consumer
+verification reads answered `507` the same way, so credential and access changes for
+that namespace failed closed with `details.kind: "namespace_snapshot_too_large"`.
 
-**Rolling back** means rolling back both sides together, after settling journals
-again: tokens issued by Edge v0.9.13 do not verify on v0.9.12, and the earlier Nexus
-cannot read egress policy schema 2 or the v0.9.13 snapshot.
+**Rolling back** meant rolling back both sides together, after settling journals
+again: tokens issued by Edge v0.9.13 did not verify on v0.9.12, and the earlier Nexus
+could not read egress policy schema 2 or the v0.9.13 snapshot.
 
 ### Upgrading to Edge v0.9.14
 
-Nexus `v0.5.0` and `v0.5.1` pair with Edge v0.9.14 (see the
-[Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.14/docs/upgrade_guide.md#upgrading-to-0914)).
-Unlike v0.9.13, this upgrade keeps every contract Nexus depends on: egress policy
-schema 2, deployment snapshot v2 and its `deployment_snapshot.v2` tokens, and the
-acknowledgement shape. What changes for Nexus:
+_Historical procedure for Nexus `v0.5.0` / `v0.5.1` and Edge v0.9.14. The
+current pairing is recorded in
+[`release/compatibility.env`](../release/compatibility.env)._
 
-- **Control-plane attestation.** A control plane's egress policy answer gains the
+Nexus `v0.5.0` and `v0.5.1` paired with Edge v0.9.14 (see the
+[Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.14/docs/upgrade_guide.md#upgrading-to-0914)).
+Unlike v0.9.13, that upgrade kept every contract Nexus depended on: egress policy
+schema 2, deployment snapshot v2 and its `deployment_snapshot.v2` tokens, and the
+acknowledgement shape. What changed for Nexus:
+
+- **Control-plane attestation.** A control plane's egress policy answer gained the
   optional `data_plane_attestation` object. With `NEXUS_EXPECTED_DATA_PLANES` set, a
-  CP/DP pairing whose data planes all attest public-only can publish under the default
+  CP/DP pairing whose data planes all attested public-only could publish under the default
   public profile; see
   [CP/DP pairings and data-plane attestation](#cpdp-pairings-and-data-plane-attestation).
-  Without the setting, or on Edge v0.9.13, nothing changes.
+  Without the setting, or on Edge v0.9.13, nothing changed.
 - **Narrower `durable` outcomes.** A conditional removal or replacement whose store
-  fails before commit now answers `503` with `durable` `not_started` or
-  `not_committed`, which Nexus reports as `details.kind: "deployment_not_committed"`
-  instead of `deployment_acknowledgement_uncertain`. The journal is kept either way
+  failed before commit began answering `503` with `durable` `not_started` or
+  `not_committed`, which Nexus reported as `details.kind: "deployment_not_committed"`
+  instead of `deployment_acknowledgement_uncertain`. The journal was kept either way
   (see [the runbook](#resolving-an-unconfirmed-gateway-deployment-mutation)).
-- **Error classification.** Backend HTTP/2 resets other than `NO_ERROR` are now
-  `protocol_error` and charged to the target's circuit breaker and passive health, and
-  a buffered response read timeout is `504` instead of `502`. Nexus's per-API metrics
+- **Error classification.** Backend HTTP/2 resets other than `NO_ERROR` became
+  `protocol_error` and were charged to the target's circuit breaker and passive health, and
+  a buffered response read timeout became `504` instead of `502`. Nexus's per-API metrics
   count requests by method and status code, never by `error_class`, so some backend
-  failures move from the `502` bucket to `504`; adjust any alert that keys on it.
+  failures moved from the `502` bucket to `504`.
 
-Procedure:
+Historical procedure:
 
 1. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.13
-   gateway issued keep verifying on v0.9.14, but settling first keeps the upgrade
+   gateway issued kept verifying on v0.9.14, but settling first kept the upgrade
    window free of in-flight conversions.
-2. **Upgrade Edge to v0.9.14.** The ConfigSync protocol revision is now `3`, so the
-   control plane and every data plane must run the same build: upgrade them together.
-   A data plane on an older build cannot connect, and the control plane cannot list
+2. **Upgrade Edge to v0.9.14.** The ConfigSync protocol revision moved to `3`, so the
+   control plane and every data plane had to run the same build: upgrade them together.
+   A data plane on an older build could not connect, and the control plane could not list
    it in its attestation.
-3. **Upgrade Nexus** to `v0.5.1`, which pins Edge v0.9.14 in its
-   [`release/compatibility.env`](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/release/compatibility.env),
+3. **Upgrade Nexus** to `v0.5.1`, which pinned Edge v0.9.14 in
+   [the `v0.5.1` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.1/release/compatibility.env)
+   (and `v0.5.0` in
+   [the `v0.5.0` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.0/release/compatibility.env)),
    and check `GET /api/health/edge` as an admin. On a CP/DP pairing, set
-   `NEXUS_EXPECTED_DATA_PLANES` first if you want the attested guarantee. Then
-   continue with [Upgrading to Edge v0.9.15](#upgrading-to-edge-v0915).
+   `NEXUS_EXPECTED_DATA_PLANES` first if you wanted the attested guarantee.
 
-Nexus `v0.4.0` reads the egress policy answer as a closed key set, so it treats a
-v0.9.14 control plane's answer, which carries `data_plane_attestation`, as unreadable
-and refuses every backend write in every profile. A local data plane's answer carries
-no attestation. On a CP/DP pairing, keep Nexus stopped from step 2 until it runs
+Nexus `v0.4.0` read the egress policy answer as a closed key set, so it treated a
+v0.9.14 control plane's answer, which carried `data_plane_attestation`, as unreadable
+and refused every backend write in every profile. A local data plane's answer carried
+no attestation. On a CP/DP pairing, Nexus had to stay stopped from step 2 until it ran
 `v0.5.0` or later; the
 [`v0.5.0` release notes](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.0/docs/release-notes.md#upgrading-from-v040)
-combine both upgrades in one window.
+combined both upgrades in one window.
 
-**Rolling back** Edge to v0.9.13 keeps Nexus `v0.5.1` working: the attestation disappears, so
-a pairing that relied on it reads "not guaranteed" again and its writes are refused
-unless an opt-out admits them.
+**Rolling back** Edge to v0.9.13 kept Nexus `v0.5.1` working: the attestation disappeared, so
+a pairing that relied on it read "not guaranteed" again and its writes were refused
+unless an opt-out admitted them.
 
 ### Upgrading to Edge v0.9.15
 
-Nexus `v0.5.2` pairs with Edge v0.9.15 and requires it: v0.9.15 is a security
-release, and it is the only Edge version the `v0.5.2` acceptance suite tests. Read the
+_Historical procedure for Nexus `v0.5.2` and Edge v0.9.15. The current pairing is
+recorded in [`release/compatibility.env`](../release/compatibility.env)._
+
+Nexus `v0.5.2` paired with Edge v0.9.15 and required it: v0.9.15 was a security
+release, and it was the only Edge version the `v0.5.2` acceptance suite tested. See the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/docs/upgrade_guide.md#upgrading-to-0915)
-for the gateway-wide changes. Every contract Nexus depends on is unchanged: egress
+for the gateway-wide changes. Every contract Nexus depended on stayed unchanged: egress
 policy schema 2 and its data-plane attestation, deployment snapshot v2 and its
 `deployment_snapshot.v2` tokens, and the acknowledgement shape. The ConfigSync
-protocol revision stays `3`, and Edge adds no core schema change. No Nexus migration
-or journal change is needed. What changes for Nexus:
+protocol revision stayed `3`, and Edge added no core schema change. No Nexus migration
+or journal change was needed. What changed for Nexus:
 
-- **Identity headers.** `X-Consumer-Username` now carries only a mapped Consumer,
-  and an external identity is sent as the new gateway-owned
+- **Identity headers.** `X-Consumer-Username` was narrowed to carry only a mapped Consumer,
+  and external identities moved to the gateway-owned
   `X-Authenticated-Identity`. Every Nexus caller authenticates as a Consumer through
-  `key_auth`, `basic_auth` or `jwt_auth`, so backends behind Nexus keep receiving
-  `X-Consumer-Username` (`nexus-user-<id>` or `nexus-app-<id>`). Nexus writes no
-  LDAP, JWKS or introspection config, so the removed LDAP `consumer_mapping` does
-  not affect it. Edge refuses `X-Authenticated-Identity` as a configured header, and
-  so does Nexus: a `correlation_id` or `request_deduplication` `header_name` of that
-  name (any case, `_` or `-`) is `400 VALIDATION_FAILED`. Rename any existing one
-  before upgrading.
-- **gRPC and WebSocket admission.** Edge now refuses a native WebSocket request with
+  `key_auth`, `basic_auth` or `jwt_auth`, so backends behind Nexus kept receiving
+  `X-Consumer-Username` (`nexus-user-<id>` or `nexus-app-<id>`). Nexus wrote no
+  LDAP, JWKS or introspection config, so the removed LDAP `consumer_mapping` did
+  not affect it. Edge began refusing `X-Authenticated-Identity` as a configured header, and
+  so did Nexus: a `correlation_id` or `request_deduplication` `header_name` of that
+  name (any case, `_` or `-`) returns `400 VALIDATION_FAILED`. Any existing one had to
+  be renamed before upgrading.
+- **gRPC and WebSocket admission.** Edge began refusing a native WebSocket request with
   `403` and a native gRPC request with a trailers-only `PERMISSION_DENIED` (gRPC
   status 7), both with rejection phase `route_protocol_admission`, when the route
-  runs an authentication or admission plugin on HTTP that cannot run on that
-  flavor. On Nexus proxies that is the
+  ran an authentication or admission plugin on HTTP that could not run on that
+  flavor. On Nexus proxies that was the
   `routes` [enforcement level](guides/provider-guide.md#enforcement-level)
   (a blocking `openapi_validator`), every API available to AI agents (`mcp_gateway`,
   `openapi_validator`, `ai_tool_governor`, `ai_prompt_shield` and the tool-call
   `rate_limiting`), and the palette's idempotency keys with `enforce_required`.
-  These requests used to skip that policy. The authentication plugins,
-  `access_control` and the quota `rate_limiting` run on both flavors, and `cors`
-  gates nothing, so an API without those configs serves gRPC and WebSocket as before. A client that
-  nominates `Authorization` in `Connection` on HTTP/1.1 or HTTP/3 now has it removed
-  before authentication and gets `401`.
-- **IPv6 grouping.** Per-source caps and IP-keyed plugin state now group IPv6
-  clients by `/64`, and `rate_limiting` gains `ipv6_prefix`. Nexus quotas count by
+  These requests had previously skipped that policy. The authentication plugins,
+  `access_control` and the quota `rate_limiting` ran on both flavors, and `cors`
+  gated nothing, so an API without those configs served gRPC and WebSocket as before. A client that
+  nominated `Authorization` in `Connection` on HTTP/1.1 or HTTP/3 had it removed
+  before authentication and got `401`.
+- **IPv6 grouping.** Per-source caps and IP-keyed plugin state began grouping IPv6
+  clients by `/64`, and `rate_limiting` gained `ipv6_prefix`. Nexus quotas count by
   Consumer (`limit_by: consumer`) and Nexus never sets `ipv6_prefix`, so portal
-  quotas are unaffected. Aggregate MCP sessions keep Edge's new default cap of 128
-  per authenticated principal; Nexus sets no `sessions` options. At the cap a
-  principal's oldest session is replaced, and when the gateway-wide session store is
-  full, a caller with no session to replace is refused rather than evicting another
+  quotas were unaffected. Aggregate MCP sessions kept Edge's default cap of 128
+  per authenticated principal; Nexus set no `sessions` options. At the cap a
+  principal's oldest session was replaced, and when the gateway-wide session store was
+  full, a caller with no session to replace was refused rather than evicting another
   caller's session.
-- **Plugin-secret environment references.** Plugin configs may name only
+- **Plugin-secret environment references.** Plugin configs were restricted to naming
   `FERRUM_PLUGIN_SECRET_<NAME>` variables. No config Nexus writes names an
-  environment variable, so only an operator's own configs need renaming (see the
+  environment variable, so only an operator's own configs needed renaming (see the
   Edge guide).
-- **Namespace-scoped TLS references.** A namespace-scoped `operator` token may set
+- **Namespace-scoped TLS references.** A namespace-scoped `operator` token could set
   `backend_tls_*` paths only within its namespace. Nexus signs every Admin JWT with
   `role: admin`, never writes those fields, and carries the stored values back on a
-  proxy replace, which Edge keeps, so it is unaffected.
-- **ConfigSync admission.** `GetFullConfig` now requires `node_id` to equal the JWT
+  proxy replace, which Edge kept, so it was unaffected.
+- **ConfigSync admission.** `GetFullConfig` began requiring `node_id` to equal the JWT
   subject. Nexus never calls the control plane's gRPC API; it reads the data-plane
   attestation through the Admin API only.
 
-Procedure:
+Historical procedure:
 
 1. **Check the gateway** with the Edge guide's list, and in the portal check the
    palette header names and any API at `routes`, available to AI agents, or
-   requiring idempotency keys that also serves native gRPC or WebSocket clients:
+   requiring idempotency keys that also served native gRPC or WebSocket clients:
    serve that traffic from a separate API, or relax the setting, before upgrading.
 2. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.14
-   gateway issued keep verifying on v0.9.15.
+   gateway issued kept verifying on v0.9.15.
 3. **Upgrade Edge to v0.9.15**, the control plane and every data plane together.
-4. **Upgrade Nexus** to `v0.5.2`, which pins Edge v0.9.15 in
+4. **Upgrade Nexus** to `v0.5.2`, which pinned Edge v0.9.15 in
    [the `v0.5.2` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.2/release/compatibility.env),
-   and check `GET /api/health/edge` as an admin. To go on to Nexus `v0.6.0`,
-   follow [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920), whose step 1
-   includes the v0.9.17 checks.
+   and check `GET /api/health/edge` as an admin. To move from `v0.5.2` to the
+   current pairing recorded in
+   [`release/compatibility.env`](../release/compatibility.env) (`v0.6.0` with
+   Edge v0.9.20), follow [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920),
+   whose step 1 includes the v0.9.17 checks.
 
-Nexus `v0.5.1` reads Edge v0.9.15 unchanged, and `v0.5.2` still reads v0.9.14, so the
-order of steps 3 and 4 does not matter for compatibility. **Rolling back** Edge to
-v0.9.14 keeps Nexus working, but reopens the vulnerabilities v0.9.15 fixes; do it only
-to restore service.
+Nexus `v0.5.1` read Edge v0.9.15 unchanged, and `v0.5.2` still read v0.9.14, so the
+order of steps 3 and 4 did not matter for compatibility. **Rolling back** Edge to
+v0.9.14 kept Nexus working, but reopened the vulnerabilities v0.9.15 fixed; it was
+only for restoring service.
 
 ### Upgrading to Edge v0.9.17
 
-No Nexus release pairs with Edge v0.9.17: Nexus `v0.6.0` pairs with v0.9.20,
-which includes v0.9.17's fixes for the published QUIC advisories affecting
-v0.9.15. This section reviews what v0.9.17 changed for Nexus; its procedure is
-kept for reference. To move from Nexus `v0.5.2` to `v0.6.0`, do only its step 1
+_Historical notes for Edge v0.9.17 (never shipped as a Nexus release pairing;
+`main` briefly pinned it in
+[`eb939b7e`](https://github.com/ferrum-edge/ferrum-nexus/blob/eb939b7e/release/compatibility.env)).
+The current pairing is recorded in
+[`release/compatibility.env`](../release/compatibility.env)._
+
+No Nexus release paired with Edge v0.9.17: Nexus `v0.6.0` shipped paired with
+Edge v0.9.20 (recorded in
+[`release/compatibility.env`](../release/compatibility.env)), which includes
+v0.9.17's fixes for the published QUIC advisories affecting v0.9.15. This
+section reviews what v0.9.17 changed for Nexus; its procedure is kept for
+historical reference. To move from Nexus `v0.5.2` to `v0.6.0`, do only its step 1
 (as part of step 1 of [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920)) and
 go straight to v0.9.20 after the paired backup, without an intermediate Edge
-v0.9.17. There is no
-published v0.9.16; v0.9.17 is its replacement. Read the
+v0.9.17. There was no published v0.9.16; v0.9.17 was its replacement. See the
 [Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.17/docs/upgrade_guide.md#upgrading-to-0917)
-for the gateway-wide changes. Every contract Nexus depends on is unchanged:
+for the gateway-wide changes. Every contract Nexus depended on stayed unchanged:
 egress policy schema 2 and its data-plane attestation, deployment snapshot v2
 and its `deployment_snapshot.v2` tokens, and the acknowledgement shape. The
-ConfigSync protocol revision stays `3`. No Nexus migration or journal change
-is needed. What changes for Nexus:
+ConfigSync protocol revision stayed `3`. No Nexus migration or journal change
+was needed. What changed for Nexus:
 
-- **Namespace-bounded admin tokens.** An admin JWT carrying an `ns` claim is
+- **Namespace-bounded admin tokens.** An admin JWT carrying an `ns` claim became
   namespace-bounded even with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=false`, and
   every token Nexus mints carries the claim. Portal writes and
-  namespace-scoped reads are unchanged; `/health` answers in the bounded
+  namespace-scoped reads stayed unchanged; `/health` began answering in the bounded
   tenant tier. The Usage card's fleet reads are refused `403` unless
   `FERRUM_METRICS_BEARER_TOKEN` (for `GET /metrics`) and the optional
   `FERRUM_ADMIN_FLEET_READ_JWT_SECRET` (for `GET /admin/metrics`) are set; see
   [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).
-- **Cached admin misses.** When a database read fails and the fallback cache
-  lacks a resource, the admin API answers `503 CachedReadUnavailable` instead
-  of `404`. Nexus already treats a non-404 read error as unavailable rather
-  than confirmed absence, so no local state is deleted on it.
-- **Proxy hop budget.** Edge counts gateway hops in its gateway-owned
-  `X-Ferrum-Hops` header and refuses a request that has already crossed
+- **Cached admin misses.** When a database read failed and the fallback cache
+  lacked a resource, the admin API began answering `503 CachedReadUnavailable` instead
+  of `404`. Nexus already treated a non-404 read error as unavailable rather
+  than confirmed absence, so no local state was deleted on it.
+- **Proxy hop budget.** Edge began counting gateway hops in its gateway-owned
+  `X-Ferrum-Hops` header and refusing a request that had already crossed
   `FERRUM_MAX_PROXY_HOPS` (default `10`; `0` disables the protection — keep
   it above `0`). The budget bounds proxy loops; it does not forbid pointing
   an API at another gateway within the budget. Nexus writes no hop config,
-  but Edge reserves the header name, so Nexus now refuses `X-Ferrum-Hops`
-  (any case, `_` or `-`) as a `correlation_id` `header_name` with
-  `400 VALIDATION_FAILED`; rename any existing one before
-  upgrading.
+  but Edge reserved the header name, so Nexus (`v0.6.0` and later) refuses
+  `X-Ferrum-Hops` (any case, `_` or `-`) as a `correlation_id` `header_name` with
+  `400 VALIDATION_FAILED`; rename any existing one before upgrading.
 
-Procedure:
+Historical reference procedure (do only step 1 when moving directly to v0.9.20):
 
 1. **Check the gateway** with the Edge guide's list, set
    `FERRUM_METRICS_BEARER_TOKEN` on Nexus to the gateway's metrics Bearer token
    if the Usage card matters, keep `FERRUM_MAX_PROXY_HOPS` above `0`, and
    rename any `correlation_id` `header_name` set to `X-Ferrum-Hops`.
 2. **Settle journals** as in step 2 of the v0.9.13 procedure. Tokens a v0.9.15
-   gateway issued keep verifying on v0.9.17.
+   gateway issued kept verifying on v0.9.17.
 3. **Upgrade Edge to v0.9.17**, the control plane and every data plane together.
 4. **Continue with [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920).**
-   No Nexus release pins v0.9.17; `v0.6.0` pins v0.9.20.
+   No Nexus release pinned v0.9.17; the current pairing is recorded in
+   [`release/compatibility.env`](../release/compatibility.env) (`v0.6.0` with
+   Edge v0.9.20).
 
-Nexus `v0.5.2` already works with Edge v0.9.17's bounded-token behavior, so a
-deployment that did stop at v0.9.17 keeps working until it moves on.
-**Rolling back** Edge to v0.9.15 keeps Nexus `v0.5.2` working, but reopens the
-QUIC vulnerabilities v0.9.17 fixes; do it only to restore service.
+Nexus `v0.5.2` already worked with Edge v0.9.17's bounded-token behavior, so a
+deployment that did stop at v0.9.17 kept working until it moved on.
+**Rolling back** Edge to v0.9.15 kept Nexus `v0.5.2` working, but reopened the
+QUIC vulnerabilities v0.9.17 fixed; it was only for restoring service.
 
 ### Upgrading to Edge v0.9.20
 
-Nexus `v0.6.0` pairs with Edge v0.9.20, the only Edge version its
-acceptance suite tests. v0.9.20 follows published v0.9.19, which follows
-v0.9.17: v0.9.18 was tagged but never published, so its changes ship in
+Nexus `v0.6.0` pairs with Edge v0.9.20 (the current pairing recorded in
+[`release/compatibility.env`](../release/compatibility.env)), the only Edge
+version its acceptance suite tests. v0.9.20 follows published v0.9.19, which
+follows v0.9.17: v0.9.18 was tagged but never published, so its changes ship in
 v0.9.19. Read both sections of the Edge upgrade guide,
 [Upgrading to 0.9.19](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20/docs/upgrade_guide.md#upgrading-to-0919)
 and
@@ -2028,7 +2057,7 @@ rotated in that window ([§12](#12-the-credential-mirror)).
   restore into an older release.
 - **Ferrum Edge:** restore into the Edge release that wrote it, or one Edge
   documents as compatible. Nexus is validated against the release pinned in
-  `release/compatibility.env`.
+  [`release/compatibility.env`](../release/compatibility.env).
 - **Same driver:** moving between database engines is a migration, not a
   restore.
 
@@ -2903,7 +2932,7 @@ traffic after the plugin is enabled is counted.
 An API with no `ferrum_requests_total` series for its own `proxy_id` shows
 `available: false` with an `unavailable_reason` instead of zero counters. The
 portal's own reads of both endpoints need extra credentials on Ferrum Edge
-v0.9.17; see
+v0.9.17 and later; see
 [Namespace-bounded admin tokens](#namespace-bounded-admin-tokens-ferrum-edge-v0917).
 
 To match a dashboard to a portal API, use the `proxy_id` label: it is the
@@ -3303,7 +3332,8 @@ gateway") and marks the row revoked.
 
 Edge with ferrum-edge#7393 refuses a consumer that changed after the read with
 `412`, which reaches the caller as `409 CONFLICT` with nothing deleted and is
-never resent. Edge v0.9.20 (the pinned release) refuses `If-Match` on these
+never resent. Edge v0.9.20 (the release pinned in
+[`release/compatibility.env`](../release/compatibility.env)) refuses `If-Match` on these
 routes with a `400` (`If-Match is only supported on …`) before acting; Nexus
 then re-reads the consumer and deletes without the header only if the tag is
 unchanged, and otherwise answers the same `409`. **Remaining window on
