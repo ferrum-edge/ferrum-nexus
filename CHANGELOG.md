@@ -17,8 +17,10 @@ until 1.0.** Every earlier migration is folded into one base schema per backend,
 and a database created by `v0.5.2` or earlier is refused at startup rather than
 migrated: `v0.6.0` needs a new, empty database. Also in this release: a durable
 worker finishes grant revocations whose gateway half was interrupted and rolls back
-interrupted approvals, credential deletes are conditioned on the Edge read they were
-decided from, and several Nexus security fixes. See
+interrupted approvals, credential deletes are checked against the Edge read they
+were decided from (atomically only on an Edge with ferrum-edge#7393; on the
+pinned v0.9.20 Nexus re-reads the consumer's tag just before an unconditional
+delete), and several Nexus security fixes. See
 [`docs/release-notes.md`](docs/release-notes.md) for the supported combination and
 how to move from `v0.5.2`.
 
@@ -136,8 +138,8 @@ how to move from `v0.5.2`.
   type listed twice (content types compare case-insensitively, and `brotli`
   is `br`), an empty `content_types` list (leave the key out), a content
   type with `*` anywhere but a whole subtype (`*/*`, `*/json`,
-  `application/*+json`; `text/*` is now accepted), `X-Real-IP` or
-  `X-Geo-Country` (any case, `_` or `-`) as a `correlation_id` `header_name`,
+  `application/*+json`; `text/*` is now accepted), `X-Geo-Country` (any case,
+  `_` or `-`) or `X-Real-IP` (any case) as a `correlation_id` `header_name`,
   and an `ip_restriction` prefix length that is not canonical decimal
   (`/08`). Edit or remove a palette plugin saved with one of these values
   before upgrading Edge: the gateway refuses it when it loads.
@@ -411,7 +413,7 @@ how to move from `v0.5.2`.
   not yet observed, and unavailable request metrics. Observed open, half-open
   and closed states are unchanged.
 
-- **Credential deletes are conditioned on the read they were decided from**
+- **Credential deletes are checked against the read they were decided from**
   (ferrum-edge#7393). Edge addresses credential entries only by index, and
   reads redact them, so an entry another writer (an operator, Foundry,
   automation) added or removed between Nexus's read and its
@@ -830,8 +832,7 @@ how to move from `v0.5.2`.
 
 - Turning the login policy to `local_only` now ends the sessions of every
   account linked at a provider it shuts out, in the same transaction, like
-  removing or disabling the provider does (#591)
-  ([GHSA-627m-vcp5-v2p7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-627m-vcp5-v2p7)).
+  removing or disabling the provider does (#591, #744).
   It covers `NEXUS_OIDC_PROVIDERS` providers, whose `enabled` flag cannot be
   edited through the API, so the policy is the runtime switch that cuts them
   off. The `admin.settings_update` entry records `providers_cut_off` and
@@ -839,7 +840,7 @@ how to move from `v0.5.2`.
 
 - A returning single sign-on now commits under the provider's
   `sso:provider:<id>` lease, as first-time links and provisioning already did
-  ([GHSA-2343-7j5f-mjcv](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-2343-7j5f-mjcv)).
+  (#744).
   A settings save on another instance that removed, disabled or shut out the
   provider could commit between the callback's settings re-read and its
   commit, and its revocation could not see the session the callback then
@@ -848,7 +849,7 @@ how to move from `v0.5.2`.
 - Unlinking a user's single sign-on identity takes the account's
   `users:lifecycle` lease and re-checks the account's role inside its
   transaction
-  ([GHSA-3qj2-5wrm-hgr4](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-3qj2-5wrm-hgr4)).
+  (#744).
   An `admin` could unlink an account promoted to `admin` after the first check;
   the unlink now answers `403` and leaves the identity and sessions in place.
 
@@ -918,7 +919,7 @@ how to move from `v0.5.2`.
 
 - The one-time legacy `basicauth` scan no longer treats a whole-type
   `keyauth` or `jwt` revoke as having cleared `basicauth`
-  (GHSA-jhjw-5g7j-m528). It asked only whether the consumer had a
+  (#708). It asked only whether the consumer had a
   `scope: 'whole-type'` `credential.revoke` after the historical append, of
   any credential type, and then skipped the `retiring` placeholder for an
   entry that may still be on the gateway with no row, leaving a later
@@ -993,13 +994,13 @@ how to move from `v0.5.2`.
   `style-src` has since dropped `'unsafe-inline'` for a per-response nonce
   (#587, under Changed).
 - **SMTP requires STARTTLS when implicit TLS is off**
-  ([GHSA-v7p7-85wx-8wrp](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-v7p7-85wx-8wrp)).
+  (#570).
   With `NEXUS_SMTP_SECURE=false` a relay that does not offer STARTTLS, or a path
   that strips it, now fails the delivery before credentials or mail are sent.
   The new environment-only `NEXUS_SMTP_ALLOW_PLAINTEXT=true` permits a plaintext
   relay on a trusted network.
 - **Encrypted settings are bound to their row**
-  ([GHSA-qm46-qg94-mpg7](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-qm46-qg94-mpg7)).
+  (#570).
   `app_settings` secrets are written as `v2` blobs authenticated with
   `app_settings:v2:<key>`, so a ciphertext copied to another setting's row no
   longer opens. Reads refuse unbound `v1` blobs, and `rotate-secret-key`
@@ -1007,7 +1008,7 @@ how to move from `v0.5.2`.
   opens and records `settings.encryption_bound`; a database created at the
   `v0.6.0` base schema has none.)
 - **Registration re-checks its policy when it commits**
-  ([GHSA-9cr4-49fg-gfcx](https://github.com/ferrum-edge/ferrum-nexus/security/advisories/GHSA-9cr4-49fg-gfcx)).
+  (#570).
   A registration in flight when an administrator closes registration, removes
   its role, turns on `sso_only` or requires email verification is created
   under the policy in force at commit, or refused. The commit and every writer

@@ -67,10 +67,13 @@ The full list of changes is in the [changelog](https://github.com/ferrum-edge/fe
   crash or a failed compensation, a background worker finishes an interrupted
   revocation, and rolls back an approval whose grant never committed (its groups
   come off and the request returns to pending, so it must be approved again).
-- **Safer credential changes.** Credential deletes are conditioned on the exact
-  Edge read they were decided from (`If-Match`, ferrum-edge#7393), `keyauth` and
-  `jwt` credentials are deleted by identity rather than by position, and Nexus
-  honours Edge's 500-ACL-group cap per consumer.
+- **Safer credential changes.** Credential deletes are checked against the
+  Edge read they were decided from. On the pinned Edge v0.9.20, Nexus re-reads
+  the consumer's strong tag and deletes only if it is unchanged, which leaves a
+  short window between that re-read and the delete; an Edge with
+  ferrum-edge#7393 closes it with `If-Match`. `keyauth` and `jwt` credentials
+  are deleted by identity rather than by position, and Nexus honours Edge's
+  500-ACL-group cap per consumer.
 - **Security fixes in Nexus itself**; see [security](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/docs/release-notes.md#security).
 
 ## Install
@@ -158,11 +161,12 @@ generated values), after taking the paired backup (step 3):
 
 ```bash
 set -e
+git fetch --tags origin
+git rev-parse --verify 'v0.6.0^{commit}'
 set -a
 . ./release/compatibility.env
 set +a
 docker compose down -v
-git fetch --tags origin
 git checkout --detach v0.6.0
 cp docker/docker-compose.example.yml docker-compose.yml
 set -a
@@ -171,8 +175,9 @@ set +a
 docker compose up -d --build
 ```
 
-The first `compatibility.env` is the `v0.5.2` one, which `docker compose down`
-needs to read the old Compose file; the second, after the checkout, pins Edge
+The tag is fetched and verified first, so nothing is torn down if it cannot be
+found. The first `compatibility.env` is the `v0.5.2` one, which `docker compose
+down` needs to read the old Compose file; the second, after the checkout, pins Edge
 `v0.9.20`. Copying the example again picks up the `v0.6.0` Compose pins (skip it
 if you changed your `docker-compose.yml`, and merge by hand). `docker compose
 down -v` deletes both the Nexus database (`pgdata`) and the gateway's database
