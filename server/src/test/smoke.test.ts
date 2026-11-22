@@ -4196,6 +4196,11 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.deepEqual(await store.userIdentities.listUserIdsByProvider(provider, issuer), [
         other.id,
       ]);
+      // Without an issuer, every linked account under the provider id across all issuers.
+      assert.deepEqual(
+        (await store.userIdentities.listUserIdsByProvider(provider)).sort(),
+        [other.id, owner.id].sort(),
+      );
       assert.equal(await store.userIdentities.delete(otherIssuer.id), true);
       // Removing a provider removes its links, and only its links.
       assert.equal(await store.userIdentities.deleteByProvider(provider), 1);

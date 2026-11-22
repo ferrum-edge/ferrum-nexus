@@ -1493,10 +1493,14 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               //
               // Each entry maps a provider id to the issuer whose links it
               // cuts off, or to `null` for every link under the id: a removal
-              // deletes them all. A provider still in force cuts off only its
-              // own issuer's links; one under the same id at another issuer
-              // (a settings row an environment provider shadows) never signed
-              // anybody in through it.
+              // or an explicit disable cuts off every link under the provider
+              // id across all issuers (fail closed, so links left under that
+              // id at another issuer — for example by a rolled-back
+              // `NEXUS_OIDC_PROVIDERS` override — do not keep their sessions).
+              // A pure policy switch to `local_only` cuts off only each
+              // provider's own issuer's links; one under an environment
+              // provider's id at another issuer (a stored row the environment
+              // provider shadows) never signed anybody in through it.
               const cutOff = new Map<string, string | null>();
               for (const id of removed) if (!envIds.has(id)) cutOff.set(id, null);
               const policyCutOff = stored.policy !== 'local_only' && next.policy === 'local_only';
@@ -1508,7 +1512,9 @@ export function createSsoService(deps: SsoServiceDeps): SsoService {
               );
               for (const { settings } of providersInForce(config, stored)) {
                 if (!settings.enabled || cutOff.has(settings.id)) continue;
-                if (policyCutOff || nextEnabled.get(settings.id) === false) {
+                if (nextEnabled.get(settings.id) === false) {
+                  cutOff.set(settings.id, null);
+                } else if (policyCutOff) {
                   cutOff.set(settings.id, settings.issuer);
                 }
               }
