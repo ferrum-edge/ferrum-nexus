@@ -754,9 +754,13 @@ nor the password that opened it. `local_only` cuts off every provider that was
 in force and enabled, `NEXUS_OIDC_PROVIDERS` ones included, whose own `enabled`
 flag cannot be edited through the API; the policy change itself keeps the links
 (a provider removed in the same save loses its links as any removal does), so
-turning single sign-on back on lets them sign in again. A provider still in force cuts off the
-links at its own issuer only, not those under its id at another issuer (a
-settings row an environment provider shadows). The `admin.settings_update` entry
+turning single sign-on back on lets them sign in again. Removing or explicitly
+disabling a stored provider revokes sessions for every account linked under that
+provider id across all issuers, failing closed so links left under the id at
+another issuer (for example, by a rolled-back `NEXUS_OIDC_PROVIDERS` override)
+do not keep their sessions; a policy switch to `local_only` alone scopes each
+cut-off to the provider's own issuer, leaving links under an environment
+provider's id at a shadowed issuer alone. The `admin.settings_update` entry
 records `providers_cut_off` and `sessions_revoked`, on every switch to
 `local_only` even when nothing was in force. Accounts with no link at a cut-off
 provider keep their sessions; other settings changes end no session (see

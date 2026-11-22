@@ -2311,6 +2311,187 @@ describe('single sign-on login policies', () => {
     }
   });
 
+  it('explicit disable revokes across all issuers; local_only stays issuer-scoped', async () => {
+    const extra = createMockOidcProvider({ clientId: 'nexus-extra', clientSecret: null });
+    let h: TestApp | null = null;
+    try {
+      await extra.start();
+      h = await app();
+      const portal = h;
+      const founder = await portal.registerUser({
+        email: 'disable-scope-founder@corp.example.test',
+      });
+      const stored = {
+        id: 'stored-disable',
+        display_name: 'Stored Disable',
+        issuer: extra.issuer,
+        client_id: 'nexus-extra',
+        scopes: ['openid', 'email'],
+        enabled: true,
+        jit_provisioning: true,
+        link_existing_accounts: false,
+        require_verified_email: true,
+        allowed_email_domains: [],
+        disable_local_password_for_linked: false,
+        sync_roles: false,
+        default_role: 'client',
+        role_mappings: [],
+        org_mappings: [],
+      };
+      const put = (payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
+        portal.authed(founder, { method: 'PUT', url: '/api/admin/sso', payload });
+      const status = async (session: TestSession): Promise<number> =>
+        (await portal.authed(session, { method: 'GET', url: '/api/auth/me' })).statusCode;
+      const seenAuditIds = new Set<string>();
+      const nextSsoAudit = async (): Promise<Record<string, unknown>> => {
+        const fresh = (await portal.auditRows(AuditAction.ADMIN_SETTINGS_UPDATE)).filter(
+          (row) => row.target_id === SSO_SETTINGS_KEY && !seenAuditIds.has(row.id),
+        );
+        assert.equal(fresh.length, 1, 'expected one new SSO settings audit row');
+        const [row] = fresh;
+        assert.ok(row);
+        seenAuditIds.add(row.id);
+        return row.details;
+      };
+
+      assert.equal((await put({ providers: [stored] })).statusCode, 200);
+      await nextSsoAudit();
+
+      // One account linked at the stored provider's current issuer, one linked
+      // under the same provider id at a different issuer (for example left by a
+      // rolled-back NEXUS_OIDC_PROVIDERS override), and one linked under an
+      // environment provider's id at a shadowed issuer.
+      const atCurrent = await portal.registerUser({
+        email: 'disable-scope-current@corp.example.test',
+      });
+      await portal.store.userIdentities.create({
+        user_id: atCurrent.user.id,
+        provider_id: 'stored-disable',
+        issuer: extra.issuer,
+        subject: 'disable-scope-current-sub',
+        email: atCurrent.user.email,
+        provisioned: false,
+      });
+      const atOtherIssuer = await portal.registerUser({
+        email: 'disable-scope-other-issuer@corp.example.test',
+      });
+      await portal.store.userIdentities.create({
+        user_id: atOtherIssuer.user.id,
+        provider_id: 'stored-disable',
+        issuer: 'https://rolled-back-env.example.test',
+        subject: 'disable-scope-other-issuer-sub',
+        email: atOtherIssuer.user.email,
+        provisioned: false,
+      });
+      const atEnvOtherIssuer = await portal.registerUser({
+        email: 'disable-scope-env-other@corp.example.test',
+      });
+      await portal.store.userIdentities.create({
+        user_id: atEnvOtherIssuer.user.id,
+        provider_id: 'corp',
+        issuer: 'https://retired-env.example.test',
+        subject: 'disable-scope-env-other-sub',
+        email: atEnvOtherIssuer.user.email,
+        provisioned: false,
+      });
+
+      // A pure policy switch to local_only stays issuer-scoped for both stored
+      // and environment providers.
+      const policyCut = await put({ policy: 'local_only' });
+      assert.equal(policyCut.statusCode, 200, policyCut.body);
+      assert.equal(await status(atCurrent), 401, 'local_only revokes the current-issuer link');
+      assert.equal(
+        await status(atOtherIssuer),
+        200,
+        'local_only keeps a stored-provider link at another issuer',
+      );
+      assert.equal(
+        await status(atEnvOtherIssuer),
+        200,
+        'local_only keeps an environment-provider link at another issuer',
+      );
+      assert.equal(await status(founder), 200);
+      const policyRow = await nextSsoAudit();
+      assert.deepEqual(policyRow.providers_cut_off, ['corp', 'partner', 'stored-disable']);
+      assert.equal(policyRow.sessions_revoked, 1);
+
+      // Explicitly disabling the stored provider under local_only revokes
+      // sessions for every account linked under that provider id, across all
+      // issuers, without touching links under other provider ids.
+      const atCurrentUnderLocalOnly = await portal.loginUser(atCurrent.user.email);
+      const disableUnderLocalOnly = await put({ providers: [{ ...stored, enabled: false }] });
+      assert.equal(disableUnderLocalOnly.statusCode, 200, disableUnderLocalOnly.body);
+      assert.equal(
+        await status(atCurrentUnderLocalOnly),
+        401,
+        'explicit disable revokes the current-issuer session',
+      );
+      assert.equal(
+        await status(atOtherIssuer),
+        401,
+        'explicit disable revokes a session linked at another issuer under the same provider id',
+      );
+      assert.equal(
+        await status(atEnvOtherIssuer),
+        200,
+        'explicit disable leaves other provider ids alone',
+      );
+      const disableLocalOnlyRow = await nextSsoAudit();
+      assert.deepEqual(disableLocalOnlyRow.providers_cut_off, ['stored-disable']);
+      assert.equal(disableLocalOnlyRow.sessions_revoked, 2);
+
+      // Explicitly disabling the stored provider while SSO is active
+      // (local_and_sso) likewise revokes across all issuers under that id.
+      assert.equal((await put({ policy: 'local_and_sso', providers: [stored] })).statusCode, 200);
+      await nextSsoAudit();
+      const atCurrentAgain = await portal.loginUser(atCurrent.user.email);
+      const atOtherAgain = await portal.loginUser(atOtherIssuer.user.email);
+      const disableDirect = await put({ providers: [{ ...stored, enabled: false }] });
+      assert.equal(disableDirect.statusCode, 200, disableDirect.body);
+      assert.equal(await status(atCurrentAgain), 401);
+      assert.equal(
+        await status(atOtherAgain),
+        401,
+        'explicit disable under local_and_sso revokes other-issuer links under the same id',
+      );
+      assert.equal(await status(atEnvOtherIssuer), 200);
+      const disableDirectRow = await nextSsoAudit();
+      assert.deepEqual(disableDirectRow.providers_cut_off, ['stored-disable']);
+      assert.equal(disableDirectRow.sessions_revoked, 2);
+
+      // Disabling a stored provider in the same save that switches to
+      // local_only still revokes the disabled provider provider-id-wide, while
+      // providers cut off only by the policy switch remain issuer-scoped.
+      assert.equal((await put({ providers: [stored] })).statusCode, 200);
+      await nextSsoAudit();
+      const atOtherCombined = await portal.loginUser(atOtherIssuer.user.email);
+      const combined = await put({
+        policy: 'local_only',
+        providers: [{ ...stored, enabled: false }],
+      });
+      assert.equal(combined.statusCode, 200, combined.body);
+      assert.equal(
+        await status(atOtherCombined),
+        401,
+        'explicit disable stays provider-id-wide when combined with a switch to local_only',
+      );
+      assert.equal(
+        await status(atEnvOtherIssuer),
+        200,
+        'environment provider cut off only by local_only stays issuer-scoped',
+      );
+      const combinedRow = await nextSsoAudit();
+      assert.deepEqual(combinedRow.providers_cut_off, ['corp', 'partner', 'stored-disable']);
+      assert.equal(combinedRow.sessions_revoked, 1);
+    } finally {
+      try {
+        await h?.close();
+      } finally {
+        await extra.stop();
+      }
+    }
+  });
+
   it('local_only audits an empty cut-off when no provider was in force', async () => {
     const h = await buildTestApp({ env: { NEXUS_OIDC_PROVIDERS: '[]' } });
     try {

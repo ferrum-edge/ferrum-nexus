@@ -6,6 +6,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Explicitly disabling a stored single sign-on provider now revokes sessions for
+  every account linked under that provider id across all issuers (fail closed,
+  matching provider removal and pre-#744 behaviour), so a link left under the
+  same provider id at another issuer (for example, by a rolled-back
+  `NEXUS_OIDC_PROVIDERS` override) does not keep its session. A pure login
+  policy switch to `local_only` keeps issuer-scoped revocation.
+
 ## [0.6.0] - 2026-11-21
 
 Paired with Ferrum Edge `v0.9.20`
