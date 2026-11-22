@@ -747,8 +747,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `mass:<actor_id>:<batch>:<user_id>`, the same `(administrator, batch)` scope
   the campaign digest check and the daily charge already used, so two
   administrators who pick the same `idempotency_key` run separate campaigns
-  instead of aliasing each other's rows. A campaign retried across the upgrade
-  queues again under the new keys.
+  instead of aliasing each other's rows.
 - **Documentation corrections** (#560, #561, #562, #567, #568, #569). Closed
   registration has no manual account creation (onboard through single sign-on
   or reopen registration); a first trusted password reset revokes the

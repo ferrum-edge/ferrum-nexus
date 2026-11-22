@@ -1085,9 +1085,14 @@ is needed. What changes for Nexus:
 
 Procedure:
 
-1. **Check the gateway** with both Edge guide sections. In the portal, fix or
-   remove every palette `compression`, `correlation_id` and `ip_restriction`
-   setting listed above, and tell JWT clients to drop any `aud` claim.
+1. **Check the gateway** with both Edge guide sections, and with the checks of
+   every earlier Edge release you cross: coming from Edge v0.9.15 (Nexus
+   `v0.5.2`), also step 1 of [Upgrading to Edge v0.9.17](#upgrading-to-edge-v0917),
+   which renames any `correlation_id` `header_name` set to `X-Ferrum-Hops`. In
+   the portal, fix or remove every palette `compression`, `correlation_id` and
+   `ip_restriction` setting listed above, and tell JWT clients to drop any
+   `aud` claim. Edge refuses to start on a saved config it rejects, so do this
+   while the old portal still runs.
 2. **Settle journals** as in step 2 of the v0.9.13 procedure, so that no
    conversion or restore spans the gateway upgrade.
 3. **Stop Nexus and take the paired Nexus and Edge backup** before changing
@@ -1513,9 +1518,11 @@ When the release notes say the schema changed (until 1.0, check each release's
 notes), the new release needs a new, empty database:
 
 1. Read the release notes, including the Ferrum Edge release the new Nexus
-   release is validated against. While the old portal still runs, do that Edge
-   release's preflight (for Edge v0.9.20, step 1 of
-   [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920), which fixes saved
+   release is validated against. While the old portal still runs, do the
+   preflight of every Edge release between the one you run and that one (for
+   Nexus `v0.5.2` on Edge v0.9.15 moving to Edge v0.9.20, step 1 of
+   [Upgrading to Edge v0.9.17](#upgrading-to-edge-v0917) and of
+   [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920), which fix saved
    palette settings in the portal), and settle recovery journals (step 2 of
    [Upgrading to Edge v0.9.13](#upgrading-to-edge-v0913)).
 2. Stop every Nexus instance, then **back up Nexus and Edge together**, as one

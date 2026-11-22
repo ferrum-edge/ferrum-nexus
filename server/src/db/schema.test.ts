@@ -154,7 +154,23 @@ describe('ensureBaseSchema', () => {
       await ensureBaseSchema(driver, schema);
       db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} VALUES ('001_initial', 'then')`).run();
       await assert.rejects(ensureBaseSchema(driver, schema), NO_UPGRADE_PATH);
-      assert.deepEqual(ledger(db), ['000_base_v0_6', '001_initial']);
+      assert.deepEqual(ledger(db), [schema.id, '001_initial'].sort());
+    } finally {
+      db.close();
+    }
+  });
+
+  it("refuses a ledger id stored as a BLOB, even with the generation's bytes", async () => {
+    const db = openSqliteDatabase(':memory:');
+    try {
+      const schema = loadBaseSchema('sqlite');
+      db.exec(
+        `CREATE TABLE ${SCHEMA_LEDGER_TABLE} (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
+      );
+      db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} VALUES (?, 'then')`).run(
+        Buffer.from(schema.id, 'utf8'),
+      );
+      await assert.rejects(ensureBaseSchema(createSqliteSchemaDriver(db), schema), NO_UPGRADE_PATH);
     } finally {
       db.close();
     }

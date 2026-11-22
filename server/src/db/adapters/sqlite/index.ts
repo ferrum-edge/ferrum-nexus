@@ -830,7 +830,11 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver {
       );
     },
     async listRecorded(): Promise<string[]> {
-      return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).map((row) => text(row.id));
+      // A non-text id (a BLOB from an out-of-band import) never matches the
+      // generation: it is reported by its type, so the check refuses it.
+      return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).map((row) =>
+        typeof row.id === 'string' ? row.id : `<non-text ${typeof row.id} id>`,
+      );
     },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
       const create = db.transaction((base: BaseSchema) => {
