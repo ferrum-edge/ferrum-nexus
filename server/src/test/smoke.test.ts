@@ -6261,12 +6261,12 @@ async function olderMongo(baseUrl: string, ledger: string[]): Promise<OlderDatab
         const ids = await db.collection('schema_migrations').find({}).sort({ _id: 1 }).toArray();
         const collections = await db.listCollections({}, { nameOnly: true }).toArray();
         const users = await db.collection('users').indexes();
-        const users = await db.collection('users').find({}).sort({ _id: 1 }).toArray();
+        const userDocs = await db.collection('users').find({}).sort({ _id: 1 }).toArray();
         return {
           // Whole ledger documents and the pre-existing documents, which a
           // refusal must leave as they were.
           ledger: ids.map((doc) => JSON.stringify(doc)),
-          users: users.map((doc) => JSON.stringify(doc)),
+          users: userDocs.map((doc) => JSON.stringify(doc)),
           // Collections, plus any index beyond `_id` the refused start created.
           tables: [
             ...collections.map((collection) => collection.name),
