@@ -1069,7 +1069,7 @@ egress policy schema 2 and its data-plane attestation, deployment snapshot v2
 and its `deployment_snapshot.v2` tokens, and the acknowledgement shape. The
 ConfigSync protocol revision stays `3`. Edge v0.9.20 itself needs no Nexus
 journal change, but Nexus `v0.6.0`, which pairs with it, needs a new, empty
-database ([schema and upgrades before 1.0](#schema-and-upgrades-before-10)).
+database ([schema and upgrades](#schema-and-upgrades)).
 What changes for Nexus:
 
 - **Plugin configs are closed at every depth** (v0.9.20). Edge refuses an
@@ -2950,8 +2950,10 @@ out may still have applied, so undo steps are idempotent and scoped to the field
 their step wrote.
 
 An undo step that fails does not raise (it would hide the original error). It
-writes an audit row and logs at `error`. Nothing repairs these automatically,
-so alert on each:
+logs at `error` and writes an audit row on a best-effort basis: when the
+database is unavailable at that moment, the log line is the only record (see
+[known limitations](known-limitations.md#gateway-writes)). Nothing repairs
+these automatically, so alert on each:
 
 | Row                           | Meaning                                                                                                                                                                                                             |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
