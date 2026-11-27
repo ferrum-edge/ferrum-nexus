@@ -592,7 +592,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
    * A key the gateway no longer accepts is then refused here, against the
    * Edge this suite runs: the pinned release in CI, and Edge `main` in the
    * Edge main drift workflow (ferrum-contracts#76). Before #731 the palette
-   * still wrote `ip_restriction.mode`, which Edge main refuses (#727).
+   * still wrote `ip_restriction.mode`, which Edge v0.9.21 refuses (#727).
    */
   const PALETTE_CONFIGS: Readonly<Record<string, Record<string, unknown>>> = {
     security_headers: {
@@ -2093,6 +2093,63 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       });
       return response.status === 401;
     });
+  });
+
+  it('refuses a credential delete conditioned on a stale consumer tag (ferrum-edge#7393)', async () => {
+    // Nexus conditions every revoke and rotation delete on the consumer tag of
+    // the read it decided from and has no fallback without it. This checks the
+    // gateway half on the real Edge: a tag that changed since the read is
+    // refused with `412`, and nothing is deleted.
+    const client = await newClient();
+    const api = await publishApi(provider, {
+      name: `E2E stale tag ${RUN}`,
+      slug: `e2e-stale-tag-${RUN}`,
+      authPlugin: 'key_auth',
+    });
+    await grantAccess(client, provider, api.id);
+    const first = await portal<{
+      credential: { id: string; ferrum_consumer_id: string };
+      consumer_username: string;
+      secret: Record<string, string>;
+    }>('POST', '/api/credentials', { session: client, body: { credential_type: 'keyauth' } });
+    const consumerId = first.credential.ferrum_consumer_id;
+    const consumerPath = `/consumers/${encodeURIComponent(consumerId)}`;
+
+    const read = await gatewayAdmin('GET', consumerPath);
+    assert.equal(read.status, 200);
+    const staleTag = read.headers.get('etag');
+    assert.ok(staleTag, 'the consumer read carries its row tag');
+
+    // Another write changes the consumer after that read.
+    const second = await issueCredential(client, 'keyauth');
+    const keys: IssuedCredential[] = [
+      { id: first.credential.id, consumerUsername: first.consumer_username, secret: first.secret },
+      second,
+    ];
+    const fresh = await gatewayAdmin('GET', consumerPath);
+    assert.equal(fresh.status, 200);
+    assert.notEqual(fresh.headers.get('etag'), staleTag, 'the append changed the consumer tag');
+
+    const refused = await gatewayAdmin(
+      'DELETE',
+      `${consumerPath}/credentials/keyauth/0`,
+      undefined,
+      { 'if-match': staleTag },
+    );
+    assert.equal(refused.status, 412, await refused.text());
+
+    const afterRefusal = await gatewayAdmin('GET', consumerPath);
+    assert.equal(afterRefusal.status, 200);
+    const stored = (await afterRefusal.json()) as { credentials?: { keyauth?: unknown[] } };
+    assert.equal(stored.credentials?.keyauth?.length, 2, 'nothing was deleted');
+    for (const key of keys) {
+      await waitFor('each credential to keep working after the refused delete', async () => {
+        const response = await callGateway(`${api.listen_path}/invoices`, {
+          headers: authHeadersFor(key, 'keyauth'),
+        });
+        return response.status === 200;
+      });
+    }
   });
 
   /* ── CORS, from the browser's point of view ───────────────────────────── */

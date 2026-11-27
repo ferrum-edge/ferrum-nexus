@@ -1111,9 +1111,9 @@ export async function buildServer(
   }
   if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
   if (deps.startRetiredKeysPass ?? config.env !== 'test') {
-    // At every start, while the gateway still accepts them: rewrite the
-    // palette configs an earlier release wrote with a key the next Edge
-    // release refuses (issue #727). In the background; it only reads the
+    // At every start: rewrite the palette configs an earlier release wrote
+    // with a key Edge v0.9.21 refuses (issue #727). It has to finish while
+    // the gateway is still on v0.9.20, which accepts them. In the background; it only reads the
     // store once nothing is left, and whatever a run misses the next retries.
     void stripRetiredPaletteKeys({
       store: deps.store,
