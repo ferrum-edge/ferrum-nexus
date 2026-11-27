@@ -260,10 +260,11 @@ const HEADER_VALUE_PATTERN = '[\\t\\u0020-\\u007E]*';
 /**
  * Header names Edge rejects for `correlation_id.header_name`.
  *
- * An exact copy of Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.20`,
- * lowercased in Edge's own order (`src/plugins/correlation_id.rs:20-69`);
- * `v0.9.19` added `x-real-ip`. {@link isGatewayOwnedConsumerHeader} covers the
- * separate `x-consumer-*` prefix rule, and {@link isGeoCountryHeader} and
+ * An exact copy of Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.21`
+ * (unchanged since `v0.9.19`, which added `x-real-ip`), lowercased in Edge's
+ * own order (`src/plugins/correlation_id.rs:20-69`).
+ * {@link isGatewayOwnedConsumerHeader} covers the separate `x-consumer-*`
+ * prefix rule, and {@link isGeoCountryHeader} and
  * {@link isProxyHopsHeader} the other gateway-owned names. Edge also refuses
  * the effective `FERRUM_REAL_IP_HEADER`, which is deployment-specific and so
  * unknown to the portal; everything else is caught here, turning a gateway
@@ -698,8 +699,8 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         item_max_length: 64,
       },
       // No `mode`: it never changed whether a request was admitted, Edge
-      // v0.9.20 deprecates it, and the next Edge release refuses it as an
-      // unknown key (issue #727). See `RETIRED_PLUGIN_CONFIG_KEYS`.
+      // v0.9.20 deprecated it, and Edge v0.9.21 refuses it as an unknown key
+      // (issue #727). See `RETIRED_PLUGIN_CONFIG_KEYS`.
     ],
   },
 
@@ -727,7 +728,7 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         item_pattern: '\\S(?:.*\\S)?',
         item_max_length: 200,
         // Edge's own default list (`default_blocked_patterns` in
-        // `src/plugins/bot_detection.rs`, unchanged from v0.9.15 to v0.9.20),
+        // `src/plugins/bot_detection.rs`, unchanged from v0.9.15 to v0.9.21),
         // so a config saved without the key opens showing what Edge enforces,
         // and an untouched save does not narrow it.
         default: [
@@ -1015,9 +1016,9 @@ export const RETIRED_RESPONSE_CACHING: ProviderPluginDescriptor = {
 /**
  * Palette config keys Edge has removed, by plugin name (issue #727).
  *
- * Edge v0.9.20 still accepts them but they decide nothing; the next Edge
- * release refuses them as unknown keys, and an enabled fail-closed config that
- * carries one stops a database-mode gateway from starting. The palette no
+ * Edge v0.9.20 accepts them but they decide nothing; Edge v0.9.21 refuses them
+ * as unknown keys, and an enabled fail-closed config that carries one stops a
+ * database-mode gateway from starting. The palette no
  * longer offers them, the server refuses them in a new save, every replay of
  * a stored row drops them, and a one-off startup pass rewrites the configs
  * Nexus wrote before this release (`server/src/plugins/retired-keys.ts`).

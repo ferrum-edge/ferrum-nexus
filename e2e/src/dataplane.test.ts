@@ -592,7 +592,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
    * A key the gateway no longer accepts is then refused here, against the
    * Edge this suite runs: the pinned release in CI, and Edge `main` in the
    * Edge main drift workflow (ferrum-contracts#76). Before #731 the palette
-   * still wrote `ip_restriction.mode`, which Edge main refuses (#727).
+   * still wrote `ip_restriction.mode`, which Edge v0.9.21 refuses (#727).
    */
   const PALETTE_CONFIGS: Readonly<Record<string, Record<string, unknown>>> = {
     security_headers: {

@@ -5,14 +5,15 @@
  * Until this release the palette wrote `ip_restriction.mode` on every save (the
  * form seeded it with its default), and the retired `response_caching` could
  * carry `cache_key_include_query`. Edge v0.9.20 accepts both but they decide
- * nothing; the next Edge release refuses them as unknown keys. `ip_restriction`
- * is fail-closed, so one such enabled config stops a database-mode gateway
- * from starting after that upgrade, and these rows are Nexus's to rewrite, not
- * the operator's.
+ * nothing; Edge v0.9.21 refuses them as unknown keys (ferrum-edge#7114).
+ * `ip_restriction` is fail-closed, so one such enabled config stops a
+ * database-mode gateway from starting after that upgrade, and these rows are
+ * Nexus's to rewrite, not the operator's.
  *
- * So at every start, while the gateway is still on v0.9.20, every palette row
- * in this namespace that carries one is rewritten without it, on the gateway
- * (only the config the row owns) and in the store, through
+ * So at every start (the run that matters is one that finishes while the
+ * gateway is still on v0.9.20), every palette row in this namespace that
+ * carries one is rewritten without it, on the gateway (only the config the
+ * row owns) and in the store, through
  * {@link ApiPluginsService.stripRetiredConfigKeys}. The rows are found with one
  * store query over the affected plugins' rows
  * (`apiPlugins.listCarryingConfigKeys`), so a store with nothing left costs one
@@ -22,7 +23,8 @@
  *
  * The first run that finishes for a namespace with nothing failed or deferred
  * records an `api.plugin_keys_stripped` audit row targeting that namespace,
- * which is what an operator checks before upgrading Edge.
+ * which is what an operator checks before moving Edge from v0.9.20 to
+ * v0.9.21.
  */
 
 import { RETIRED_PLUGIN_CONFIG_KEYS } from '@ferrum-nexus/shared';

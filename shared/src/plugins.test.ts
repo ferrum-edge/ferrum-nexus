@@ -11,7 +11,7 @@ import {
 } from './plugins.js';
 
 /**
- * Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.20`, copied verbatim from
+ * Edge's closed `RESERVED_HEADER_NAMES` set at `v0.9.21`, copied verbatim from
  * `src/plugins/correlation_id.rs:20-69` (lowercased, in Edge's order; `v0.9.19`
  * added `x-real-ip`). Nexus has no vendored contract for header names, so this
  * literal is the pin: a change on either side must be reconciled here, not
@@ -66,7 +66,7 @@ const EDGE_V0920_RESERVED_HEADER_NAMES: readonly string[] = [
 ];
 
 describe('CORRELATION_ID_RESERVED_HEADERS', () => {
-  it('matches the reserved set Ferrum Edge v0.9.20 refuses, exactly', () => {
+  it('matches the reserved set Ferrum Edge v0.9.21 refuses, exactly', () => {
     assert.deepEqual([...CORRELATION_ID_RESERVED_HEADERS], [...EDGE_V0920_RESERVED_HEADER_NAMES]);
   });
 

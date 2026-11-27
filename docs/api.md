@@ -375,7 +375,10 @@ writes without changing that verdict. Egress policy schema 1 (Edge v0.9.12 and e
 `unsupported_egress_policy_schema`.
 See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
-Published Edge v0.9.20 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+The published Edge v0.9.21 image and `contracts-edge-0.9.21` are pinned in
+[`release/compatibility.env`](../release/compatibility.env) and
+[`contracts/ferrum-contracts/PIN`](../contracts/ferrum-contracts/PIN); see
+[upgrading to Edge v0.9.21](operations.md#upgrading-to-edge-v0921).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
