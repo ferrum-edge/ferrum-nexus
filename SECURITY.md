@@ -30,7 +30,8 @@ Ferrum Edge Admin API. Reports of particular interest:
   from `NEXUS_SECRET_KEY`).
 
 See [docs/security.md](docs/security.md) for the threat model and hardening
-guide.
+guide, and [docs/known-limitations.md](docs/known-limitations.md) for the standing
+deployment, gateway-write and single sign-on limits.
 
 ## Supported versions
 

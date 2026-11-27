@@ -287,8 +287,8 @@ See
 above for Nexus `v0.6.0`, and the packaged acceptance suite ran against it. The record
 at the `v0.5.2` tag pins Edge v0.9.15, at the `v0.5.1` and `v0.5.0` tags Edge v0.9.14, and at the
 `v0.4.0` tag Edge v0.9.13. The
-[controlled public-only fixture](../../e2e/public-only/README.md) runs a packaged Nexus
-image against the same Edge release on demand, outside CI, and covers the local
+[controlled public-only fixture](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/e2e/public-only/README.md)
+(as of the `v0.6.0` tag) runs a packaged Nexus image against the same Edge release on demand, outside CI, and covers the local
 data-plane profile only.
 
 Nexus supports Node `^22.22.2 || ^24.15.0 || >=26.0.0` since `v0.4.0` (adopted through

@@ -3,12 +3,12 @@
 This walkthrough takes you from an empty machine to a client calling a
 published API through the gateway, with a credential the portal issued.
 
-It targets Ferrum Nexus `v0.6.0` with Ferrum Edge `v0.9.20`, the supported pair
-in the [release notes](release-notes.md). There is no upgrade path before 1.0:
-a database created by `v0.5.2` or earlier, or at a different base schema
-generation, is refused at startup and must be recreated (see
-[schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10)).
-Start this walkthrough with a new database.
+It targets the Nexus release you check out below and the Ferrum Edge release its
+compatibility record pins, the supported pair in the
+[release notes](release-notes.md) (as of 2026-11-22 the latest release is
+`v0.6.0`, paired with Edge `v0.9.20`). Start this walkthrough with a new, empty
+database. To upgrade an existing portal instead, follow
+[schema and upgrades](operations.md#schema-and-upgrades-before-10).
 
 You play three roles in turn: the operator who runs the stack, a **provider**
 who publishes an API, and a **client** who requests access and calls it. Allow
@@ -49,7 +49,8 @@ before `v0.4.0` supported Node 22.14 or later.
 
 Nexus is a front end for a gateway, so the gateway comes first.
 
-Clone Nexus, check out the release tag, and load the
+Clone Nexus, check out a release tag (the command below picks the latest one on
+`main`; name another tag to install that release), and load the
 [compatibility record](../release/compatibility.env). The record names the
 exact Edge image this release was tested with, the same one the
 [Compose example](operations.md#compose) uses:
@@ -57,7 +58,7 @@ exact Edge image this release was tested with, the same one the
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
-git checkout --detach v0.6.0
+git checkout --detach "$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
 set -a
 . ./release/compatibility.env
 set +a
@@ -193,7 +194,7 @@ NEXUS_BOOTSTRAP_TOKEN=walkthrough-bootstrap-token
 Then start it:
 
 ```bash
-npm run migrate   # creates the schema; also runs automatically at startup
+npm run migrate   # creates or upgrades the schema; also runs automatically at startup
 npm run dev       # backend :8787, web :5173 (NEXUS_PORT / NEXUS_WEB_PORT)
 ```
 

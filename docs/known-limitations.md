@@ -25,7 +25,15 @@ releases. A limitation that is lifted is removed here in the same change.
   replays them if a later step fails. Those steps are held by the process doing the
   operation. If that process stops partway (a crash, a killed pod, a deploy), nothing
   replays them, and the gateway can be left partly changed until an operator compares it
-  with the catalog. A failed undo writes an audit row, but a stopped process writes none.
+  with the catalog. The audit trail does not always show this. Spec revisions, agent
+  updates, and API and plugin removals commit an intent row (`api.spec_revision_start`,
+  `api.agents_update_start`, `api.delete_start`, `api.plugin_remove_start`) before their
+  first gateway write, so a start row with no outcome row marks one that stopped
+  partway; a publish or an API `PATCH` writes no such row. The failure records
+  (`api.gateway_repair_required`, `api.publish_rollback`, `api.plugin_rollback`) are
+  best effort: when the database is unavailable at that moment, only the process log
+  (`error` or `warn`) records the failure. When neither explains a difference, compare
+  the gateway with the catalog.
   Enforcement conversions and gateway restores are the exception: they keep durable,
   encrypted recovery journals. See
   [when a gateway change cannot be taken back](operations.md#when-a-gateway-change-cannot-be-taken-back)
@@ -39,10 +47,15 @@ releases. A limitation that is lifted is removed here in the same change.
 ## Single sign-on
 
 - **No SCIM and no back-channel logout.** Nexus receives no provisioning or logout events
-  from the identity provider. Roles, organizations and deprovisioning are applied at the
-  account's next sign-in. An account whose provider access was revoked keeps its session
-  until it expires, and keeps its gateway credentials until an administrator disables it
-  or it signs in again. See
+  from the identity provider and never polls it. It acts only when someone completes a
+  sign-in with a valid ID token. If that token's claims map to no role, the sign-in is
+  refused; only when the provider has `deprovision_on_access_loss` turned on is the
+  account also disabled, its sessions ended and its gateway revocation queued (never for
+  a `super_admin`). When the provider itself refuses the sign-in, as it does for a user
+  disabled or removed there, Nexus sees only an error and changes nothing. So
+  offboarding someone at the provider alone leaves their Nexus sessions until they
+  expire and their gateway credentials working: disable the account in Nexus as part of
+  offboarding. See
   [single sign-on in the security model](security.md#single-sign-on-openid-connect).
 - **End-to-end coverage uses Dex only.** The acceptance suite signs in through a real,
   digest-pinned Dex provider (authorization code with PKCE, `state`, `nonce`, group
@@ -54,8 +67,10 @@ releases. A limitation that is lifted is removed here in the same change.
 ## Service manifests
 
 - **The preview validates and never applies.** `POST /api/service-manifests/preview`
-  checks a Ferrum service manifest against the pinned shared v1 contract and Edge's
-  limits, and returns a redacted summary. It stores nothing, contacts no gateway, and
+  checks a Ferrum service manifest against the pinned shared v1 contract plus selected
+  Alloy and Edge checks (cleartext telemetry, derived resource ids, field bounds), and
+  returns a redacted summary. Its length bounds count characters, while Edge counts UTF-8
+  bytes, so a non-ASCII value the preview accepts can still exceed Edge's limit. It stores nothing, contacts no gateway, and
   has no apply, publish or diagnostics counterpart. **Stability: preview.** Its request
   and response may change in a minor release, with the change stated in the release
   notes, and it is excluded from the compatibility promise for the `/api` surface that

@@ -112,7 +112,10 @@ restore remains an operator recovery contract and is never a conversion fallback
 ## Test coverage
 
 The four Nexus adapter contracts exercise production service paths with the
-released HTTP mock; it does not reproduce owner raw SQL/BSON internals. Packaged
-acceptance tests real v0.9.13 conversion traffic, preservation of complete consumer/
-trust/upstream evidence, stale original-token refusal and invalid conditional modes.
+released HTTP mock; it does not reproduce owner raw SQL/BSON internals. The packaged
+acceptance suite runs real conversion traffic against the Edge release pinned in the
+checkout's [compatibility record](../release/compatibility.env) (Edge v0.9.13 when this
+protocol was first qualified, for Nexus `v0.4.0`), and checks preservation of complete
+consumer/trust/upstream evidence, stale original-token refusal and invalid conditional
+modes.
 Owner-side store behaviour is covered by Edge's own native store tests, not by Nexus.
