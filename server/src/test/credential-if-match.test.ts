@@ -212,7 +212,10 @@ describe('credential deletes conditioned on the consumer tag', () => {
 
     const deletes = credentialDeletes(consumerId);
     assert.equal(deletes.length, 1, 'one conditional attempt, never resent');
-    assert.ok(deletes.every((call) => call.ifMatch !== undefined), 'never sent without the tag');
+    assert.ok(
+      deletes.every((call) => call.ifMatch !== undefined),
+      'never sent without the tag',
+    );
     assert.deepEqual(labelled(consumerId, { first, second }), ['first', 'second']);
     assert.equal(await statusOf(first.credential.id), 'active');
     assert.equal(await statusOf(second.credential.id), 'active');

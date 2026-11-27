@@ -54,8 +54,7 @@ ferrum-alloy `main` at `2b206a4616586b6193d25958b646e2478fc40a94`
   (`contracts-edge-0.9.21`, ferrum-contracts#74), which the preview applies as published:
   `api.public_path` at most 500 characters, `api.service_base_path` 2049 (Edge's
   2048-byte `backend_path` plus the trailing `/`), `upstream.host` 255, `health.path`
-  2048, `health.interval_seconds` 3600, and `health.timeout_ms` and every `timeouts.*`
-  86400000. Like the schema's `maxLength`, the lengths count characters; Edge counts
+  2048, `health.interval_seconds` 3600, and `health.timeout_ms` and every `timeouts.*` 86400000. Like the schema's `maxLength`, the lengths count characters; Edge counts
   UTF-8 bytes, so a non-ASCII value within the character bound can still exceed Edge's
   byte limit. The pinned Alloy revision caps `api.service_base_path` at 2048 bytes
   including the `/`, one below v1 and Edge; ferrum-alloy#319 tracks aligning it.

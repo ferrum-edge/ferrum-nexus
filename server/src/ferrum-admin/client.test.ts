@@ -702,7 +702,10 @@ describe('ferrum admin client', () => {
           request.method !== 'GET' && request.path.includes(`/consumers/${id}/credentials`),
       );
       assert.equal(writes.length, 3, 'one conditional attempt each');
-      assert.ok(writes.every((request) => request.ifMatch === etag), 'never sent without the tag');
+      assert.ok(
+        writes.every((request) => request.ifMatch === etag),
+        'never sent without the tag',
+      );
       assert.equal(edge.callsTo('GET', `/consumers/${id}`).length, 1, 'no re-read');
       assert.equal(keysOf(id).length, 2);
       assert.equal(edge.consumers.get(`nexus/${id}`)?.credentials.jwt, undefined);
