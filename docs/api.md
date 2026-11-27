@@ -2137,6 +2137,13 @@ header-name tokens of 1–128 chars) and optional `enforce_websocket_origins`
   `400 VALIDATION_FAILED`. `false` removes the gate (authentication and ACLs
   still apply); removing CORS clears it. Older APIs pick this up the next time
   their CORS policy is saved.
+- Nexus does not judge wildcard origins itself; the gateway does. With
+  `allow_credentials: true`, Edge refuses a `"*.suffix"` origin whose suffix is
+  a single label, a public suffix, or has a Public Suffix List rule beneath it
+  (`*.com`, `*.co.uk`, `*.github.io`, and from Edge v0.9.21 `*.amba.host`), so
+  such a policy fails when it is written to the gateway. Use exact origins or a
+  registrable-domain wildcard such as `"*.example.com"`, or leave credentials
+  off.
 
 **`routes` mode and the document Edge receives.** Nexus sends Edge a copy with
 root `servers` set to `/` and every nested `servers` removed (path items,

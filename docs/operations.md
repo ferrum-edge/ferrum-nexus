@@ -1194,6 +1194,21 @@ acknowledgement shape. What changes for Nexus:
   `FERRUM_ADMIN_JWT_VIEWER_SECRET`. Nexus decides every conditional write from
   reads made with its admin token (`FERRUM_ADMIN_JWT_SECRET`), so it is
   unaffected; the optional fleet-read key reads only `GET /admin/metrics`.
+- **Credentialed wildcard CORS origins.** Edge refuses a `cors` config with
+  `allow_credentials: true` and a `"*.suffix"` origin whose suffix is a single
+  label, a public suffix, or has a Public Suffix List rule beneath it. v0.9.21's
+  refreshed list (`psl` 2.1.255) adds `amba.host` to that set, so
+  `"*.amba.host"` with credentials, which v0.9.20 accepted, is now refused.
+  Nexus stores an API's CORS policy as the provider entered it and writes it
+  to Edge unchanged, so a stored policy with that pair fails Edge's validation
+  on v0.9.21: an Edge restore that carries it is refused, and Nexus's own
+  rebuilds (a gateway restore, a conversion, a CORS edit) are refused when they
+  write it. A new policy with that pair is refused by the gateway when it
+  is saved. Find stored ones with
+  `SELECT id, slug FROM apis WHERE cors_json LIKE '%amba.host%'` (SQL
+  backends; on MongoDB, the `apis` documents whose `cors_json` mentions it)
+  and, on the old pairing, change each through Nexus to exact origins or
+  `allow_credentials: false` (see [`CorsConfig`](api.md)).
 - **Clients.** Every JWT verifier (`jwt_auth` included) refuses a token whose
   header declares a `crit` extension other than `b64`, and a request that sends
   `Content-Type` twice or lists two media types is refused with `400`.
@@ -1205,21 +1220,49 @@ acknowledgement shape. What changes for Nexus:
 
 Procedure:
 
-1. **On Edge v0.9.20, with Nexus `v0.6.0` still running**, confirm the
-   `api.plugin_keys_stripped` audit row for your `FERRUM_NAMESPACE` (see
-   [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)), and
-   check the gateway against the Edge guide section.
-2. **Settle journals** as in step 2 of the v0.9.13 procedure, so that no
-   conversion or restore spans the gateway upgrade: an Edge database rebuild
-   issues new deployment tokens.
-3. **Stop Nexus and take the paired Nexus and Edge backup** (step 2 of
-   [moving to a new release](#moving-to-a-new-release)), including a fresh,
-   namespace-complete Edge `GET /backup`: v0.9.21 restores only backups whose
-   `api_specs` section is version `"2"`.
-4. **Upgrade Edge to v0.9.21**, the control plane and every data plane
-   together, rebuilding a SQL Edge database as the Edge guide's build-out
-   procedure says.
-5. **Move Nexus** to the release that pins Edge v0.9.21, following its release
+Do steps 1 to 4 on Edge v0.9.20 with Nexus `v0.6.0` still running:
+
+1. **Stop new conversions and settle journals** as in steps 1 and 2 of the
+   v0.9.13 procedure. This comes first: the palette cleanup in step 2 leaves a
+   palette row alone while a conversion or gateway restore owns its API, and
+   records `api.plugin_keys_stripped` only when nothing was left over. An Edge
+   database rebuild also issues new deployment tokens, so no journal may span
+   the gateway upgrade.
+2. **Confirm the palette cleanup**: restart Nexus once more and check that the
+   `api.plugin_keys_stripped` audit row for your `FERRUM_NAMESPACE` exists and
+   that no row was logged as left for later since (see
+   [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
+3. **Fix what v0.9.21 refuses**: the credentialed `*.amba.host` CORS policies
+   above, through Nexus, and everything the Edge guide section lists for your
+   gateway configuration.
+4. **Prove the Edge backup restores.** Take a namespace-complete Edge
+   `GET /backup` and check its API specs. v0.9.21 restores only an `api_specs`
+   section of version `"2"` whose every item has a `resource_hash` of 64
+   lowercase hex characters, and refuses the **whole** namespace otherwise.
+   v0.9.20 also accepts an empty `resource_hash` on restore and copies a
+   stored hash, empty or not, into every later export, so a spec that once came
+   back from an old backup can still carry an empty one in a fresh export:
+
+   ```bash
+   jq -r '.api_specs.section_version,
+          (.api_specs.items[] | select(.resource_hash | test("^[0-9a-f]{64}$") | not) | .id)' \
+     ferrum-backup.json
+   ```
+
+   It must print `2` and nothing else. For each id it prints, re-submit that
+   spec on v0.9.20 so Edge records its hash (for a Nexus `routes` API,
+   publish its current document as a new spec revision through Nexus; for a
+   spec Nexus does not own, `PUT /api-specs/{id}` with the same document), then
+   export and check again. Then restore the
+   export into a scratch Edge v0.9.21 instance: a successful restore is the
+   proof.
+5. **Stop Nexus and take the paired Nexus and Edge backup** (step 2 of
+   [moving to a new release](#moving-to-a-new-release)), with a fresh Edge
+   `GET /backup` that passes the check in step 4.
+6. **Upgrade Edge to v0.9.21**, the control plane and every data plane
+   together, rebuilding a SQL Edge database through that backup as the Edge
+   guide's build-out procedure says.
+7. **Move Nexus** to the release that pins Edge v0.9.21, following its release
    notes, and check `GET /api/health/edge` as an admin.
 
 Nexus `v0.6.0` is qualified against Edge v0.9.20 only. **Rolling back** Edge to
