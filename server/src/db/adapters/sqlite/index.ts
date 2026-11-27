@@ -99,12 +99,14 @@ import { conflict } from '../../../lib/errors.js';
 import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
-  ensureBaseSchema,
-  loadBaseSchema,
-  SCHEMA_LEDGER_TABLE,
-  type BaseSchema,
+  checksumMismatchError,
+  ensureSchema,
+  loadMigrations,
+  type LedgerEntry,
   type SchemaDriver,
-} from '../../schema.js';
+  type SqlMigration,
+} from '../../migrate.js';
+import { loadBaseSchema, SCHEMA_LEDGER_TABLE, type BaseSchema } from '../../schema.js';
 import type {
   AccessRequestFilter,
   AccessRequestRecord,
@@ -818,23 +820,38 @@ export function openSqliteDatabase(path: string): Database {
   return db;
 }
 
+/** Whether the ledger has the `checksum` column (a v0.6.0 ledger does not). */
+function ledgerHasChecksum(db: Database): boolean {
+  return queryAll(db, `PRAGMA table_info(${SCHEMA_LEDGER_TABLE})`).some(
+    (row) => row.name === 'checksum',
+  );
+}
+
+/** A ledger id as recorded; a non-text id never matches anything this build knows. */
+function ledgerId(value: unknown): string {
+  // A non-text id (a BLOB from an out-of-band import) is reported by its type,
+  // so the schema check refuses it.
+  return typeof value === 'string' ? value : `<non-text ${typeof value} id>`;
+}
+
 /** The SQLite schema primitives; exported for the schema tests. */
-export function createSqliteSchemaDriver(db: Database): SchemaDriver {
+export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigration> {
   return {
     async ensureLedger(): Promise<void> {
       db.exec(
         `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
            id TEXT PRIMARY KEY,
-           applied_at TEXT NOT NULL
+           applied_at TEXT NOT NULL,
+           checksum TEXT
          )`,
       );
     },
-    async listRecorded(): Promise<string[]> {
-      // A non-text id (a BLOB from an out-of-band import) never matches the
-      // generation: it is reported by its type, so the check refuses it.
-      return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).map((row) =>
-        typeof row.id === 'string' ? row.id : `<non-text ${typeof row.id} id>`,
-      );
+    async listRecorded(): Promise<LedgerEntry[]> {
+      const columns = ledgerHasChecksum(db) ? 'id, checksum' : 'id';
+      return queryAll(db, `SELECT ${columns} FROM ${SCHEMA_LEDGER_TABLE}`).map((row) => ({
+        id: ledgerId(row.id),
+        checksum: typeof row.checksum === 'string' ? row.checksum : null,
+      }));
     },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
       const create = db.transaction((base: BaseSchema) => {
@@ -844,7 +861,37 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver {
           nowIso(),
         );
       });
-      create(schema);
+      create.immediate(schema);
+    },
+    async prepareLedger(): Promise<void> {
+      if (!ledgerHasChecksum(db)) {
+        db.exec(`ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN checksum TEXT`);
+      }
+    },
+    async applyMigration(migration: SqlMigration): Promise<void> {
+      // BEGIN IMMEDIATE takes the write lock first; the ledger is re-read under
+      // it, so a second process on the same file (unsupported, but possible)
+      // cannot apply the migration twice.
+      const apply = db.transaction((step: SqlMigration) => {
+        const existing = queryAll(
+          db,
+          `SELECT id, checksum FROM ${SCHEMA_LEDGER_TABLE} WHERE id = ?`,
+          [step.id],
+        )[0];
+        if (existing !== undefined) {
+          const entry: LedgerEntry = {
+            id: step.id,
+            checksum: typeof existing.checksum === 'string' ? existing.checksum : null,
+          };
+          if (entry.checksum === step.checksum) return;
+          throw checksumMismatchError(entry, step);
+        }
+        db.exec(step.sql);
+        db.prepare(
+          `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum) VALUES (?, ?, ?)`,
+        ).run(step.id, nowIso(), step.checksum);
+      });
+      apply.immediate(migration);
     },
   };
 }
@@ -951,8 +998,12 @@ class SqliteStore implements NexusStore {
 
   private closed = false;
 
-  constructor(db: Database) {
+  /** Forward migrations `migrate()` applies; `undefined` means the shipped ones. */
+  private readonly migrations: readonly SqlMigration[] | undefined;
+
+  constructor(db: Database, migrations?: readonly SqlMigration[]) {
     this.db = db;
+    this.migrations = migrations;
     // The repository literals below run straight against the connection; the
     // process sees them only through the ownership gate. Every repository the
     // store exposes must be listed here — an unguarded one would reopen the
@@ -1000,7 +1051,11 @@ class SqliteStore implements NexusStore {
   }
 
   async migrate(): Promise<void> {
-    await ensureBaseSchema(createSqliteSchemaDriver(this.db), loadBaseSchema('sqlite'));
+    await ensureSchema(
+      createSqliteSchemaDriver(this.db),
+      loadBaseSchema('sqlite'),
+      this.migrations ?? loadMigrations('sqlite'),
+    );
   }
 
   async close(): Promise<void> {
@@ -4162,8 +4217,13 @@ function auditWhere(filter: AuditLogFilter): WhereBuilder {
 /**
  * Build the SQLite store. Pass `':memory:'` (the default for
  * `NEXUS_ENV=test`) for an ephemeral database; file paths get their parent
- * directory created and WAL enabled.
+ * directory created and WAL enabled. `migrations` replaces the shipped forward
+ * migrations; it is a test seam (the upgrade tests register a probe through
+ * it) and production never passes it.
  */
-export function createSqliteStore(config: NexusConfig): NexusStore {
-  return new SqliteStore(openSqliteDatabase(config.db.sqlitePath));
+export function createSqliteStore(
+  config: NexusConfig,
+  migrations?: readonly SqlMigration[],
+): NexusStore {
+  return new SqliteStore(openSqliteDatabase(config.db.sqlitePath), migrations);
 }

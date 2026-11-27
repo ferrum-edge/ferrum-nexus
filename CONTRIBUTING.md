@@ -62,13 +62,16 @@ coverage changes visible.
 
 ## Schema policy
 
-**Until v1, edit the base schema directly; there are no migrations.** Each backend has one base
-schema (`server/src/db/schema/base.sql`, `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in the
-MongoDB adapter), and a schema change edits all four in the same change. No upgrade paths are
-designed before 1.0: bump `BASE_SCHEMA_ID` in `server/src/db/schema.ts` with every schema edit, and
-a database created at an earlier schema generation is refused at startup and must be
-recreated, development databases included. See
-[schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10).
+**The base schema is frozen; every schema change is a numbered forward migration.** Each backend's
+base schema (`server/src/db/schema/base.sql`, `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in
+the MongoDB adapter) is the 1.0 baseline, unchanged since `v0.6.0`, and is never edited:
+`server/src/db/frozen-baseline.test.ts` fails on any change. A schema change adds
+`server/src/db/migrations/NNN_description.sql`, `.pg.sql` and `.mysql.sql` plus a `MONGO_MIGRATIONS`
+step of the same id, in one change. From 1.0.0 onward a migration that shipped in a release is never
+edited, renamed or removed, and every release opens the database the previous one left. Until it
+ships, a migration may still change; a development database that applied the earlier text is then
+refused and must be recreated. See
+[schema and upgrades](docs/operations.md#schema-and-upgrades).
 
 ## Ground rules
 

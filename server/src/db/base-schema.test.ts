@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { createSqliteSchemaDriver, openSqliteDatabase } from './adapters/sqlite/index.js';
-import { ensureBaseSchema, loadBaseSchema, splitSqlStatements } from './schema.js';
+import { ensureSchema } from './migrate.js';
+import { loadBaseSchema, splitSqlStatements } from './schema.js';
 
 const CREATE_STATEMENT = /^CREATE\s/;
 const CREATE_TABLE_IF_NOT_EXISTS = /^CREATE TABLE IF NOT EXISTS (\w+)/;
@@ -206,7 +207,7 @@ describe('base schema', () => {
 
     const db = openSqliteDatabase(':memory:');
     try {
-      await ensureBaseSchema(createSqliteSchemaDriver(db), loadBaseSchema('sqlite'));
+      await ensureSchema(createSqliteSchemaDriver(db), loadBaseSchema('sqlite'), []);
       const indexes = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'messages'")
         .all()

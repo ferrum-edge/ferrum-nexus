@@ -10,7 +10,7 @@
  *   (`"ident"` → `` `ident` ``, which is what lets the shared repos say
  *   `"key"` — a reserved word here and not in PostgreSQL) and reports
  *   `affectedRows` as the matched row count for UPDATEs (CLIENT_FOUND_ROWS);
- * - the serialized, replayable base-schema creation in `schema.ts`;
+ * - the serialized, replayable base schema and forward migrations in `schema.ts`;
  * - `transaction()`, a real `START TRANSACTION`/`COMMIT`/`ROLLBACK` on a
  *   dedicated connection checked out of the pool for the duration of the body.
  *   Nested `transaction()` calls join the outer one, and bodies are serialised,
@@ -34,6 +34,7 @@ import mysql from 'mysql2/promise';
 import type { DbDriver } from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
+import type { SqlMigration } from '../../migrate.js';
 import { ensureMysqlSchema } from './schema.js';
 import type { NexusStore, StoreHealth } from '../../store.js';
 import { formatSql, type Row, type SqlExecutor, type SqlParam } from '../sql-common.js';
@@ -79,9 +80,13 @@ class MysqlBackend implements SqlStoreBackend {
 
   private closed = false;
 
-  constructor(db: MysqlPool) {
+  /** Forward migrations `migrate()` applies; `undefined` means the shipped ones. */
+  private readonly migrations: readonly SqlMigration[] | undefined;
+
+  constructor(db: MysqlPool, migrations?: readonly SqlMigration[]) {
     this.db = db;
     this.pool = mysqlExecutor(db);
+    this.migrations = migrations;
   }
 
   async init(): Promise<void> {
@@ -92,7 +97,7 @@ class MysqlBackend implements SqlStoreBackend {
   }
 
   async migrate(): Promise<void> {
-    await ensureMysqlSchema(this.db);
+    await ensureMysqlSchema(this.db, undefined, { migrations: this.migrations });
   }
 
   async close(): Promise<void> {
@@ -146,8 +151,13 @@ class MysqlBackend implements SqlStoreBackend {
  * Build the MySQL store from `config.db.url`.
  *
  * The caller still owns `init()` and `migrate()`, exactly as for sqlite.
+ * `migrations` replaces the shipped forward migrations; it is a test seam and
+ * production never passes it.
  */
-export function createMysqlStore(config: NexusConfig): NexusStore {
+export function createMysqlStore(
+  config: NexusConfig,
+  migrations?: readonly SqlMigration[],
+): NexusStore {
   const pool = mysql.createPool({
     uri: config.db.url,
     charset: 'utf8mb4_general_ci',
@@ -166,5 +176,5 @@ export function createMysqlStore(config: NexusConfig): NexusStore {
     // there is nothing for the driver to convert — but keep it explicit.
     dateStrings: true,
   });
-  return createSqlStore(new MysqlBackend(pool));
+  return createSqlStore(new MysqlBackend(pool, migrations));
 }

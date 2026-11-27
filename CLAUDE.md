@@ -19,24 +19,30 @@ server (`server/`), which enforces RBAC and writes the audit log before forwardi
 `v0.6.0` is the current release, paired with Ferrum Edge `v0.9.20` (`release/compatibility.env`).
 `v0.5.2` paired with Edge `v0.9.15`.
 
-**The app is in buildout: until v1, edit the base schema directly; no migrations.** No upgrade
-paths will be designed before 1.0:
+**The base schema is frozen; every schema change is a numbered forward migration.** From 1.0.0
+onward a release opens the database the previous release left, and schema migrations only move
+forward:
 
-- Each backend has one base schema that a new database is created at:
+- Each backend has one base schema, the 1.0 baseline, unchanged since `v0.6.0`:
   `server/src/db/schema/base.sql` (SQLite), `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in
-  `server/src/db/adapters/mongodb/index.ts`. The pre-0.6 migration chain (`001` to `015`) is folded
-  into it. A schema change edits all four in the same change. Do not add migration files, upgrade
-  steps, data backfills or a released-migration freeze.
-- **Bump `BASE_SCHEMA_ID` in `server/src/db/schema.ts` (`000_base_v0_6`, named after the release
-  that first ships it) in the same change as any edit to the base schema.** It is the one entry
-  `schema_migrations` records. At startup an empty ledger gets the base schema, a matching
-  generation is left alone, and anything else (a pre-0.6 migration chain, an older generation) is
-  refused with
-  an error telling the operator to recreate the database. A database created by an earlier version
-  is never migrated. See
-  [docs/operations.md, "Schema and upgrades before 1.0"](docs/operations.md#schema-and-upgrades-before-10).
-- The MySQL schema must stay replayable: only `CREATE TABLE IF NOT EXISTS`, with indexes and
-  constraints inline (MySQL DDL commits on its own; `adapters/mysql/schema.ts`).
+  `server/src/db/adapters/mongodb/index.ts`. **Never edit them**, nor `BASE_SCHEMA_ID`
+  (`000_base_v0_6`, the baseline's ledger id): `server/src/db/frozen-baseline.test.ts` pins their
+  checksums and fails on any change.
+- A schema change is a new migration with the next id (numbered from `016`; `001` to `015` belong
+  to the pre-0.6 chain): `server/src/db/migrations/NNN_description.sql`, `.pg.sql` and
+  `.mysql.sql`, plus a step of the same id in `MONGO_MIGRATIONS` (MongoDB adapter). Once a release
+  ships it, a migration is never edited, renamed, reordered or deleted; until then it may change,
+  and a development database that applied the earlier text is refused and must be recreated.
+- `store.migrate()` (`server/src/db/migrate.ts`) creates the baseline in an empty database, then
+  applies the migrations the `schema_migrations` ledger lacks, in id order, recording each one's
+  id, checksum and time (in the same transaction on SQLite and PostgreSQL). It refuses, changing
+  nothing, a database created before `v0.6.0`, one a newer release migrated (no downgrades), and a
+  recorded migration whose checksum differs. See
+  [docs/operations.md, "Schema and upgrades"](docs/operations.md#schema-and-upgrades).
+- MySQL DDL commits on its own, so the MySQL base schema is only `CREATE TABLE IF NOT EXISTS`, and a
+  MySQL migration may use only the replay-verifiable statements `adapters/mysql/schema.ts` accepts
+  (no data changes). MongoDB steps must be idempotent. `server/src/test/schema-upgrade.test.ts`
+  proves a migration applies on top of a `v0.6.0` database on all four backends.
 
 ## Workspace layout
 
@@ -64,7 +70,7 @@ Run from the repo root unless noted.
 ```bash
 npm install                              # all workspaces
 cp .env.example .env                     # then set NEXUS_SECRET_KEY, FERRUM_ADMIN_URL, FERRUM_ADMIN_JWT_SECRET
-npm run migrate                          # build shared, then create the schema (the server also does at startup)
+npm run migrate                          # build shared, then create or migrate the schema (the server also does at startup)
 npm run dev                              # server (tsx watch) on :8787 + web (vite) on :5173
 
 npm run build                            # shared → server → web
@@ -204,11 +210,10 @@ container image.
 - **Adding a route**: register it in the right file under `server/src/routes/`, wire any new
   service into `server/src/index.ts` (the "COMPOSITION" sections), add DTOs to
   `shared/src/api-contract.ts`, and add the call to `web/src/lib/api.ts`.
-- **Adding a DB column or table**: until v1, edit the base schema directly, with no migration:
-  `server/src/db/schema/base.sql`, `base.pg.sql` and `base.mysql.sql`, plus `BASE_INDEXES` in the
-  MongoDB adapter for any index, and bump `BASE_SCHEMA_ID` in `server/src/db/schema.ts` so older
-  databases are refused at startup and must be recreated. Then update `NexusStore`, implement it in sqlite,
-  sql-repos, and mongodb, and extend the smoke suite and `server/src/db/base-schema.test.ts`.
+- **Adding a DB column or table**: add a forward migration, never an edit to the frozen base
+  schema: `server/src/db/migrations/NNN_description.sql`, `.pg.sql` and `.mysql.sql`, plus a
+  `MONGO_MIGRATIONS` step in the MongoDB adapter declaring any index. Then update `NexusStore`,
+  implement it in sqlite, sql-repos, and mongodb, and extend the smoke suite.
 - **Touching the Edge integration**: only through `server/src/ferrum-admin/`, and extend the mock
   in `server/src/test/mock-ferrum-edge.ts` to match.
 - **Adding an audit event**: extend `AuditAction` in

@@ -215,7 +215,7 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
       const creator = mysql.createPool({ uri: url, connectionLimit: 1 });
       const operations = [
         'CREATE TABLE',
-        'SELECT id FROM schema_migrations',
+        'SELECT id, checksum FROM schema_migrations',
         'INSERT INTO schema_migrations',
       ];
       const observed = new Set<string>();
@@ -346,7 +346,7 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
     await fixture(async (pool, url) => {
       const second = mysql.createPool(url);
       let fired = false;
-      let next: Promise<void> | null = null;
+      let next: Promise<unknown> | null = null;
       const faulty = intercept(pool, (method, sql, _params, after) => {
         if (method === 'execute' && after && sql.startsWith('SELECT GET_LOCK(')) {
           next = ensureMysqlSchema(second);

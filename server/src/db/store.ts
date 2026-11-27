@@ -2146,10 +2146,11 @@ export interface NexusStore {
   /** Open connections and validate the deployment (e.g. Mongo replica-set check). */
   init(): Promise<void>;
   /**
-   * Create the base schema in an empty database, or confirm an existing one is
-   * at it; idempotent, safe to call on every boot. Never upgrades: a ledger
-   * holding anything but the current base schema generation (a pre-0.6
-   * migration chain or another generation) is refused (`db/schema.ts`).
+   * Create the frozen base schema in an empty database, then apply every
+   * forward migration the ledger lacks, in order; idempotent, safe to call on
+   * every boot. Refuses, changing nothing, a database created before v0.6.0,
+   * one a newer release upgraded (downgrade), and one whose recorded migration
+   * checksums differ from this build's (`db/migrate.ts`).
    */
   migrate(): Promise<void>;
   /** Close pools/handles. Safe to call more than once. */

@@ -1346,9 +1346,11 @@ export async function main(): Promise<void> {
 
   const store = createStore(config);
   await store.init();
-  // Creates the base schema in an empty database. A database created by an
-  // earlier version is refused here, before anything reads it: there is no
-  // upgrade path before 1.0 (docs/operations.md).
+  // Creates the base schema in an empty database and applies pending forward
+  // migrations. A database this build cannot run against (created before
+  // v0.6.0, upgraded by a newer release, or with altered migration checksums)
+  // is refused here, before anything reads it (docs/operations.md, "Schema and
+  // upgrades").
   await store.migrate();
   // The same condition `GET /api/branding` publishes as `bootstrap_required`.
   const founderSeatOpen = (await store.users.countActiveSuperAdmins()) === 0;

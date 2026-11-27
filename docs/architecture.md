@@ -84,36 +84,36 @@ docker/    Dockerfile + docker-compose.example.yml
 
 ### `server/src`
 
-| Path                                           | Responsibility                                                                                                                                                         |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                                                                           |
-| `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                                                                                |
-| `lib/`                                         | `crypto.ts`, `errors.ts` (`NexusError`), `keyed-serializer.ts` + `lease-fence.ts` (§5.2), `ids.ts`, `logger.ts`.                                                       |
-| `db/store.ts`                                  | The `NexusStore` interface: 31 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                 |
-| `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                                              |
-| `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                                                                                |
-| `db/schema/`, `db/schema.ts`                   | The base schema per dialect (`base.sql`, `base.pg.sql`, `base.mysql.sql`; MongoDB declares its indexes in code) and the create-or-refuse rule (§4.5).                  |
-| `ferrum-admin/`                                | The **only** module that knows Edge's HTTP shape: `client.ts`, `jwt.ts`, `types.ts` and helpers.                                                                       |
-| `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                                                                   |
-| `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                                                                                |
-| `audit/service.ts`                             | The only writer of `audit_logs`, the `AuditAction` catalog, and how each action commits.                                                                               |
-| `auth/`                                        | `service.ts` (register/login/logout/verify/reset), `captcha.ts`, `expiry-sweep.ts`.                                                                                    |
-| `sso/`                                         | OpenID Connect single sign-on: `oidc.ts` (discovery, JWKS, PKCE, ID token validation), `mapping.ts`, `settings.ts`, `service.ts` (the flow, provisioning and linking). |
-| `users/service.ts`                             | Profile self-service, admin user management, organizations.                                                                                                            |
-| `applications/service.ts`                      | Per-account applications, each its own gateway identity (§5.4).                                                                                                        |
-| `catalog/`                                     | `service.ts` (browse/read, `canList` vs `canView`), `read-access.ts` (shared read check), `gateway-security.ts` (declared gateway credential).                         |
-| `publishing/`                                  | `service.ts` (proxy lifecycle), `edge-plugins.ts` (the binder), `spec-document.ts`, `oas.ts`, `viewers.ts`.                                                            |
-| `plugins/`                                     | The provider plugin palette: `service.ts`, `schema.ts` (§5.7).                                                                                                         |
-| `access/service.ts`                            | request → approve/deny → grant → revoke, and the ACL-group writes.                                                                                                     |
-| `credentials/`                                 | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner), `teardown-worker.ts`, `account-recovery.ts` (§7.2).                                    |
-| `usage/service.ts`                             | Per-API usage and backend health, read from Edge's metrics.                                                                                                            |
-| `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                                                    |
-| `notifications/service.ts`                     | The header bell and inbox. A courtesy channel, never the record.                                                                                                       |
-| `email/`                                       | `service.ts` (render/enqueue, SMTP transport and inline SMTP diagnostics), `outbox-worker.ts` (queued sends), `templates.ts`.                                          |
-| `service-manifest/`                            | `service.ts` and `schema.ts`: the read-only shared v1 service-manifest preview (`POST /api/service-manifests/preview`).                                                |
-| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `smtp-test-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.                                |
-| `routes/`                                      | One plugin per domain. Routes validate shapes and delegate to the services they are handed.                                                                            |
-| `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                                                      |
+| Path                                                            | Responsibility                                                                                                                                                                           |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index.ts`                                                      | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                                                                                             |
+| `config/index.ts`                                               | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                                                                                                  |
+| `lib/`                                                          | `crypto.ts`, `errors.ts` (`NexusError`), `keyed-serializer.ts` + `lease-fence.ts` (§5.2), `ids.ts`, `logger.ts`.                                                                         |
+| `db/store.ts`                                                   | The `NexusStore` interface: 31 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                                                                   |
+| `db/adapters/{sqlite,postgres,mysql,mongodb}/`                  | The four implementations.                                                                                                                                                                |
+| `db/adapters/sql-common.ts`, `sql-repos.ts`                     | Dialect shims and the repository bodies shared by PostgreSQL and MySQL.                                                                                                                  |
+| `db/schema/`, `db/schema.ts`, `db/migrate.ts`, `db/migrations/` | The frozen base schema per dialect (`base.sql`, `base.pg.sql`, `base.mysql.sql`; MongoDB declares its indexes in code), the forward migrations, and the runner that applies them (§4.5). |
+| `ferrum-admin/`                                                 | The **only** module that knows Edge's HTTP shape: `client.ts`, `jwt.ts`, `types.ts` and helpers.                                                                                         |
+| `middleware/auth-plugin.ts`                                     | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                                                                                     |
+| `middleware/error-handler.ts`                                   | The single place an exception becomes an HTTP response.                                                                                                                                  |
+| `audit/service.ts`                                              | The only writer of `audit_logs`, the `AuditAction` catalog, and how each action commits.                                                                                                 |
+| `auth/`                                                         | `service.ts` (register/login/logout/verify/reset), `captcha.ts`, `expiry-sweep.ts`.                                                                                                      |
+| `sso/`                                                          | OpenID Connect single sign-on: `oidc.ts` (discovery, JWKS, PKCE, ID token validation), `mapping.ts`, `settings.ts`, `service.ts` (the flow, provisioning and linking).                   |
+| `users/service.ts`                                              | Profile self-service, admin user management, organizations.                                                                                                                              |
+| `applications/service.ts`                                       | Per-account applications, each its own gateway identity (§5.4).                                                                                                                          |
+| `catalog/`                                                      | `service.ts` (browse/read, `canList` vs `canView`), `read-access.ts` (shared read check), `gateway-security.ts` (declared gateway credential).                                           |
+| `publishing/`                                                   | `service.ts` (proxy lifecycle), `edge-plugins.ts` (the binder), `spec-document.ts`, `oas.ts`, `viewers.ts`.                                                                              |
+| `plugins/`                                                      | The provider plugin palette: `service.ts`, `schema.ts` (§5.7).                                                                                                                           |
+| `access/service.ts`                                             | request → approve/deny → grant → revoke, and the ACL-group writes.                                                                                                                       |
+| `credentials/`                                                  | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner), `teardown-worker.ts`, `account-recovery.ts` (§7.2).                                                      |
+| `usage/service.ts`                                              | Per-API usage and backend health, read from Edge's metrics.                                                                                                                              |
+| `messaging/service.ts`                                          | 1:1 threads and the platform inbox.                                                                                                                                                      |
+| `notifications/service.ts`                                      | The header bell and inbox. A courtesy channel, never the record.                                                                                                                         |
+| `email/`                                                        | `service.ts` (render/enqueue, SMTP transport and inline SMTP diagnostics), `outbox-worker.ts` (queued sends), `templates.ts`.                                                            |
+| `service-manifest/`                                             | `service.ts` and `schema.ts`: the read-only shared v1 service-manifest preview (`POST /api/service-manifests/preview`).                                                                  |
+| `admin/`                                                        | `settings-service.ts`, `mass-email-service.ts`, `smtp-test-service.ts`, `god-service.ts`, `gateway-reconciliation.ts`, `rotate-key.ts`.                                                  |
+| `routes/`                                                       | One plugin per domain. Routes validate shapes and delegate to the services they are handed.                                                                                              |
+| `test/`                                                         | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                                                                        |
 
 ### `web/src`
 
@@ -289,29 +289,48 @@ and grant approval need multi-document transactions. With the opt-in,
 writes in place. That is an evaluation mode, not a production configuration.
 See [`operations.md`](operations.md#mongodb).
 
-### 4.5 The base schema (no migrations before 1.0)
+### 4.5 The frozen baseline and forward migrations
 
-Until 1.0 there are no migrations. Each backend has one base schema
-(`db/schema/base.sql`, `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in
-the MongoDB adapter), and a schema change edits it directly. `db/schema.ts`
-owns the rule every adapter applies at `migrate()`, keeping the pre-0.6
-runner's shape: adapters supply `ensureLedger`, `listRecorded` and
-`createBaseSchema`.
+Each backend has one base schema (`db/schema/base.sql`, `base.pg.sql`,
+`base.mysql.sql`, and `BASE_INDEXES` in the MongoDB adapter). It is the 1.0
+baseline, unchanged since `v0.6.0`, and it is frozen: `db/frozen-baseline.test.ts`
+pins each artifact's SHA-256. From 1.0.0 onward every schema change is a
+numbered forward migration: `db/migrations/NNN_description.sql`, `.pg.sql` and
+`.mysql.sql`, plus a `MONGO_MIGRATIONS` step of the same id. The baseline ships
+none.
 
-- A `schema_migrations` ledger holding exactly `BASE_SCHEMA_ID` (the base
-  schema's generation, bumped with every schema edit) means the schema is
-  current, so nothing happens.
-- An empty ledger means a new database: the adapter creates the schema and
-  records the generation, atomically on SQLite and PostgreSQL; MySQL replays
-  `CREATE TABLE IF NOT EXISTS` statements under its advisory lock and records
-  last; MongoDB creates its indexes, then records.
-- Anything else, such as a pre-0.6 migration chain or another generation, is
-  refused with a `NexusError` before any service reads the data. A database
-  created by an earlier version is never migrated
-  ([operations](operations.md#schema-and-upgrades-before-10)).
+`db/migrate.ts` owns the rules every adapter applies at `migrate()`, in the
+shape of the pre-0.6 runner: adapters supply `ensureLedger`, `listRecorded`,
+`createBaseSchema`, `prepareLedger` and `applyMigration`. The `schema_migrations`
+ledger records the baseline's id, `BASE_SCHEMA_ID` (`000_base_v0_6`, kept from
+`v0.6.0` so 1.0 opens a `v0.6.0` database), then one row per applied migration
+with its checksum and time.
 
-The server build copies `db/schema/` to `server/dist/db/schema/`, and the
-loader reads it beside its own module.
+- An empty ledger means a new database: the adapter creates the baseline and
+  records its id, then applies every migration.
+- A ledger without the baseline id (a pre-0.6 migration chain, or another
+  schema) is refused: there is no upgrade path from before `v0.6.0`.
+- A recorded id the build does not know (a newer release migrated the
+  database), a recorded checksum that differs from the build's, or a gap in
+  the order is refused. Downgrades are not supported.
+- Otherwise the missing migrations run in id order. SQLite and PostgreSQL run
+  each one and its ledger row in one transaction. MySQL DDL commits on its own,
+  so a MySQL migration may contain only statements whose finished state the
+  runner can read back from `information_schema`; a replay skips what already
+  landed and refuses anything else. MongoDB steps (indexes plus an optional
+  idempotent transform) are re-run safely.
+- Every refusal is a `NexusError` raised before anything is written and before
+  any service reads the data
+  ([operations](operations.md#schema-and-upgrades)).
+
+Concurrent starts follow the single-writer model: PostgreSQL and MySQL take a
+database-scoped advisory lock for the whole check (`pg_try_advisory_lock`,
+`GET_LOCK`), SQLite applies each migration under `BEGIN IMMEDIATE` and re-reads
+the ledger, and MongoDB tolerates a peer recording the same entry first as long
+as its checksum matches.
+
+The server build copies `db/schema/` and `db/migrations/` to `server/dist/db/`,
+and the loaders read them beside their own module.
 
 ---
 
@@ -570,7 +589,7 @@ leaves an outgoing auth config attached lists it under
 `existing_credentials_invalidated: false`, rather than claiming the old
 credentials stopped working. Once a role is recorded, the record alone governs
 it. Schema notes:
-[`operations.md`](operations.md#schema-and-upgrades-before-10).
+[`operations.md`](operations.md#schema-and-upgrades).
 
 ### 5.4 One consumer per identity per namespace
 

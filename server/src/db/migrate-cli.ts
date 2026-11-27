@@ -2,14 +2,14 @@
  * `npm run migrate --workspace server`
  *
  * Loads the environment, builds the configured store, creates the base schema
- * in an empty database (or confirms an existing one is at it) and exits. The
- * server does the same on boot, so this exists for deployments that create the
- * schema as a separate step.
+ * in an empty database, applies every pending forward migration in order, and
+ * exits. The server does the same on boot, so this exists for deployments that
+ * upgrade the schema as a separate step, with every instance stopped.
  *
- * It never upgrades a database: before 1.0 there is no upgrade path, and a
- * database created by an earlier version is refused with an error telling the
- * operator to recreate it (`schema.ts`; docs/operations.md, "Schema and
- * upgrades before 1.0").
+ * A database this build cannot run against — created before v0.6.0, upgraded
+ * by a newer release, or recording a migration whose checksum differs from
+ * this build's — is refused unchanged with an error saying what to do
+ * (`migrate.ts`; docs/operations.md, "Schema and upgrades").
  */
 
 import { environmentWithEnvFile } from '../config/env-file.js';

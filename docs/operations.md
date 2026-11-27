@@ -1495,63 +1495,184 @@ without CAPTCHA, turn it off in settings, where the change is audited.
 
 ## 2. Databases and the schema
 
-### Schema and upgrades before 1.0
+<a id="schema-and-upgrades-before-10"></a>
 
-Ferrum Nexus is in buildout. **Until 1.0 there is no upgrade path between
-releases, and a database an earlier version created is never migrated.**
+### Schema and upgrades
 
-Each backend has one base schema: `server/src/db/schema/base.sql` (SQLite),
-`base.pg.sql` (PostgreSQL), `base.mysql.sql` (MySQL) and the `BASE_INDEXES`
-list in `server/src/db/adapters/mongodb/index.ts` (MongoDB). `v0.6.0` folded
-the earlier migration chain (`001_initial` to `015_access_gateway_jobs`) into
-it, and later schema changes edit it directly. There are no migration files.
+From 1.0.0 onward a Nexus release opens the database the release before it
+left and upgrades it in place with forward-only migrations; downgrades are not
+supported. Nexus 1.0.0 opens a database created by `v0.6.0` as it is. A
+database created by `v0.5.2` or earlier cannot be upgraded: see
+[moving from a release before v0.6.0](#moving-from-a-release-before-v060).
+
+**The frozen baseline.** Each backend has one base schema:
+`server/src/db/schema/base.sql` (SQLite), `base.pg.sql` (PostgreSQL),
+`base.mysql.sql` (MySQL) and the `BASE_INDEXES` list in
+`server/src/db/adapters/mongodb/index.ts` (MongoDB). `v0.6.0` folded the earlier
+migration chain (`001_initial` to `015_access_gateway_jobs`) into it, and it has
+not changed since: it is the 1.0 baseline, recorded in the ledger as
+`000_base_v0_6`, and it never changes again. Every later schema change is a
+numbered forward migration in `server/src/db/migrations/`
+(`NNN_description.sql`, `.pg.sql` and `.mysql.sql`) with a MongoDB step of the
+same id. Each release's notes list the migrations it adds; a release that adds
+none leaves the schema exactly as it was.
 
 **At startup** (`store.init()`, then `store.migrate()`, before the server
-listens) Nexus reads the `schema_migrations` table (a collection on MongoDB),
-the same ledger the pre-0.6 migration runner kept:
+listens) and when you run the [migrate command](#initializing-the-schema),
+Nexus reads the `schema_migrations` table (a collection on MongoDB):
 
-- **Empty or missing:** a new database. Nexus creates the base schema and
-  records the base schema's generation, `000_base_v0_6` in this release, as the
-  ledger's only entry.
-- **Exactly this build's generation:** the schema is current, so nothing
-  happens.
-- **Anything else:** a database created by `v0.5.2` or earlier (the ledger
-  lists migration ids such as `001_initial`), or at a different base schema
-  generation. Nexus exits non-zero **without changing the schema or data** and
-  prints:
+| The ledger holds                                                | Nexus                                                                                                                                        |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| nothing, or the table is missing                                | creates the base schema, records `000_base_v0_6`, then applies every migration                                                               |
+| `000_base_v0_6` and migrations it knows, checksums matching     | applies the migrations the ledger lacks, in id order, recording each one's id, checksum and `applied_at`; with none to apply, writes nothing |
+| no `000_base_v0_6`                                              | refuses: the database was created by `v0.5.2` or earlier, or not by Nexus                                                                    |
+| a migration id this release does not know                       | refuses: a newer release upgraded the database                                                                                               |
+| a migration whose recorded checksum differs from this release's | refuses: the release or the ledger was modified                                                                                              |
 
-  ```text
-  This database was created by a different Ferrum Nexus schema (it records
-  001_initial, 002_api_gateway_plugins, 003_messages_thread_latest,
-  004_api_spec_changes and 9 more; this build's schema is 000_base_v0_6).
-  Ferrum Nexus has no upgrade path before 1.0: a database created by an earlier
-  version is never migrated, and its schema and data were not changed. Back up
-  anything you need, then start this version against a new, empty database (or
-  drop and recreate this one).
-  ```
+Every refusal exits non-zero **before anything is written**, so the schema and
+data are left exactly as they were.
 
-  Recreate the database as described in
-  [moving to a new release](#moving-to-a-new-release).
+How a migration is applied:
 
-The generation (`BASE_SCHEMA_ID` in `server/src/db/schema.ts`) is bumped in
-the same change as any edit to the base schema. A release whose generation
-changed refuses every database an earlier generation created. A release that
-keeps the generation opens the previous release's database as it is. Each
-release's notes say which applies. To see a database's generation, run
-`SELECT id FROM schema_migrations` (SQL backends) or
-`db.schema_migrations.find({})` (MongoDB).
+- **SQLite, PostgreSQL:** each migration and its ledger row commit in one
+  transaction, or neither does.
+- **MySQL:** DDL commits on its own, so a MySQL migration contains only
+  statements whose finished state Nexus can read back from
+  `information_schema` (`CREATE TABLE IF NOT EXISTS`, adding a column or an
+  index, widening a text column, a boolean `CHECK`), and its ledger row is
+  written last. An interrupted migration is replayed: what already landed with
+  the intended definition is skipped, and anything with another definition is
+  refused rather than changed.
+- **MongoDB:** a step creates its indexes (a no-op for an identical index),
+  runs an optional idempotent transform, then records itself, so an interrupted
+  step is simply run again.
 
-Never edit `schema_migrations` to get past the refusal: Nexus would then run
-against, or create tables over, a schema it was not written for. Do not point an
-older release at a database a newer one created either: releases before
-`v0.6.0` do not know the generation and would try to replay their migrations
-over it. Give Nexus a dedicated database; creating the schema in one that
-already holds unrelated tables or indexes with the same names is not supported.
+A ledger `v0.6.0` created has only `id` and `applied_at`. Nexus adds a nullable
+`checksum` column the first time it applies a migration; the baseline's row
+keeps a null checksum. Until a release applies a migration, Nexus writes
+nothing to the schema of a `v0.6.0` database.
 
-### Moving to a new release
+**Run one migrator.** Upgrade with every instance stopped
+([upgrading Nexus](#upgrading-nexus)), which the
+[single active writer](#supported-topologies) rule already requires. If two
+instances start together anyway, PostgreSQL and MySQL serialize the whole check
+under a database-scoped advisory lock: the second waits up to 30 seconds, then
+finds the work done (or exits with `schema setup is busy`; start it again).
+SQLite applies each migration under its write lock and re-reads the ledger
+first. On MongoDB both may run the same idempotent step; the ledger records it
+once.
 
-When the release notes say the schema changed (until 1.0, check each release's
-notes), the new release needs a new, empty database:
+To see what a database holds, run
+`SELECT * FROM schema_migrations ORDER BY id` (SQL backends) or
+`db.schema_migrations.find().sort({ _id: 1 })` (MongoDB).
+
+#### What a refusal means
+
+**Created before `v0.6.0`:**
+
+```text
+This database was not created by Ferrum Nexus v0.6.0 or later (its schema
+ledger records 001_initial, 002_api_gateway_plugins, 003_messages_thread_latest,
+004_api_spec_changes and 9 more; v0.6.0 and later record the baseline
+000_base_v0_6). There is no upgrade path from releases before v0.6.0, and its
+schema and data were not changed. Back up anything you need, then start this
+version against a new, empty database (or drop and recreate this one).
+```
+
+Recreate the database:
+[moving from a release before v0.6.0](#moving-from-a-release-before-v060).
+
+**Upgraded by a newer release (a downgrade):**
+
+```text
+This database records schema migrations this build of Ferrum Nexus does not
+know (016_example): a newer release upgraded it. Downgrades are not supported,
+and its schema and data were not changed. Run the release that upgraded it, or
+a newer one, or restore the backup taken before that upgrade.
+```
+
+Deploy the release that upgraded the database (or a later one). To go back to
+this release, restore the backup taken before the upgrade into an empty
+database ([upgrade failures and rollback](#upgrade-failures-and-rollback)).
+
+**A checksum mismatch** (`Schema migration … was applied to this database with
+checksum …, but this build's … has checksum …`) means a migration changed
+after it was applied: the image is not an official release build, or someone
+edited the ledger. Run an official release image. If the ledger was edited,
+restore the last backup taken before the edit.
+
+**A gap** (`Schema migration … has not been applied to this database, but
+later migrations (…) have`) means a build inserted a migration before one that
+already shipped. It is a release defect: run an official release and report
+it.
+
+Never edit `schema_migrations` to get past a refusal: Nexus would then run
+against, or apply migrations over, a schema it was not written for. Do not point
+an older release at a database a newer one upgraded either: from `v0.6.0` on, it
+refuses such a database. Give Nexus a dedicated database; creating the schema in
+one that already holds unrelated tables or indexes with the same names is not
+supported.
+
+#### Upgrading Nexus
+
+1. Read the release notes: the migrations the release adds, and the Ferrum
+   Edge release it is validated against. While the old portal still runs, do
+   the preflight of every Edge release between the one you run and that one.
+2. Stop every Nexus instance.
+3. **Back up Nexus and Edge together**, as one point in time, and record their
+   secrets ([§5](#5-backup-and-restore)). This backup is your rollback:
+   migrations only move forward, and the release you are leaving refuses the
+   upgraded database.
+4. If the new release pairs with a newer Edge release, upgrade Edge now, the
+   control plane and every data plane together.
+5. Apply the migrations once from the **new** image with the production
+   environment (and, for SQLite, the same data volume):
+
+   ```bash
+   docker run --rm --env-file nexus.env <new-image> node server/dist/db/migrate-cli.js
+   ```
+
+   It prints `Schema ready (driver: …).` and exits `0`, or prints a refusal or
+   a failure and exits non-zero. Re-running it is safe. Starting the new
+   release does the same, but this step shows a failure before any instance
+   serves traffic.
+
+6. Start the new release on every instance.
+7. Verify: `GET /api/health` is `ok`, `schema_migrations` lists `000_base_v0_6`
+   and the release's migrations with their checksums, an administrator can
+   sign in, and a known client can call an API through the gateway (see
+   [verifying a restore](#verifying-a-restore)).
+
+#### Upgrade failures and rollback
+
+A failed migration exits non-zero and names itself
+(`Schema migration 016_example failed: …`, followed by the driver error). The
+migrations before it stay applied and recorded.
+
+- **SQLite, PostgreSQL:** the failed migration rolled back with its ledger row.
+  Fix the cause (disk space, permissions, a lock held by another client) and
+  run step 5 again.
+- **MySQL:** statements before the failure may have committed. Run step 5
+  again: the migration is replayed, skipping what already landed. A column,
+  index or constraint that exists with another definition is refused; restore
+  the backup.
+- **MongoDB:** run step 5 again; steps are idempotent.
+- **A failure that repeats** is a release defect. Restore the backup and run the
+  previous release, and report it.
+
+To roll back, stop every instance, restore the paired pre-upgrade backup (the
+Nexus database into an empty database, and the Edge snapshot into the Edge
+release it came from) and start the previous release with the same secrets.
+Everything written after the backup is lost
+([recovery and rollback limits](#recovery-and-rollback-limits)).
+
+<a id="moving-to-a-new-release"></a>
+
+### Moving from a release before v0.6.0
+
+A database created by `v0.5.2` or earlier is refused (see
+[what a refusal means](#what-a-refusal-means)) and cannot be upgraded. To move
+such a portal to this release, give the new release a new, empty database:
 
 1. Read the release notes, including the Ferrum Edge release the new Nexus
    release is validated against. While the old portal still runs, do the
@@ -1619,16 +1740,15 @@ docker run --rm --env-file .env <image> node server/dist/db/migrate-cli.js
 ```
 
 The CLI loads the same environment. It creates the base schema in an empty
-database, or confirms an existing one is at it. It then prints
-`Schema ready (driver: postgres).` and exits `0`. Against a database whose
-ledger holds anything but this build's base schema generation (a pre-0.6
-migration chain or another generation), it prints the refusal above and exits
-non-zero. It
-never upgrades. The name `migrate` is kept for existing scripts.
+database, applies the migrations the ledger lacks, prints
+`Schema ready (driver: postgres).` and exits `0`. Against a database it must
+refuse (created before `v0.6.0`, upgraded by a newer release, or with a
+checksum mismatch; see [schema and upgrades](#schema-and-upgrades)), or when a
+migration fails, it prints the error and exits non-zero.
 
-`npm run build --workspace server` copies `server/src/db/schema/` to
-`server/dist/db/schema/`, replacing stale files. The loader finds them
-relative to its own module, not the working directory.
+`npm run build --workspace server` copies `server/src/db/schema/` and
+`server/src/db/migrations/` to `server/dist/db/`, replacing stale files. The
+loaders find them relative to their own module, not the working directory.
 
 ### SQLite
 
@@ -1672,16 +1792,19 @@ NEXUS_DB_URL=mysql://nexus:secret@db.internal:3306/nexus
 - Timestamps are ISO-8601 strings in `VARCHAR` columns, so server time-zone
   settings cannot change them.
 
-### Retrying interrupted MySQL initialization
+### Retrying interrupted MySQL schema changes
 
-MySQL DDL commits on its own, outside the schema ledger, so the base schema
-cannot be created in one transaction. Every statement in `base.mysql.sql` is a
-`CREATE TABLE IF NOT EXISTS` with its indexes and constraints inline, and
-Nexus refuses the file before running any of it if one is not. The ledger
-entry is written only after every table exists, so a start that stops part-way
-leaves the ledger empty and the next start replays the file: tables that
-already exist are skipped, with their rows. A database-scoped advisory lock
-(`GET_LOCK`) serializes schema creation across instances.
+MySQL DDL commits on its own, outside the schema ledger, so neither the base
+schema nor a migration can be applied in one transaction. Every statement in
+`base.mysql.sql` is a `CREATE TABLE IF NOT EXISTS` with its indexes and
+constraints inline, and a MySQL migration may contain only statements whose
+finished state Nexus checks in `information_schema` before and after running
+them. Nexus refuses a file before running any of it if one statement is not
+replayable. A ledger entry is written only after every statement succeeded, so
+a start that stops part-way leaves the entry missing and the next start replays
+the file: tables, columns and indexes that already exist with the intended
+definition are skipped, with their rows. A database-scoped advisory lock
+(`GET_LOCK`) serializes schema work across instances.
 
 ### MongoDB
 
@@ -1724,11 +1847,11 @@ transactions run their steps in order but without atomic commit, so a failure
 part-way (for example during an approval) leaves partial writes. Do not use it
 in production.
 
-Indexes are created by `migrate()` from `BASE_INDEXES` and the generation is
-recorded in `schema_migrations` like the SQL backends'. Collections are created
-by their first insert. `createIndex` is a no-op for an existing identical
-index, so a start interrupted before the ledger write finishes on the next
-start.
+Indexes are created by `migrate()` from `BASE_INDEXES` and from each step in
+`MONGO_MIGRATIONS`, and recorded in `schema_migrations` like the SQL backends'.
+Collections are created by their first insert. `createIndex` is a no-op for an
+existing identical index and transforms are idempotent, so a start interrupted
+before the ledger write finishes on the next start.
 
 ### Transactions and contention retries
 
@@ -2050,11 +2173,11 @@ rotated in that window ([§12](#12-the-credential-mirror)).
 
 ### Compatible versions
 
-- **Nexus:** restore into the **same** Nexus release that wrote the backup.
-  Before 1.0 a release refuses a database created by a release with a different
-  base schema, so a backup cannot be carried forward
-  ([schema and upgrades before 1.0](#schema-and-upgrades-before-10)). Never
-  restore into an older release.
+- **Nexus:** restore into the Nexus release that wrote the backup, or into a
+  later release, which upgrades it at startup like any other database
+  ([schema and upgrades](#schema-and-upgrades)). Never restore into an older
+  release: it refuses a database a newer release upgraded. A backup from
+  `v0.5.2` or earlier opens only in the release that wrote it.
 - **Ferrum Edge:** restore into the Edge release that wrote it, or one Edge
   documents as compatible. Nexus is validated against the release pinned in
   [`release/compatibility.env`](../release/compatibility.env).
@@ -2083,7 +2206,8 @@ It is the only way to keep issued credentials working.
 4. Start the **same** Nexus release with the same `NEXUS_SECRET_KEY`,
    `FERRUM_ADMIN_JWT_SECRET`, `FERRUM_ADMIN_JWT_ISSUER` and `FERRUM_NAMESPACE`,
    and `FERRUM_ADMIN_URL` pointing at the restored gateway. The startup
-   schema check should find the schema current and do nothing.
+   schema check should find the schema current and do nothing (a later
+   release applies its migrations instead).
 5. [Verify](#verifying-a-restore) before reopening the portal.
 
 **Without an Edge backup**, credentials cannot be recovered: Nexus stores only a
@@ -2220,7 +2344,7 @@ Rows queued unsealed by an earlier version are sealed in place by the worker,
 in every status, up to 200 per tick, and it stops looking once none are left.
 It logs `Sealed legacy outbox messages` with a `sealed` count while it does.
 Since `v0.6.0` a database an earlier release created is refused rather than
-upgraded ([schema and upgrades before 1.0](#schema-and-upgrades-before-10)),
+upgraded ([schema and upgrades](#schema-and-upgrades)),
 so on a database created at the base schema there is nothing to seal, and
 downgrading means restoring a backup. The rest of this paragraph applies only
 to an older deployment that still runs a pre-sealing instance beside a sealing
@@ -3186,7 +3310,7 @@ Releases before `015_access_gateway_jobs` kept no record of a decision's
 gateway half, so a database they wrote may hold a revoked grant whose ACL group
 is still on its consumer, or an approved request that no grant was ever made
 from. Since `v0.6.0` such a database is refused rather than upgraded
-([schema and upgrades before 1.0](#schema-and-upgrades-before-10)), so on a
+([schema and upgrades](#schema-and-upgrades)), so on a
 database created at the base schema this scan finds nothing; it still runs
 once. The first start (any instance, under a lease) scans for both, a page at
 a time, and queues ordinary jobs for the worker:
@@ -3418,7 +3542,7 @@ SELECT ferrum_consumer_id, COUNT(*) AS unconfirmed
 
 **Databases written by `v0.2.0` or earlier.** Since `v0.6.0` such a database
 is refused rather than upgraded
-([schema and upgrades before 1.0](#schema-and-upgrades-before-10)), so on a
+([schema and upgrades](#schema-and-upgrades)), so on a
 database created at the base schema this scan finds nothing. On its first
 start Nexus scans the audit log for `credential.append_rollback` rows with
 `credential_type: "basicauth"` and `withdrawn: false` that no live row
