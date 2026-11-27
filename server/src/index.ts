@@ -572,20 +572,6 @@ export async function buildServer(
     });
     return attempt.revoked;
   };
-  // One-off upgrade scan for `basicauth` appends an earlier release left
-  // without a row. It must not keep the portal down: a failure is logged, the
-  // service reports the scan `failed`, and — since completion is recorded only
-  // on success — the next start runs it again.
-  try {
-    await credentials.initializeLegacyBasicAuthPositions();
-  } catch (error) {
-    app.log.error(
-      { err: error },
-      'Could not scan for HTTP Basic credentials left unconfirmed by an earlier release; ' +
-        'it runs again at the next start. Until it completes, reconcile basicauth for any ' +
-        'consumer with a credential.append_rollback basicauth row with withdrawn: false',
-    );
-  }
   // After credentials for the same reason: an account whose claims no longer
   // map to a role is disabled through the same durable gateway revocation.
   const sso = createSsoService({
@@ -858,7 +844,6 @@ export async function buildServer(
         config,
         store: deps.store,
         edge: deps.edge,
-        credentials,
         reconciliation,
       });
     },

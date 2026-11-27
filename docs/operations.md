@@ -3774,36 +3774,10 @@ SELECT ferrum_consumer_id, COUNT(*) AS unconfirmed
   GROUP BY ferrum_consumer_id;
 ```
 
-**Databases written by `v0.2.0` or earlier.** Since `v0.6.0` such a database
-is refused rather than upgraded
-([schema and upgrades](#schema-and-upgrades)), so on a
-database created at the base schema this scan finds nothing. On its first
-start Nexus scans the audit log for `credential.append_rollback` rows with
-`credential_type: "basicauth"` and `withdrawn: false` that no live row
-accounts for: those without `stranded_credential_id` (what earlier releases
-wrote for a lost acknowledgement or a failed row write) and those whose
-stranded row is no longer live. For each one that no later `basicauth`
-reconcile or whole-type revoke of the consumer has cleared, it writes a
-`retiring` placeholder row, audited as `credential.legacy_placeholder` with
-`source_event_id`. The placeholder holds that consumer's positions closed, as
-above, until the type is cleared. Completion is recorded in `app_settings`
-(`credentials.legacy_basicauth_scan_v1`), and later starts skip the scan.
-Affected identities may need to re-issue their Basic Auth credentials after
-the type is cleared, especially when a replacement from an earlier v0.2.0
-rotate was later revoked normally and the scan conservatively restores its
-placeholder.
-
-If the scan fails, startup continues and logs `Could not scan for HTTP Basic
-credentials left unconfirmed by an earlier release`; nothing is recorded, so
-the next start runs it again. Until it completes, reconcile `basicauth` for any
-consumer with such a rollback row.
-
-**The scan does not cover restores.** It runs once, and a backup taken after
-the upgrade carries its completion marker. A Nexus database restored on its own
-can be older than the gateway's HTTP Basic entries, which no read can reveal.
-After restoring only Nexus, reconcile `basicauth` for every consumer before
-relying on revoking a single HTTP Basic credential
-([§5](#5-backup-and-restore)).
+**Restores.** A Nexus database restored on its own can be older than the
+gateway's HTTP Basic entries, which no read can reveal. After restoring only
+Nexus, reconcile `basicauth` for every consumer before relying on revoking a
+single HTTP Basic credential ([§5](#5-backup-and-restore)).
 
 If an append is in flight while a whole-type revoke runs and the lease fence
 prevents the append holder from activating its row, the issue response fails

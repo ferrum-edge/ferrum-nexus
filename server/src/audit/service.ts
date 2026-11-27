@@ -427,14 +427,6 @@ export const AuditAction = {
    */
   CREDENTIAL_RECONCILE: 'credential.reconcile',
   /**
-   * The upgrade scan found a `basicauth` append an earlier release left on the
-   * gateway without a live row, and wrote a `retiring` placeholder that holds
-   * the consumer's positions closed until the type is cleared.
-   * `source_event_id` names the {@link CREDENTIAL_APPEND_ROLLBACK} row it
-   * came from.
-   */
-  CREDENTIAL_LEGACY_PLACEHOLDER: 'credential.legacy_placeholder',
-  /**
    * The revocation a trusted password reset owes has failed often enough that
    * it no longer blocks the account from issuing credentials. Written by the
    * recovery worker as the system ({@link SYSTEM_ACTOR}), once per queued
@@ -695,7 +687,6 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.CREDENTIAL_SETTLE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_APPEND_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.CREDENTIAL_RECONCILE]: TRANSACTIONAL,
-  [AuditAction.CREDENTIAL_LEGACY_PLACEHOLDER]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_RECOVERY_STALLED]: TRANSACTIONAL,
   [AuditAction.MESSAGE_THREAD_CREATE]: TRANSACTIONAL,
   [AuditAction.MESSAGE_SEND]: TRANSACTIONAL,

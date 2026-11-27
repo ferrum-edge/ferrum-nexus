@@ -852,10 +852,6 @@ export interface AppHealth {
   /** `driver` is `null` below `admin`. */
   database: DependencyHealth & { driver: DbDriver | null };
   edge: EdgeHealth;
-  /** Credential-maintenance detail, shown only to administrators. */
-  credentials: {
-    legacy_basicauth_scan: 'pending' | 'completed' | 'failed' | null;
-  };
 }
 
 /** Supported persistence backends. */

@@ -3427,18 +3427,10 @@ it. So:
   `400 VALIDATION_FAILED` on a credential that is not `basicauth`, and
   `403 FORBIDDEN` for a non-admin caller when the consumer holds a live row
   attributed to another account.
-- On a database written by `v0.2.0` or earlier, a one-time start-up scan wrote
-  a `retiring` placeholder for each `basicauth` append those releases recorded
-  as not taken back that no live row accounts for, unless a later reconcile or
-  whole-type revoke cleared that consumer
-  ([`operations.md` §12](operations.md#12-the-credential-mirror)). Since
-  `v0.6.0` such a database is refused rather than upgraded, so on a database
-  created at the base schema the scan finds nothing; Edge resources kept from an
-  old portal are covered in
-  [moving to a new release](operations.md#moving-to-a-new-release).
-  This does not cover restores: after restoring only Nexus, reconcile
-  `basicauth` for every consumer before relying on revoking a single HTTP Basic
-  credential.
+- After restoring only Nexus, reconcile `basicauth` for every consumer before
+  relying on revoking a single HTTP Basic credential: the restored database can
+  be older than the gateway's HTTP Basic entries
+  ([`operations.md` §12](operations.md#12-the-credential-mirror)).
 
 ---
 

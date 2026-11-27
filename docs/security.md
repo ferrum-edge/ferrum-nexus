@@ -1412,13 +1412,9 @@ a refusal and never sends the delete without it, so Nexus requires Edge v0.9.21.
   settles those rows with it. With active rows remaining, the owner can clear
   the whole type explicitly (`clear_type=true`, refused for a non-admin when
   the consumer holds another account's row), or an admin reconciles the
-  consumer. On a database written by `v0.2.0` or earlier, a one-time scan gave
-  appends those releases recorded as not taken back a `retiring` placeholder
-  (`credential.legacy_placeholder`). Since `v0.6.0` such a database is refused
-  rather than upgraded, so a database created at the base schema has no such
-  history and the scan finds nothing. The scan never covered a Nexus database
-  restored on its own; after such a restore, reconcile `basicauth` for every
-  consumer.
+  consumer. A Nexus database restored on its own can be older than the
+  gateway's HTTP Basic entries, which no read can reveal; after such a restore,
+  reconcile `basicauth` for every consumer.
 
 The procedures are in
 [`operations.md` §12](operations.md#12-the-credential-mirror) and
@@ -2268,7 +2264,6 @@ gateway write; a malformed id is `400 VALIDATION_FAILED`.
 | `credential.settle`             | `credential` | A live `keyauth` or `jwt` row whose entry a credential-complete read proved absent (a delete Edge applied but the portal never recorded, or another writer's removal), moved to `revoked`. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `evidence: "entry_absent"`, `previous_status`. Rows written by earlier releases carry `mirror_rows` and `gateway_entries` instead.                                                                                                                                                          |
 | `credential.append_rollback`    | `consumer`   | An appended entry had to be taken back after an issue or rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4`, `append_index`, `owner_user_id`, `cause`, and `stranded_credential_id`, `retired_credential_id`, `suspected` where they apply.                                                                                                                                                                                                                                                |
 | `credential.reconcile`          | `consumer`   | An admin emptied one credential type on a consumer and revoked its rows. `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`.                                                                                                                                                                                                                                                                                                                                |
-| `credential.legacy_placeholder` | `credential` | The upgrade scan found a `basicauth` append an earlier release recorded as not taken back (`credential.append_rollback`, `withdrawn: false`) that no live row accounts for, and wrote a `retiring` placeholder row that holds the consumer's positions closed until the type is cleared. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `source_event_id`. No actor.                                                                                                                                                                  |
 | `credential.recovery_stalled`   | `user`       | The revocation a trusted password reset owes has failed often enough (8 attempts) that it no longer blocks the account from issuing credentials. Written once per queued reset by the recovery worker, which keeps retrying. `details`: `attempts`, `last_error`, `next_attempt_at`. No actor.                                                                                                                                                                                                                                                                |
 
 A `credential.revoke_start` with no completion row means one of:

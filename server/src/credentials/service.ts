@@ -221,7 +221,6 @@ import {
 } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
-  AuditLogRecord,
   CreateInput,
   CredentialFilter,
   CredentialRecord,
@@ -285,9 +284,6 @@ const LIVE_STATUSES = new Set<string>(LIVE_CREDENTIAL_STATUSES);
  * the consumer is still live (issue #598).
  */
 const CONFIRMED_ABSENCE = { confirmedAbsence: true } as const;
-const LEGACY_BASICAUTH_SCAN_SETTING = 'credentials.legacy_basicauth_scan_v1';
-/** What the owner sees on a placeholder the upgrade scan wrote. Never read back. */
-const LEGACY_PLACEHOLDER_LABEL = 'Unconfirmed HTTP Basic credential from an earlier release';
 /**
  * How many times one recovery sweep lists a status again because a key it
  * skipped changed under it, before it gives up and leaves the job to retry.
@@ -567,21 +563,10 @@ export interface IssueForConsumerInput {
 /** The key {@link CredentialsService.restoreGatewayAccess} uses for the account's own identity. */
 const ACCOUNT_IDENTITY = 'account';
 
-/** Progress of the one-off legacy `basicauth` scan, for startup health. */
-export type LegacyBasicAuthScanState = 'pending' | 'completed' | 'failed';
-
 /** Credential operations. */
 export interface CredentialsService {
   /** Consumer provisioning, shared with the access service. */
   readonly provisioner: ConsumerProvisioner;
-  /**
-   * Idempotently marks pre-fix Basic Auth append orphans as unconfirmed. Runs
-   * once: a completed scan is recorded and later calls return at once. A scan
-   * that throws is not recorded, and runs again on the next call.
-   */
-  initializeLegacyBasicAuthPositions(): Promise<void>;
-  /** Whether that scan has completed, failed, or not yet run in this process. */
-  legacyBasicAuthScanState(): LegacyBasicAuthScanState;
   /**
    * Revoke every live credential after a reset proves the account's address.
    *
@@ -2382,154 +2367,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     });
   }
 
-  /** Where {@link CredentialsService.initializeLegacyBasicAuthPositions} got to. */
-  let legacyScanState: LegacyBasicAuthScanState = 'pending';
-
-  /**
-   * Walk every `credential.append_rollback` a release wrote for a `basicauth`
-   * entry it could not take back, and hold each one that may still be on the
-   * gateway without a row ({@link placeLegacyPlaceholder}).
-   *
-   * Paged, so the history is never held in memory; the store filters on the
-   * action and the two detail fields, so unrelated events are never read.
-   */
-  async function scanLegacyBasicAuthAppends(): Promise<void> {
-    let offset = 0;
-    while (true) {
-      const page = await store.auditLogs.list(
-        {
-          action: AuditAction.CREDENTIAL_APPEND_ROLLBACK,
-          details: { credential_type: 'basicauth', withdrawn: false },
-        },
-        { limit: MAX_PAGE_SIZE, offset },
-      );
-      for (const event of page.items) await placeLegacyPlaceholder(event);
-      if (page.items.length < MAX_PAGE_SIZE) return;
-      offset += page.items.length;
-    }
-  }
-
-  /**
-   * Write a `retiring` placeholder for one historical `basicauth` append that
-   * may still be on the gateway with no live row naming it.
-   *
-   * That is the event `v0.2.0` wrote with **no** `stranded_credential_id` — a
-   * lost acknowledgement ({@link reclaimUnacknowledgedAppend}) or a row write
-   * that failed after the append — and one whose stranded row is no longer
-   * live, so nothing still accounts for the entry. An event whose row is live
-   * is already held by that row. Nothing is written when a later reconcile or
-   * whole-type revoke of the consumer's `basicauth` already removed the entry,
-   * or when the placeholder exists: its fingerprint derives from the event id,
-   * so a re-run after a partial scan finds it, in any status.
-   *
-   * The row is attributed to the identity the consumer mapping names, falling
-   * back to the event's owner for a consumer with no mapping (a provider test
-   * consumer).
-   */
-  async function placeLegacyPlaceholder(event: AuditLogRecord): Promise<void> {
-    const details = event.details;
-    const consumerId = details.consumer_id;
-    if (typeof consumerId !== 'string') return;
-    const fingerprint = crypto.fingerprint(`legacy-unconfirmed:${event.id}`);
-    await edge.serializePerKey(consumerId, async () => {
-      if (await store.credentials.findByFingerprint(fingerprint)) return;
-      const stranded = details.stranded_credential_id;
-      if (typeof stranded === 'string') {
-        const row = await store.credentials.findById(stranded);
-        if (row && LIVE_STATUSES.has(row.status)) return;
-      }
-      if (await basicAuthClearedSince(consumerId, event.created_at)) return;
-      const mapping = await store.consumers.findByFerrumId(consumerId);
-      const eventOwner =
-        typeof details.owner_user_id === 'string' ? details.owner_user_id : event.actor_user_id;
-      const ownerId = mapping?.user_id ?? eventOwner;
-      if (!ownerId || !(await store.users.findById(ownerId))) return;
-      const last4Seen = typeof details.last4 === 'string' ? details.last4 : '????';
-      await store.transaction(async (tx) => {
-        const placeholder = await tx.credentials.create({
-          user_id: ownerId,
-          application_id: mapping?.application_id ?? null,
-          ferrum_consumer_id: consumerId,
-          credential_type: 'basicauth',
-          ferrum_credential_id: `${consumerId}/credentials/basicauth`,
-          fingerprint,
-          last4: last4Seen,
-          label: LEGACY_PLACEHOLDER_LABEL,
-          status: 'retiring',
-          rotated_from_id: null,
-        });
-        await audit.forStore(tx).record(
-          SYSTEM_ACTOR,
-          AuditAction.CREDENTIAL_LEGACY_PLACEHOLDER,
-          { type: 'credential', id: placeholder.id },
-          {
-            credential_type: 'basicauth',
-            consumer_id: consumerId,
-            last4: last4Seen,
-            owner_user_id: ownerId,
-            source_event_id: event.id,
-          },
-          null,
-        );
-      });
-    });
-  }
-
-  /**
-   * Whether a reconcile of `consumerId`'s `basicauth`, or a whole-type
-   * `basicauth` revoke on it, was recorded after `since` — either of which
-   * emptied the type on the gateway and took any older orphan with it.
-   * Both reads filter on `credential_type`: a whole-type `keyauth` or `jwt`
-   * revoke on the same consumer removed no `basicauth` entry.
-   *
-   * Each is one filtered, newest-first read of a single row.
-   */
-  async function basicAuthClearedSince(consumerId: string, since: string): Promise<boolean> {
-    const reconciled = await store.auditLogs.list(
-      {
-        action: AuditAction.CREDENTIAL_RECONCILE,
-        from: since,
-        details: { consumer_id: consumerId, credential_type: 'basicauth' },
-      },
-      { limit: 1, offset: 0 },
-    );
-    if (reconciled.items.some((row) => row.created_at > since)) return true;
-    const revoked = await store.auditLogs.list(
-      {
-        action: AuditAction.CREDENTIAL_REVOKE,
-        from: since,
-        details: { consumer_id: consumerId, credential_type: 'basicauth', scope: 'whole-type' },
-      },
-      { limit: 1, offset: 0 },
-    );
-    return revoked.items.some((row) => row.created_at > since);
-  }
-
   return {
     provisioner,
     issueForConsumer,
-
-    async initializeLegacyBasicAuthPositions(): Promise<void> {
-      try {
-        if (await store.settings.get(LEGACY_BASICAUTH_SCAN_SETTING)) {
-          legacyScanState = 'completed';
-          return;
-        }
-        await scanLegacyBasicAuthAppends();
-        // Only a scan that reached the end is recorded: one that failed part
-        // way through runs again from the start on the next boot, and every
-        // placeholder it already wrote is found by its fingerprint.
-        await store.settings.insertIfAbsent(LEGACY_BASICAUTH_SCAN_SETTING, { completed: true });
-        legacyScanState = 'completed';
-      } catch (error) {
-        legacyScanState = 'failed';
-        throw error;
-      }
-    },
-
-    legacyBasicAuthScanState(): LegacyBasicAuthScanState {
-      return legacyScanState;
-    },
 
     async revokeForAccountRecovery(user, ip = null, cutoff = null): Promise<number> {
       const consumerIds = new Set<string>();
