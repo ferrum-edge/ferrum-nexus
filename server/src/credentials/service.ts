@@ -126,8 +126,7 @@
  *
  * No read projection shows `basicauth`, so for that type the mirror is the only
  * word on where an entry sits: a row's index is its place among the pair's
- * live rows in ordinal order ({@link resolveCredentialIndex}), and two rows
- * that predate the ordinal make that place unknowable. A positional delete is
+ * live rows in ordinal order ({@link resolveCredentialIndex}). A positional delete is
  * only as good as that word: one gateway entry the mirror does not know about
  * moves every index after it, and revoking the credential behind it then
  * deletes a different password and marks the requested row `revoked` while
@@ -378,17 +377,6 @@ const UNLOCATED_CREDENTIAL_MESSAGE =
  */
 const CREDENTIAL_GONE_MESSAGE =
   'This credential is no longer on the gateway — it was removed outside the portal — so it has been marked revoked; issue a new one';
-
-/**
- * Raised when the target predates the append ordinal and shares that state
- * with another live row of its type, so its gateway position cannot be known.
- *
- * Not an Edge error: both sides are internally consistent, the portal simply
- * cannot say which entry is which. The fix is
- * {@link CredentialsService.reconcile}; see `operations.md` §12.
- */
-const AMBIGUOUS_MESSAGE =
-  'The gateway position of this credential cannot be determined: it predates the portal’s position tracking and shares that state with another live credential of the same type. An administrator must reconcile this consumer — clearing the credential type on the gateway and revoking its portal rows — after which new credentials can be issued';
 
 /**
  * Raised when a `basicauth` pair holds a `retiring` row: an earlier append or
@@ -1149,25 +1137,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * Rows still occupying an Edge array slot, in array order.
    *
    * The store already returns this order; sorting again here keeps the
-   * invariant local to the code that depends on it. Rows without an ordinal
-   * precede every row with one — they were all appended before the counter
-   * existed — and are otherwise left in the store's tie-break order, which is
-   * meaningless for position and never read as such (see
-   * {@link resolveCredentialIndex}). `created_at` plays no part.
+   * invariant local to the code that depends on it. `created_at` plays no part.
    */
   async function liveRows(consumerId: string, type: CredentialType): Promise<CredentialRecord[]> {
     const rows = await store.credentials.listByConsumer(consumerId, type, LIVE_CREDENTIAL_STATUSES);
-    const live = rows.filter((row) => LIVE_STATUSES.has(row.status));
-    return live
-      .map((row, position) => ({ row, position }))
-      .sort((a, b) => {
-        if (a.row.edge_ordinal === null || b.row.edge_ordinal === null) {
-          if (a.row.edge_ordinal === b.row.edge_ordinal) return a.position - b.position;
-          return a.row.edge_ordinal === null ? -1 : 1;
-        }
-        return a.row.edge_ordinal - b.row.edge_ordinal;
-      })
-      .map((entry) => entry.row);
+    return rows
+      .filter((row) => LIVE_STATUSES.has(row.status))
+      .sort((a, b) => a.edge_ordinal - b.edge_ordinal);
   }
 
   /**
@@ -1192,20 +1168,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     // whole credential type: everything still live belongs to someone else's
     // successful operation.
     if (index === -1) return 'not-live';
-    // A target without an ordinal sits in the leading block of legacy rows.
-    // Alone there, it is index 0 whatever else is live; with company, its
-    // position within that block is unknowable and acting on `index` would be
-    // exactly the wrong-key deletion this module exists to prevent.
-    if (target.edge_ordinal === null) {
-      const unresolved = rows.filter((row) => row.edge_ordinal === null).length;
-      if (unresolved > 1) {
-        throw conflict(AMBIGUOUS_MESSAGE, {
-          consumer_id: target.ferrum_consumer_id,
-          credential_type: target.credential_type,
-          unresolved_credentials: unresolved,
-        });
-      }
-    }
     return index;
   }
 

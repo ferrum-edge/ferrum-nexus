@@ -1396,10 +1396,6 @@ export interface CredentialRepo {
    * "largest already recorded" the row's true append position. A unique index
    * on `(consumer, type, ordinal)` turns a breach of that rule into a
    * `CONFLICT` rather than two rows claiming one Edge slot.
-   *
-   * Pass `edge_ordinal: null` only to record a row whose gateway position is
-   * unknown. Multiple unresolved rows cannot be addressed individually.
-   * No service does this.
    */
   create(input: CreateInput<CredentialRecord>): Promise<CredentialRecord>;
   findById(id: Uuid): Promise<CredentialRecord | null>;

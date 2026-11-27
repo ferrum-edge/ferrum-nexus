@@ -3719,27 +3719,6 @@ A `retiring` `keyauth` or `jwt` row settles itself on the next operation on the
 pair. A `retiring` `basicauth` row has no array to compare against; see
 [the `basicauth` section](#basicauth-an-unconfirmed-outcome-blocks-positions).
 
-### What an unresolved credential position looks like
-
-A row with `edge_ordinal = NULL` has an unknown position. That matters only for
-`basicauth`, which is placed by position: a single such row is treated as
-index 0; two or more make rotate and revoke of those rows return
-`409 CONFLICT`:
-
-> The gateway position of this credential cannot be determined …
-
-with `details: { consumer_id, credential_type, unresolved_credentials }`. New
-credentials on the same consumer are unaffected, and `keyauth` and `jwt` rows
-are located by their secret whatever their ordinal. To find them:
-
-```sql
-SELECT ferrum_consumer_id, credential_type, COUNT(*) AS unresolved
-  FROM credential_metadata
-  WHERE edge_ordinal IS NULL AND status <> 'revoked' AND credential_type = 'basicauth'
-  GROUP BY ferrum_consumer_id, credential_type
-  HAVING COUNT(*) > 1;
-```
-
 ### Reconciling one
 
 The only repair that needs no guessing is to **empty the type and re-issue**:

@@ -295,10 +295,6 @@ function num(value: unknown): number {
   return typeof value === 'number' ? value : Number(value ?? 0);
 }
 
-function numOrNull(value: unknown): number | null {
-  return value === null || value === undefined ? null : num(value);
-}
-
 /**
  * Normalise a structured value the way `JSON.stringify`/`JSON.parse` would in a
  * SQL adapter, so `undefined` members disappear instead of being rejected by
@@ -745,8 +741,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: strOrNull(row.label),
     status: str(row.status) as CredentialStatus,
     rotated_from_id: strOrNull(row.rotated_from_id),
-    // Missing positions read back exactly like an unresolved SQL NULL.
-    edge_ordinal: numOrNull(row.edge_ordinal),
+    edge_ordinal: num(row.edge_ordinal),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };

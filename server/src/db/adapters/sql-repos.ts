@@ -153,7 +153,6 @@ import {
   FOR_UPDATE_SKIP_LOCKED,
   insertParts,
   int,
-  intOrNull,
   json,
   mapSqlConflict,
   NexusError,
@@ -502,7 +501,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: textOrNull(row.label),
     status: text(row.status) as CredentialStatus,
     rotated_from_id: textOrNull(row.rotated_from_id),
-    edge_ordinal: intOrNull(row.edge_ordinal),
+    edge_ordinal: int(row.edge_ordinal),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -2444,14 +2443,11 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         .add(type, 'credential_type = ?', type ?? null)
         .addIn('status', statuses)
         .build();
-      // Unresolved rows (NULL ordinal) first, then append order. The CASE is
-      // what makes NULL placement identical on PostgreSQL (NULLs last by
-      // default) and MySQL (NULLs first).
+      // Append order.
       const rows = await queryAll(
         exec,
         `SELECT * FROM credential_metadata${where.sql}
-          ORDER BY CASE WHEN edge_ordinal IS NULL THEN 0 ELSE 1 END ASC, edge_ordinal ASC,
-                   created_at ASC, id ASC`,
+          ORDER BY edge_ordinal ASC, created_at ASC, id ASC`,
         where.params,
       );
       return rows.map(mapCredential);

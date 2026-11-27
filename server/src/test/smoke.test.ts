@@ -2885,22 +2885,9 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         status: 'active',
       });
       assert.equal(jwt.edge_ordinal, 1);
-      // An explicit null records a legacy row of unknown position; it lists
-      // ahead of every row with an ordinal whatever its timestamp says.
-      const legacy = await store.credentials.create({
-        user_id: user.id,
-        ferrum_consumer_id: user.id,
-        credential_type: 'keyauth',
-        ferrum_credential_id: 'keyauth:legacy',
-        fingerprint: `fp-${newId()}`,
-        last4: 'lega',
-        status: 'active',
-        edge_ordinal: null,
-      });
-      assert.equal(legacy.edge_ordinal, null);
       assert.deepEqual(
         (await store.credentials.listByConsumer(user.id, 'keyauth')).map((entry) => entry.id),
-        [legacy.id, first.id, second.id, skewed.id],
+        [first.id, second.id, skewed.id],
       );
       // Two assigned ordinals can never collide within a consumer and type.
       await assert.rejects(
@@ -2953,7 +2940,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         (await store.credentials.update(afterSecondRevoke.id, { status: 'revoked' }))?.status,
         'revoked',
       );
-      assert.equal(await store.credentials.delete(legacy.id), true);
       assert.equal(await store.credentials.delete(skewed.id), true);
       assert.equal(await store.credentials.delete(jwt.id), true);
 

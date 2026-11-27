@@ -205,7 +205,6 @@ import {
   execute,
   insertParts,
   int,
-  intOrNull,
   json,
   mapConflict,
   page,
@@ -583,7 +582,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: textOrNull(row.label),
     status: text(row.status) as CredentialStatus,
     rotated_from_id: textOrNull(row.rotated_from_id),
-    edge_ordinal: intOrNull(row.edge_ordinal),
+    edge_ordinal: int(row.edge_ordinal),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -2653,13 +2652,11 @@ class SqliteStore implements NexusStore {
         .add(type, 'credential_type = ?', type ?? null)
         .addIn('status', statuses)
         .build();
-      // Unresolved rows (NULL ordinal) first, then append order. The CASE keeps
-      // the NULL placement explicit rather than relying on the engine default.
+      // Append order.
       return queryAll(
         this.db,
         `SELECT * FROM credential_metadata${where.sql}
-          ORDER BY CASE WHEN edge_ordinal IS NULL THEN 0 ELSE 1 END ASC, edge_ordinal ASC,
-                   created_at ASC, id ASC`,
+          ORDER BY edge_ordinal ASC, created_at ASC, id ASC`,
         where.params,
       ).map(mapCredential);
     },

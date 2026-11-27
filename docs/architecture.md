@@ -1105,9 +1105,7 @@ positions: one `credential_metadata` row per append, each carrying
 **`edge_ordinal`**, a strictly increasing counter per `(consumer, type)`
 assigned as `MAX + 1` inside the same per-consumer lock as the Edge append, so
 the non-revoked rows ordered by ordinal mirror the array and a row's rank is its
-index. A row with `edge_ordinal = NULL` sorts first; two or more such rows make
-the target **ambiguous**, refused with `409 CONFLICT` until an admin runs
-`POST /api/admin/credentials/reconcile` (§6.3).
+index.
 
 That mirror is kept provable instead: a `basicauth` row is written as
 `retiring` before its append and activated only once Edge acknowledges it, so

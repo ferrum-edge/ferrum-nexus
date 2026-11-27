@@ -1399,9 +1399,7 @@ a refusal and never sends the delete without it, so Nexus requires Edge v0.9.21.
   would make a revoke delete a different password while the revoked one kept
   working. No read can detect such an entry, so after anyone edits a
   consumer's HTTP Basic credentials outside Nexus the type must be cleared
-  (`clear_type=true` or an admin reconcile). Two live rows with an unknown
-  position (`edge_ordinal = NULL`) are `409 CONFLICT` until an admin
-  reconciles. A
+  (`clear_type=true` or an admin reconcile). A
   `basicauth` row is written (as `retiring`) before its append and activated
   only once Edge acknowledges it, and is never deleted by index to undo one.
   While any `basicauth` row of an identity is `retiring` — an append or delete
