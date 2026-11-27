@@ -34,6 +34,16 @@ and does not open a database an earlier version created. The
 `v0.5.2` (a new, empty database), and the known limitations; see also
 [upgrading to Edge v0.9.20](docs/operations.md#upgrading-to-edge-v0920).
 
+**Versioning.** Nexus follows [semantic versioning](https://semver.org/). Before
+`1.0.0`, a minor release may change behaviour incompatibly, and its release notes say
+what changed and what to do. From `1.0.0` onward, an incompatible change to the documented
+`/api` surface or to configuration ships only in a new major release, after a deprecation
+named in the release notes; surfaces documented as preview are excluded. Each release
+supports exactly one Ferrum Edge release, recorded in its
+[compatibility record](release/compatibility.env). Security support is in
+[SECURITY.md](SECURITY.md), and the standing limits are in
+[known limitations](docs/known-limitations.md).
+
 Since `v0.4.0` the supported Node range is `^22.22.2 || ^24.15.0 || >=26.0.0`.
 Node 22 remains supported; older Node 22/24 patches and Node 23/25 are excluded.
 Releases before `v0.4.0` supported Node 22.14 or later.
@@ -311,8 +321,8 @@ single-active-writer model.
 Cross-repo contracts — shared vocabularies, JSON schemas and fixtures — live in the org
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) store. Nexus vendors the
 Ferrum Edge vocabularies it speaks under
-[`contracts/ferrum-contracts/`](contracts/ferrum-contracts/), pinned by tag
-(`contracts-edge-0.9.20`) and per-file SHA-256 in
+[`contracts/ferrum-contracts/`](contracts/ferrum-contracts/), pinned by the tag on the first
+line of `PIN` and per-file SHA-256 in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN), in the format ferrum-contracts
 [`docs/consumer-pins.md`](https://github.com/ferrum-edge/ferrum-contracts/blob/main/docs/consumer-pins.md)
 defines. The `shared` contract test parses `PIN` strictly, fails on any vendored file without a
