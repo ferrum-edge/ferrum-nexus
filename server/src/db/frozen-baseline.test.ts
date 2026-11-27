@@ -32,7 +32,7 @@ import {
   mongoMigration,
 } from './adapters/mongodb/index.js';
 import { loadMigrations, loadShippedMigrations, migrationsDir } from './migrate.js';
-import { MIGRATION_MANIFEST } from './migration-manifest.js';
+import { MIGRATION_MANIFEST, type MigrationManifestEntry } from './migration-manifest.js';
 import {
   artifactChecksum,
   BASE_SCHEMA_FILE,
@@ -50,6 +50,15 @@ const FROZEN_BASELINE_SHA256 = {
   mysql: '5338acb2b6f2abc72c308b9cdd34b4beaab87530c67a2a9ffbfb85cedca8c27b',
   mongodb: 'e9737ebdf9af7aeac769396ffd2afec2d86074631c656872d021820469b84b1c',
 } as const;
+
+/**
+ * Every migration a release has shipped, with the checksums it shipped with:
+ * the release step that ships a migration copies its manifest entry here.
+ * Databases that release upgraded recorded exactly these checksums, so an
+ * entry is never edited or removed, and the manifest must keep them as its
+ * leading entries. Empty until the first migration ships.
+ */
+const RELEASED_MIGRATIONS: readonly MigrationManifestEntry[] = [];
 
 const DIALECTS: readonly SchemaDialect[] = ['sqlite', 'pg', 'mysql'];
 
@@ -128,6 +137,16 @@ describe('frozen baseline', () => {
 });
 
 describe('forward migrations', () => {
+  it('keep every released migration exactly as it shipped', () => {
+    assert.deepEqual(
+      MIGRATION_MANIFEST.slice(0, RELEASED_MIGRATIONS.length),
+      RELEASED_MIGRATIONS,
+      'A released migration changed, moved or disappeared: databases upgraded by that release ' +
+        'recorded its checksums and would refuse this build. Revert the change and add a new ' +
+        'migration (docs/operations.md, "Schema and upgrades").',
+    );
+  });
+
   it('ship under recognised names only', () => {
     if (!existsSync(migrationsDir())) return;
     for (const file of readdirSync(migrationsDir())) {

@@ -9,7 +9,11 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { describe, it } from 'node:test';
 import mysql from 'mysql2/promise';
-import { ensureMysqlSchema, migrationSteps } from '../db/adapters/mysql/schema.js';
+import {
+  ensureMysqlSchema,
+  migrationSteps,
+  mysqlSchemaLockName,
+} from '../db/adapters/mysql/schema.js';
 import { sqlMigration } from '../db/migrate.js';
 import { loadBaseSchema, splitSqlStatements } from '../db/schema.js';
 
@@ -20,6 +24,8 @@ const NEWER = /a newer release upgraded it/;
 const INTERRUPTED = /interrupted part-way/;
 const TWICE = /changes column users\.probe_note twice/;
 const UNSUPPORTED = /unsupported non-replayable DDL/;
+const IF_EXISTS = /uses an IF \[NOT\] EXISTS form/;
+const BUSY = /holds the MySQL schema migration lock/;
 
 /**
  * A forward migration using every statement kind a MySQL migration may
@@ -29,7 +35,7 @@ const PROBE = sqlMigration(
   '016_recovery_probe',
   '016_recovery_probe.mysql.sql',
   `
-  CREATE TABLE IF NOT EXISTS recovery_probe (
+  CREATE TABLE recovery_probe (
     id VARCHAR(64) NOT NULL, note TEXT NULL, PRIMARY KEY (id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
   ALTER TABLE users ADD COLUMN recovery_probe_note VARCHAR(64) NULL;
@@ -362,7 +368,7 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
     }
   });
 
-  it('makes a peer that starts during a failed creation wait, then finish it', async () => {
+  it('refuses a peer that starts during a failed creation, then a restart finishes it', async () => {
     const expected = await fixture(async (pool) => {
       await ensureMysqlSchema(pool);
       return schema(pool);
@@ -370,10 +376,14 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
     await fixture(async (pool, url) => {
       const second = mysql.createPool(url);
       let fired = false;
-      let next: Promise<unknown> | null = null;
+      let peer: Promise<unknown> | null = null;
       const faulty = intercept(pool, (method, sql, _params, after) => {
         if (method === 'execute' && after && sql.startsWith('SELECT GET_LOCK(')) {
-          next = ensureMysqlSchema(second);
+          // Started while the first owns the lock: refused at once, never queued.
+          peer = ensureMysqlSchema(second).then(
+            () => 'finished',
+            (error: unknown) => error,
+          );
         }
         if (
           !fired &&
@@ -386,11 +396,10 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
         }
       });
       try {
-        // Start the second pool while the first owns the advisory lock. It
-        // must replay the committed CREATEs after the failing owner releases it.
         await assert.rejects(() => ensureMysqlSchema(faulty), INTERRUPTION);
-        assert.ok(next, 'the peer started while the failing creator held its advisory lock');
-        await next;
+        assert.ok(peer, 'the peer started while the failing creator held its advisory lock');
+        const outcome = await peer;
+        assert.ok(outcome instanceof Error && BUSY.test(outcome.message), String(outcome));
         assert.ok(fired);
         await pool.query(`INSERT INTO organizations (id, name, created_at, updated_at)
           VALUES ('preserved', 'Survives restart', '2026-01-01', '2026-01-01')`);
@@ -401,21 +410,27 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
     });
   });
 
-  it('serializes two instances creating the schema, and the lock is free for a later run', async () => {
+  it('refuses a second migrator while the lock is held, and the lock is free afterwards', async () => {
     await fixture(async (pool, url) => {
-      const second = mysql.createPool(url);
+      const holder = await pool.getConnection();
+      const name = mysqlSchemaLockName(new URL(url).pathname.slice(1));
       try {
-        await Promise.all([ensureMysqlSchema(pool), ensureMysqlSchema(second)]);
-        const [rows] = await pool.query<mysql.RowDataPacket[]>('SELECT id FROM schema_migrations');
-        assert.deepEqual(
-          rows.map((row) => row.id),
-          [base.id],
+        await holder.query('SELECT GET_LOCK(?, 5)', [name]);
+        await assert.rejects(
+          () => ensureMysqlSchema(pool),
+          (error: unknown) => error instanceof Error && BUSY.test(error.message),
         );
-        // The interruption matrix also re-enters after each failed lock owner.
-        await ensureMysqlSchema(second);
       } finally {
-        await second.end();
+        await holder.query('SELECT RELEASE_LOCK(?)', [name]);
+        holder.release();
       }
+      await ensureMysqlSchema(pool);
+      const [rows] = await pool.query<mysql.RowDataPacket[]>('SELECT id FROM schema_migrations');
+      assert.deepEqual(
+        rows.map((row) => row.id),
+        [base.id],
+      );
+      await assertSchemaLockAvailable(pool, url);
     });
   });
 });
@@ -434,6 +449,15 @@ describe('MySQL migration preflight', () => {
   it('refuses data changes and other statements it cannot verify on a replay', () => {
     const update = sqlMigration('016_update', 'x', "UPDATE users SET company = 'x';");
     assert.throws(() => migrationSteps(update), UNSUPPORTED);
+  });
+
+  it('refuses IF [NOT] EXISTS forms, which would hide a different definition', () => {
+    const create = sqlMigration(
+      '016_create',
+      'x',
+      'CREATE TABLE IF NOT EXISTS widgets (id VARCHAR(64) NOT NULL, PRIMARY KEY (id));',
+    );
+    assert.throws(() => migrationSteps(create), IF_EXISTS);
   });
 
   it('accepts every supported statement kind', () => {

@@ -7,21 +7,25 @@
  * `000_base_v0_6`, and representative rows in v0.6.0's physical shape — then
  * starts the current code against it:
  *
- * - the shipped build applies exactly the shipped migrations (none in the 1.0
- *   baseline, when it writes nothing at all) and serves and updates the rows
- *   through the store;
+ * - the shipped build's migrate command applies exactly the shipped
+ *   migrations (none in the 1.0 baseline, when it changes nothing at all: no
+ *   ledger row, ledger column, table, collection or index) and the store
+ *   serves and updates the rows;
  * - a probe migration numbered after the last shipped one, registered through
  *   the test seam (`createStore`'s `migrations` option), applies on top of
  *   them, is recorded once with its checksum, and changes nothing on a
  *   restart; on PostgreSQL its dollar-quoted body reaches the server intact;
- * - two instances starting together apply it once;
+ * - server startup refuses the database while the probe is pending, changing
+ *   nothing, and accepts it once the migrate command has applied it;
+ * - a migrate command started while another migrator holds the lock is
+ *   refused (`CONFLICT`), changing nothing (PostgreSQL, MySQL, MongoDB);
  * - the shipped build, which does not know the probe, then refuses the
  *   database unchanged (a downgrade);
  * - SQLite and PostgreSQL roll a failing migration back with its ledger row;
  *   MongoDB records an interrupted step in progress, every other build refuses
- *   it, and the same build resumes it; its schema lock fences a stalled holder
- *   and serializes two-step migrations. MySQL's interrupted-migration resume
- *   is in `mysql-schema-recovery.test.ts`.
+ *   it, and the same build resumes it; a lock a crashed MongoDB migrator left
+ *   stays until `--force-unlock`. MySQL's interrupted-migration resume is in
+ *   `mysql-schema-recovery.test.ts`.
  *
  * SQLite always runs. PostgreSQL, MySQL and MongoDB run when
  * `NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL` or `NEXUS_TEST_MONGO_URL`
@@ -43,10 +47,13 @@ import type { DbDriver } from '@ferrum-nexus/shared';
 
 import { loadConfig, type NexusConfig } from '../config/index.js';
 import {
-  acquireMongoSchemaLock,
   MONGO_MIGRATIONS,
+  SCHEMA_LOCK_COLLECTION,
+  SCHEMA_LOCK_ID,
   type MongoMigrationStep,
 } from '../db/adapters/mongodb/index.js';
+import { mysqlSchemaLockName } from '../db/adapters/mysql/schema.js';
+import { SCHEMA_LOCK_KEY } from '../db/adapters/postgres/index.js';
 import { openSqliteDatabase } from '../db/adapters/sqlite/index.js';
 import { createStore, type MigrationOverrides } from '../db/index.js';
 import { loadShippedMigrations, sqlMigration } from '../db/migrate.js';
@@ -65,15 +72,24 @@ const HYPHENS = /-/g;
 const NEWER = /a newer release upgraded it\. Downgrades are not supported/;
 const INTERRUPTED = /That upgrade was interrupted part-way/;
 const FAILED = /^Schema migration \S+ failed: /;
-const BUSY = /schema setup is busy/;
-const TOOK_OVER = /took over the MongoDB schema lock/;
+const BUSY = /holds the \w+ schema migration lock/;
+const FORCE_UNLOCK = /--force-unlock/;
+const PENDING = /needs schema migrations this release ships.*run the migrate command once/s;
 const THEN = '2026-11-01T00:00:00.000Z';
 const PROBE_NOTE = 'migrated; ok';
 
 /** The ids after the last shipped migration (016 while none ships). */
 const NEXT_NUMBER = Number.parseInt(MIGRATION_MANIFEST.at(-1)?.id ?? '015', 10) + 1;
 const PROBE_ID = `${String(NEXT_NUMBER).padStart(3, '0')}_upgrade_probe`;
-const FOLLOW_UP_ID = `${String(NEXT_NUMBER + 1).padStart(3, '0')}_upgrade_probe_follow_up`;
+
+/** An `assert.rejects` validator matching the error's message (not `String(error)`). */
+function withMessage(pattern: RegExp): (error: unknown) => boolean {
+  return (error: unknown) => {
+    assert.ok(error instanceof Error, String(error));
+    assert.match(error.message, pattern);
+    return true;
+  };
+}
 
 /** The shipped migration ids of a backend: what its shipped build applies. */
 function shippedIds(dialect: SchemaDialect | 'mongodb'): string[] {
@@ -106,7 +122,7 @@ const PROBE_SQL: Readonly<Record<SchemaDialect, string>> = {
   `,
   // Only replay-verifiable statements (`db/adapters/mysql/schema.ts`).
   mysql: `
-    CREATE TABLE IF NOT EXISTS upgrade_probe (
+    CREATE TABLE upgrade_probe (
       id VARCHAR(64) NOT NULL, note VARCHAR(64) NOT NULL DEFAULT '', PRIMARY KEY (id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
     ALTER TABLE users ADD COLUMN upgrade_probe_note VARCHAR(64) NULL;
@@ -289,6 +305,10 @@ interface V060Database {
   ledgerColumns: () => Promise<string[] | null>;
   /** Whether the probe's index exists. */
   probeIndexed: () => Promise<boolean>;
+  /** Every table or collection, column and index: what a no-op must leave alone. */
+  schemaObjects: () => Promise<string[]>;
+  /** Hold the migration lock as another migrator would; returns its release. */
+  holdLock?: () => Promise<() => Promise<void>>;
   drop: () => Promise<void>;
 }
 
@@ -388,6 +408,14 @@ async function v060Sqlite(): Promise<V060Database> {
             .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
             .all('ix_upgrade_probe_users').length === 1,
       ),
+    schemaObjects: async () =>
+      read((reader) => [
+        ...reader
+          .prepare("SELECT type || ':' || name AS object FROM sqlite_master ORDER BY 1")
+          .all()
+          .map((row) => String((row as { object: unknown }).object)),
+        ...columns().map((column) => `ledger column:${column}`),
+      ]),
     drop: async () => rmSync(dir, { recursive: true, force: true }),
   };
 }
@@ -452,6 +480,27 @@ async function v060Postgres(adminUrl: string): Promise<V060Database> {
           'ix_upgrade_probe_users',
         ])
       ).length === 1,
+    schemaObjects: async () =>
+      (
+        await query(
+          "SELECT 'table:' || table_name AS object FROM information_schema.tables " +
+            'WHERE table_schema = current_schema() ' +
+            "UNION ALL SELECT 'column:' || table_name || '.' || column_name " +
+            'FROM information_schema.columns WHERE table_schema = current_schema() ' +
+            "UNION ALL SELECT 'index:' || indexname FROM pg_indexes " +
+            'WHERE schemaname = current_schema() ORDER BY 1',
+        )
+      ).map((row) => String(row.object)),
+    holdLock: async () => {
+      const holder = new pg.Client({ connectionString: url });
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query('SELECT pg_advisory_xact_lock($1::bigint)', [SCHEMA_LOCK_KEY]);
+      return async () => {
+        await holder.query('ROLLBACK');
+        await holder.end();
+      };
+    },
     drop: async () => {
       const cleaner = new pg.Client({ connectionString: adminUrl });
       await cleaner.connect();
@@ -516,6 +565,25 @@ async function v060Mysql(adminUrl: string): Promise<V060Database> {
           ['ix_upgrade_probe_users'],
         )
       ).length === 1,
+    schemaObjects: async () =>
+      (
+        await query(
+          "SELECT CONCAT('table:', TABLE_NAME) AS object FROM information_schema.TABLES " +
+            'WHERE TABLE_SCHEMA = DATABASE() ' +
+            "UNION ALL SELECT CONCAT('column:', TABLE_NAME, '.', COLUMN_NAME) " +
+            'FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() ' +
+            "UNION ALL SELECT DISTINCT CONCAT('index:', TABLE_NAME, '.', INDEX_NAME) " +
+            'FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() ORDER BY 1',
+        )
+      ).map((row) => String(row.object)),
+    holdLock: async () => {
+      const holder = await mysql.createConnection(url);
+      await holder.query('SELECT GET_LOCK(?, 5)', [mysqlSchemaLockName(database)]);
+      return async () => {
+        await holder.query('SELECT RELEASE_LOCK(?)', [mysqlSchemaLockName(database)]);
+        await holder.end();
+      };
+    },
     drop: async () => {
       const cleaner = await mysql.createConnection(adminUrl);
       await cleaner.query(`DROP DATABASE IF EXISTS \`${database}\``);
@@ -578,6 +646,33 @@ async function v060Mongo(baseUrl: string): Promise<V060Database> {
           (index) => index.name === 'ix_upgrade_probe_users',
         ),
       ),
+    schemaObjects: () =>
+      withDb(async (db) => {
+        const objects: string[] = [];
+        for (const { name } of await db.listCollections({}, { nameOnly: true }).toArray()) {
+          objects.push(`collection:${name}`);
+          for (const index of await db.collection(name).indexes()) {
+            objects.push(`index:${name}.${String(index.name)}`);
+          }
+        }
+        return objects.sort();
+      }),
+    holdLock: async () => {
+      await withDb((db) =>
+        db.collection(SCHEMA_LOCK_COLLECTION).insertOne({
+          _id: SCHEMA_LOCK_ID,
+          owner: 'another-migrator',
+          acquired_at: THEN,
+        } as Document),
+      );
+      return () =>
+        withDb((db) =>
+          db
+            .collection(SCHEMA_LOCK_COLLECTION)
+            .deleteOne({ _id: SCHEMA_LOCK_ID } as Document)
+            .then(() => undefined),
+        );
+    },
     drop: () => withDb((db) => db.dropDatabase().then(() => undefined)),
   };
 }
@@ -636,6 +731,7 @@ function registerUpgrade(
       try {
         const before = await target.ledger();
         const columns = await target.ledgerColumns();
+        const objects = await target.schemaObjects();
         await withStore(target, undefined, async (store) => {
           await store.migrate();
           const ledger = await target.ledger();
@@ -644,9 +740,11 @@ function registerUpgrade(
             [V0_6_0_LEDGER_ID, ...target.shipped],
           );
           if (target.shipped.length === 0) {
-            // Nothing to apply: nothing is written, not even to the ledger's shape.
+            // Nothing to apply: nothing is written, not to the ledger, its
+            // shape, or anything else (no lock table or collection either).
             assert.deepEqual(ledger, before);
             assert.deepEqual(await target.ledgerColumns(), columns);
+            assert.deepEqual(await target.schemaObjects(), objects);
           }
 
           const admin = await store.users.findById('u-admin');
@@ -717,26 +815,62 @@ function registerUpgrade(
       }
     });
 
-    it('applies a later migration once when two instances start together', async () => {
+    it('refuses to start with migrations pending, until the migrate command applies them', async () => {
       const target = await open();
       try {
-        const first = createStore(target.config, { migrations: target.overrides });
-        const second = createStore(target.config, { migrations: target.overrides });
-        try {
-          await Promise.all([first.init(), second.init()]);
-          await Promise.all([first.migrate(), second.migrate()]);
-        } finally {
-          await Promise.all([first.close(), second.close()]);
-        }
-        assert.deepEqual(
-          (await target.ledger()).map((row) => row.id),
-          [V0_6_0_LEDGER_ID, ...target.shipped, PROBE_ID],
-        );
-        assert.ok(await target.probeIndexed());
+        await withStore(target, undefined, (store) => store.migrate());
+        const before = await target.ledger();
+        const objects = await target.schemaObjects();
+        // Startup knows the probe but never applies it.
+        await withStore(target, target.overrides, async (store) => {
+          await assert.rejects(store.migrate({ mode: 'startup' }), withMessage(PENDING));
+        });
+        assert.deepEqual(await target.ledger(), before);
+        assert.deepEqual(await target.schemaObjects(), objects);
+        // The migrate command applies it; startup then accepts the database.
+        await withStore(target, target.overrides, (store) => store.migrate());
+        await withStore(target, target.overrides, (store) => store.migrate({ mode: 'startup' }));
+        assert.equal((await target.ledger()).at(-1)?.id, PROBE_ID);
+        // A build that does not know the probe refuses to start.
+        await withStore(target, undefined, async (store) => {
+          await assert.rejects(store.migrate({ mode: 'startup' }), withMessage(NEWER));
+        });
       } finally {
         await target.drop();
       }
     });
+
+    it(
+      'refuses a second migrator while another holds the lock',
+      {
+        skip:
+          label === 'sqlite' ? 'SQLite is one process; its write lock is per transaction' : false,
+      },
+      async () => {
+        const target = await open();
+        try {
+          const before = await target.ledger();
+          const release = await target.holdLock!();
+          try {
+            await withStore(target, target.overrides, async (store) => {
+              await assert.rejects(store.migrate(), (error: unknown) => {
+                assert.ok(isNexusError(error), String(error));
+                assert.equal(error.code, 'CONFLICT');
+                assert.match(error.message, BUSY);
+                return true;
+              });
+            });
+            assert.deepEqual(await target.ledger(), before);
+          } finally {
+            await release();
+          }
+          await withStore(target, target.overrides, (store) => store.migrate());
+          assert.equal((await target.ledger()).at(-1)?.id, PROBE_ID);
+        } finally {
+          await target.drop();
+        }
+      },
+    );
 
     if (label === 'sqlite' || label === 'postgres') {
       const dialect = label === 'sqlite' ? 'sqlite' : 'pg';
@@ -746,7 +880,7 @@ function registerUpgrade(
           await withStore(target, undefined, (store) => store.migrate());
           const before = await target.ledger();
           await withStore(target, brokenOverrides(dialect), async (store) => {
-            await assert.rejects(store.migrate(), FAILED);
+            await assert.rejects(store.migrate(), withMessage(FAILED));
           });
           assert.deepEqual(await target.ledger(), before);
           assert.equal(await target.hasTable?.('upgrade_probe_partial'), false);
@@ -763,7 +897,7 @@ function registerUpgrade(
   });
 }
 
-/** MongoDB: interrupted steps, the schema lock, and two-step migrations. */
+/** MongoDB: interrupted steps and a lock a crashed migrator left behind. */
 function registerMongoCases(open: () => Promise<V060Database>): void {
   it('records an interrupted step in progress, refuses other builds, and resumes it', async () => {
     const target = await open();
@@ -790,7 +924,7 @@ function registerMongoCases(open: () => Promise<V060Database>): void {
       };
       const overrides: MigrationOverrides = { mongodb: [...MONGO_MIGRATIONS, step] };
       await withStore(target, overrides, async (store) => {
-        await assert.rejects(store.migrate(), FAILED);
+        await assert.rejects(store.migrate(), withMessage(FAILED));
       });
       const interrupted = await target.ledger();
       assert.equal(interrupted.at(-1)?.id, PROBE_ID);
@@ -810,79 +944,20 @@ function registerMongoCases(open: () => Promise<V060Database>): void {
     }
   });
 
-  it('hands the schema lock over only after it expires, and fences the stale holder', async () => {
+  it("keeps a crashed migrator's lock until --force-unlock clears it", async () => {
     const target = await open();
     try {
-      await target.withMongo!(async (db) => {
-        const stale = await acquireMongoSchemaLock(db, { ttlMs: 500, heartbeat: false });
-        await assert.rejects(acquireMongoSchemaLock(db, { waitMs: 0 }), BUSY);
-        await new Promise((resolve) => setTimeout(resolve, 700));
-        const successor = await acquireMongoSchemaLock(db, { waitMs: 0, heartbeat: false });
-        await assert.rejects(stale.assertOwned(), TOOK_OVER);
-        await successor.assertOwned();
-        await stale.release();
-        // The stale holder's release leaves the successor's lock in place.
-        await assert.rejects(acquireMongoSchemaLock(db, { waitMs: 0 }), BUSY);
-        await successor.release();
+      // A lock no running migrator holds: what a crash leaves behind.
+      await target.holdLock!();
+      await withStore(target, target.overrides, async (store) => {
+        await assert.rejects(store.migrate(), withMessage(FORCE_UNLOCK));
       });
-    } finally {
-      await target.drop();
-    }
-  });
-
-  it('serializes two-step migrations across instances', async () => {
-    const target = await open();
-    try {
-      // Step one adds a field, step two removes it: run out of order or twice,
-      // the field would survive.
-      const steps: MongoMigrationStep[] = [
-        ...MONGO_MIGRATIONS,
-        {
-          id: PROBE_ID,
-          indexes: [],
-          updates: [
-            {
-              collection: 'users',
-              filter: { upgrade_probe_flag: { $exists: false } },
-              update: { $set: { upgrade_probe_flag: true } },
-            },
-          ],
-        },
-        {
-          id: FOLLOW_UP_ID,
-          indexes: [],
-          updates: [
-            {
-              collection: 'users',
-              filter: { upgrade_probe_flag: { $exists: true } },
-              update: { $unset: { upgrade_probe_flag: '' } },
-            },
-          ],
-        },
-      ];
-      const stores = [0, 1, 2].map(() =>
-        createStore(target.config, { migrations: { mongodb: steps } }),
+      await withStore(target, target.overrides, (store) => store.migrate({ forceUnlock: true }));
+      assert.equal((await target.ledger()).at(-1)?.id, PROBE_ID);
+      const locks = await target.withMongo!((db) =>
+        db.collection(SCHEMA_LOCK_COLLECTION).countDocuments({}),
       );
-      try {
-        await Promise.all(stores.map((store) => store.init()));
-        await Promise.all(stores.map((store) => store.migrate()));
-      } finally {
-        await Promise.all(stores.map((store) => store.close()));
-      }
-      const ledger = await target.ledger();
-      assert.deepEqual(
-        ledger.map((row) => [row.id, row.state]),
-        [
-          [V0_6_0_LEDGER_ID, null],
-          ...target.shipped.map((id) => [id, 'applied']),
-          [PROBE_ID, 'applied'],
-          [FOLLOW_UP_ID, 'applied'],
-        ],
-      );
-      const flagged = await target.withMongo!((db) =>
-        db.collection('users').countDocuments({ upgrade_probe_flag: { $exists: true } }),
-      );
-      assert.equal(flagged, 0);
+      assert.equal(locks, 0, 'the migrator released its own lock');
     } finally {
       await target.drop();
     }

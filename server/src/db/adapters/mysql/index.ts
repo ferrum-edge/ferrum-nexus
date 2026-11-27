@@ -34,7 +34,7 @@ import mysql from 'mysql2/promise';
 import type { DbDriver } from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
-import type { SqlMigration } from '../../migrate.js';
+import type { SchemaOptions, SqlMigration } from '../../migrate.js';
 import { ensureMysqlSchema } from './schema.js';
 import type { NexusStore, StoreHealth } from '../../store.js';
 import { formatSql, type Row, type SqlExecutor, type SqlParam } from '../sql-common.js';
@@ -96,8 +96,8 @@ class MysqlBackend implements SqlStoreBackend {
     connection.release();
   }
 
-  async migrate(): Promise<void> {
-    await ensureMysqlSchema(this.db, undefined, { migrations: this.migrations });
+  async migrate(options: SchemaOptions = {}): Promise<void> {
+    await ensureMysqlSchema(this.db, undefined, { ...options, migrations: this.migrations });
   }
 
   async close(): Promise<void> {

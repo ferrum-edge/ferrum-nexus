@@ -35,9 +35,13 @@ forward:
   `server/src/db/migration-manifest.ts` (`frozen-baseline.test.ts` prints them). Once a release
   ships it, a migration is never edited, renamed, reordered or deleted; until then it may change,
   and a development database that applied the earlier text is refused and must be recreated.
-- `store.migrate()` (`server/src/db/migrate.ts`) creates the baseline in an empty database, then
-  applies the migrations the `schema_migrations` ledger lacks, in id order, recording each one's
-  id, checksum and time (in the same transaction on SQLite and PostgreSQL). It refuses, changing
+- **The migrate command creates or upgrades the schema; the server refuses to start while
+  migrations are pending.** `store.migrate()` (`server/src/db/migrate.ts`, called by
+  `migrate-cli.ts`) creates the baseline and every migration in an empty database, or applies the
+  migrations the `schema_migrations` ledger lacks, in id order, recording each one's id, checksum
+  and time, under an exclusive lock a second migrator is refused (`--force-unlock` clears a crashed
+  MongoDB migrator's lock). Server startup calls `store.migrate({ mode: 'startup' })`: it creates a
+  completely empty database the same way but never changes an existing one. Both refuse, changing
   nothing, a database created before `v0.6.0`, one a newer release migrated (no downgrades), and a
   recorded migration whose checksum differs. See
   [docs/operations.md, "Schema and upgrades"](docs/operations.md#schema-and-upgrades).

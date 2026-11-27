@@ -1499,10 +1499,12 @@ without CAPTCHA, turn it off in settings, where the change is audited.
 
 ### Schema and upgrades
 
-From 1.0.0 onward a Nexus release opens the database the release before it
-left and upgrades it in place with forward-only migrations; downgrades are not
-supported. Nexus 1.0.0 opens a database created by `v0.6.0` as it is. A
-database created by `v0.5.2` or earlier cannot be upgraded: see
+From 1.0.0 onward a database created by one Nexus release is upgraded in place
+for the next with forward-only migrations; downgrades are not supported. **The
+migrate command creates or upgrades the schema; the server refuses to start
+while migrations are pending.** Nexus 1.0.0 opens a database created by
+`v0.6.0` as it is. A database created by `v0.5.2` or earlier cannot be
+upgraded: see
 [moving from a release before v0.6.0](#moving-from-a-release-before-v060).
 
 **The frozen baseline.** Each backend has one base schema:
@@ -1517,65 +1519,103 @@ numbered forward migration in `server/src/db/migrations/`
 same id. Each release's notes list the migrations it adds; a release that adds
 none leaves the schema exactly as it was.
 
-**At startup** (`store.init()`, then `store.migrate()`, before the server
-listens) and when you run the [migrate command](#initializing-the-schema),
-Nexus reads the `schema_migrations` table (a collection on MongoDB):
+**Who changes the schema.** Nexus reads the `schema_migrations` table (a
+collection on MongoDB) in two places:
 
-| The ledger holds                                                | Nexus                                                                                                                                        |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| nothing, or the table is missing                                | creates the base schema, records `000_base_v0_6`, then applies every migration                                                               |
-| `000_base_v0_6` and migrations it knows, checksums matching     | applies the migrations the ledger lacks, in id order, recording each one's id, checksum and `applied_at`; with none to apply, writes nothing |
-| no `000_base_v0_6`                                              | refuses: the database was created by `v0.5.2` or earlier, or not by Nexus                                                                    |
-| a migration id this release does not know                       | refuses: a newer release upgraded the database                                                                                               |
-| a migration whose recorded checksum differs from this release's | refuses: the release or the ledger was modified                                                                                              |
-| a migration this release knows, recorded in progress            | resumes it (MySQL and MongoDB, after an interrupted upgrade by the same release)                                                             |
+- **The [migrate command](#initializing-the-schema)**
+  (`node server/dist/db/migrate-cli.js`, or `npm run migrate` from a checkout)
+  creates the schema in an empty database and applies the migrations an
+  existing one lacks. It is the only thing that upgrades a database. Run it once
+  per upgrade, with every Nexus instance stopped, after a backup
+  ([upgrading Nexus](#upgrading-nexus)).
+- **Server startup** creates the schema in a completely empty database (no
+  ledger rows), so a first start needs no separate step. It never changes an
+  existing database: unless the ledger holds exactly this release's
+  migrations, the server refuses to start and says what to run.
 
-Every refusal exits non-zero **before any schema or data is written**, so the
-database is left exactly as it was (on MongoDB the schema lock's own,
-otherwise empty, `schema_migrations_lock` collection may appear). The same
-startup check also refuses to run when this release's migration files are
-missing or altered: the server compiles in the list of migrations it ships,
-with their checksums (`server/src/db/migration-manifest.ts`), so an incomplete
-image cannot silently skip one.
+| The ledger holds                                                | The migrate command                                                       | Server startup                         |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------- |
+| nothing, or the table is missing                                | creates the base schema, records `000_base_v0_6`, applies every migration | the same                               |
+| exactly this release's migrations                               | does nothing and writes nothing                                           | starts                                 |
+| `000_base_v0_6` and some of this release's migrations           | applies the rest, in id order, recording each one's checksum and time     | refuses: run the migrate command       |
+| one of this release's migrations recorded in progress           | resumes it (MySQL and MongoDB, after an interrupted upgrade)              | refuses: run the migrate command again |
+| no `000_base_v0_6`                                              | refuses: created by `v0.5.2` or earlier, or not by Nexus                  | the same                               |
+| a migration id this release does not know                       | refuses: a newer release upgraded the database                            | the same                               |
+| a migration whose recorded checksum differs from this release's | refuses: the release or the ledger was modified                           | the same                               |
+
+Every refusal exits non-zero **before anything is written**, so the database is
+left exactly as it was. Both also refuse to run when this release's migrations
+are missing or altered: the server compiles in the list of migrations it ships,
+with their checksums (`server/src/db/migration-manifest.ts`), and checks the
+packaged SQL files and the MongoDB steps against it, so an incomplete image
+cannot silently skip one.
 
 How a migration is applied:
 
 - **SQLite, PostgreSQL:** each migration and its ledger row commit in one
-  transaction, or neither does. PostgreSQL receives each migration file whole,
-  so function bodies and other dollar-quoted text arrive intact.
+  transaction, or neither does, and a new database is created (baseline and
+  every migration) in one transaction. PostgreSQL receives each migration file
+  whole, so function bodies and other dollar-quoted text arrive intact. A file
+  that would end that transaction (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`,
+  `VACUUM`, or on PostgreSQL anything `CONCURRENTLY`) is refused before any of
+  it runs.
 - **MySQL:** DDL commits on its own. A MySQL migration contains only
-  statements whose finished state Nexus can read back from
-  `information_schema` (`CREATE TABLE IF NOT EXISTS`, adding a `VARCHAR`,
-  `INT` or `LONGTEXT` column, adding an index, widening a text column to
-  `LONGTEXT`, a boolean `CHECK`), each on a different object, and no data
-  changes. Nexus refuses any other file before running any of it.
+  statements whose finished state Nexus can check in `information_schema`: a
+  plain `CREATE TABLE` of a new table, adding a `VARCHAR`, `INT` or `LONGTEXT`
+  column, adding an index, widening a text column to `LONGTEXT`, a boolean
+  `CHECK`; each on a different object, no `IF [NOT] EXISTS` forms (MySQL would
+  skip such a statement without comparing what is there), and no data changes.
+  Nexus refuses any other file before running any of it, and refuses a
+  migration that creates a table that already exists.
 - **MongoDB:** a step is data: the indexes it creates (a no-op for an identical
   index), then `updateMany` changes whose filters skip documents already
-  changed. Its checksum covers both.
+  changed. Its checksum covers every part of both. The ledger and the lock are
+  always read from the primary with majority read concern and written with
+  majority write concern, whatever the connection URL says.
 
 On MySQL and MongoDB, where a migration cannot commit with its ledger entry,
 Nexus records the migration **in progress** before its first change and marks it
-applied after its last. If the upgrade is interrupted, the entry stays: the same
-release resumes the migration on its next start (each step that already landed
-with the intended definition is skipped; one with any other definition is
-refused rather than changed), and every other release refuses the database.
+applied after its last. If the upgrade is interrupted, the entry stays: running
+the migrate command again with the same release resumes the migration (each
+step that already landed with the intended definition is skipped; one with any
+other definition is refused rather than changed), and every other release, and
+server startup, refuses the database.
 
 A ledger `v0.6.0` created has only `id` and `applied_at`. Nexus adds nullable
 `checksum` and `state` columns the first time it applies a migration; the
 baseline's row keeps a null checksum. Until a release applies a migration,
-Nexus writes nothing to the schema of a `v0.6.0` database.
+Nexus writes nothing to a `v0.6.0` database.
 
-**Run one migrator.** Upgrade with every instance stopped
-([upgrading Nexus](#upgrading-nexus)), which the
-[single active writer](#supported-topologies) rule already requires. If two
-instances start together anyway, the whole check is serialized: PostgreSQL and
-MySQL take a database-scoped advisory lock, and MongoDB a lock document with an
-owner token and a 60-second expiry, renewed while the holder works and checked
-before every schema write, so a holder that stalled past it stops instead of
-writing after its successor. The second instance waits up to 30 seconds, then
-finds the work done (or exits with `schema setup is busy`; start it again).
-SQLite applies each migration under its write lock and re-reads the ledger
-first.
+**One migrator at a time.** When there is work to do, the migrate command (and
+startup creating an empty database) takes an exclusive lock. It never waits
+for the lock and never takes it over: a second migrator exits non-zero with
+`Another Nexus instance holds the … schema migration lock`, changing nothing;
+run it again once the first has finished.
+
+- **PostgreSQL** takes a transaction-scoped advisory lock
+  (`pg_try_advisory_xact_lock`) in every schema transaction and re-reads the
+  ledger under it. Run the migrate command over a **direct connection or a
+  session-mode pooler**; a transaction-mode pooler (PgBouncer
+  `pool_mode = transaction`) is not supported for it.
+- **MySQL** takes a database-scoped advisory lock (`GET_LOCK`), held by the
+  migrator's session; run the migrate command against the server directly.
+- **MongoDB** inserts a lock document into `schema_migrations_lock` (created
+  only when there is work). A migrator that crashes leaves it behind, and every
+  later migrator is refused, naming the time it was taken. Clear it only after
+  confirming that no migrator is running:
+
+  ```bash
+  node server/dist/db/migrate-cli.js --force-unlock
+  ```
+
+  The command deletes the lock and then runs normally; a migration the crash
+  left in progress is resumed.
+
+- **SQLite** is one process: each migration runs under the database write
+  lock, after re-reading the ledger.
+
+PostgreSQL's and MySQL's locks end with the session that holds them, so
+`--force-unlock` changes nothing there.
 
 To see what a database holds, run
 `SELECT * FROM schema_migrations ORDER BY id` (PostgreSQL, MySQL) or
@@ -1623,6 +1663,21 @@ after it was applied: the image is not an official release build, or someone
 edited the ledger. Run an official release image. If the ledger was edited,
 restore the last backup taken before the edit.
 
+**Migrations pending** (server startup: `This database needs schema migrations
+this release ships (…), and the server never applies migrations at startup`):
+the release is newer than the database. With every instance stopped and a
+backup taken, run the migrate command
+([upgrading Nexus](#upgrading-nexus)), then start the server. If the message
+says another instance is migrating right now, wait for it and start again.
+
+**An interrupted upgrade** (`An upgrade by this release was interrupted
+part-way (… in progress)`): a migrate command stopped part-way on MySQL or
+MongoDB. Run the migrate command again with the same release; it resumes.
+
+**Lock held** (`Another Nexus instance holds the … schema migration lock`):
+another migrator is running. Wait for it to finish. On MongoDB, if you are sure
+none is running (one crashed), use `--force-unlock` as described above.
+
 **A gap** (`Schema migration … has not been applied to this database, but
 later migrations (…) have`) means a build inserted a migration before one that
 already shipped. It is a release defect: run an official release and report
@@ -1666,9 +1721,10 @@ supported.
    Use the same bind mount instead if the portal runs with one.
 
    It prints `Schema ready (driver: …).` and exits `0`, or prints a refusal or
-   a failure and exits non-zero. Re-running it is safe. Starting the new
-   release does the same, but this step shows a failure before any instance
-   serves traffic.
+   a failure and exits non-zero. Re-running it is safe. This step is
+   required: the new release's server refuses to start until it has run. On
+   PostgreSQL, point it at the database directly or through a session-mode
+   pooler.
 
 6. Start the new release on every instance.
 7. Verify: `GET /api/health` is `ok`, `schema_migrations` lists `000_base_v0_6`
@@ -1684,7 +1740,7 @@ migrations before it stay applied and recorded.
 
 - **SQLite, PostgreSQL:** the failed migration rolled back with its ledger row.
   Fix the cause (disk space, permissions, a lock held by another client) and
-  run step 5 again.
+  run step 5 again. The servers refuse to start until it succeeds.
 - **MySQL, MongoDB:** changes before the failure may have committed, and the
   migration stays recorded in progress, so no other release will open the
   database. Fix the cause and run step 5 again with the same release: it
@@ -1756,7 +1812,10 @@ resources.
 
 ### Initializing the schema
 
-The server creates the schema at startup. To create it as a separate step:
+The migrate command creates the schema in an empty database and upgrades an
+existing one. The server also creates the schema when it starts against a
+completely empty database, so a first start needs no separate step; it never
+upgrades one. To create or upgrade the schema as a separate step:
 
 ```bash
 npm run migrate                      # from a checkout, at the repo root
@@ -1778,8 +1837,12 @@ database, applies the migrations the ledger lacks, prints
 `Schema ready (driver: postgres).` and exits `0`. Against a database it must
 refuse (created before `v0.6.0`, upgraded by a newer release, or with a
 checksum mismatch; see [schema and upgrades](#schema-and-upgrades)), when this
-release's migration files are missing or altered, or when a migration fails, it
-prints the error and exits non-zero.
+release's migration files are missing or altered, when another migrator holds
+the lock, or when a migration fails, it prints the error and exits non-zero.
+Run it with every Nexus instance stopped. `--force-unlock` (in the image:
+`node server/dist/db/migrate-cli.js --force-unlock`) first clears a MongoDB
+migration lock a crashed migrator left behind; use it only after confirming no
+migrator is running.
 
 `npm run build --workspace server` copies `server/src/db/schema/` and
 `server/src/db/migrations/` to `server/dist/db/`, replacing stale files. The
@@ -1839,10 +1902,10 @@ of it if one statement is not replayable. The base schema's ledger entry is
 written only after every table exists, so a first start that stops part-way
 leaves the ledger empty and the next start replays the file. A migration is
 recorded in progress before its first statement and marked applied after its
-last, so the next start of the same release resumes it. Either way, tables,
+last, so running the migrate command again with the same release resumes it. Either way, tables,
 columns and indexes that already exist with the intended definition are
-skipped, with their rows. A database-scoped advisory lock (`GET_LOCK`)
-serializes schema work across instances.
+skipped, with their rows. A database-scoped advisory lock (`GET_LOCK`), never
+waited for, keeps a second migrator out.
 
 ### MongoDB
 
@@ -1889,9 +1952,9 @@ Indexes are created by `migrate()` from `BASE_INDEXES` and from each step in
 `MONGO_MIGRATIONS`, and recorded in `schema_migrations` like the SQL backends'.
 Collections are created by their first insert. `createIndex` is a no-op for an
 existing identical index and each step's updates skip documents already
-changed, so a start interrupted part-way finishes on the next start of the same
-release. Schema work is serialized by a lock document in
-`schema_migrations_lock`.
+changed, so a migrate command interrupted part-way finishes when it is run
+again with the same release. A lock document in `schema_migrations_lock` keeps
+a second migrator out ([one migrator at a time](#schema-and-upgrades)).
 
 ### Transactions and contention retries
 

@@ -301,7 +301,8 @@ none.
 
 `db/migrate.ts` owns the rules every adapter applies at `migrate()`, in the
 shape of the pre-0.6 runner: adapters supply `ensureLedger`, `listRecorded`,
-`createBaseSchema`, `prepareLedger` and `applyMigration`. The `schema_migrations`
+`createBaseSchema`, `prepareLedger` and `applyMigration`, and optionally
+`createFresh`, `acquireLock`, `lockHeld` and `beginMigration`. The `schema_migrations`
 ledger records the baseline's id, `BASE_SCHEMA_ID` (`000_base_v0_6`, kept from
 `v0.6.0` so 1.0 opens a `v0.6.0` database), then one row per applied migration
 with its checksum and time.
@@ -330,12 +331,18 @@ with its checksum and time.
   any service reads the data
   ([operations](operations.md#schema-and-upgrades)).
 
-Concurrent starts follow the single-writer model: PostgreSQL and MySQL take a
-database-scoped advisory lock for the whole check (`pg_try_advisory_lock`,
-`GET_LOCK`), MongoDB takes a lock document with an owner token and an expiry
-(claimed like an `edge_leases` lease) that it renews and checks before every
-schema write, and SQLite applies each migration under `BEGIN IMMEDIATE` and
-re-reads the ledger.
+Two callers use the runner. The migrate command (`db/migrate-cli.ts`, mode
+`'migrate'`) creates or upgrades; operators run it with every instance stopped.
+Server startup (mode `'startup'`) creates a completely empty database (on
+SQLite and PostgreSQL in one transaction, baseline and migrations together) but
+never changes an existing one: it refuses to start unless the ledger holds
+exactly the build's migrations. Schema work takes an exclusive lock that is
+never waited for or taken over, so a second migrator is refused: PostgreSQL a
+`pg_try_advisory_xact_lock` in every schema transaction (re-reading the ledger
+under it), MySQL `GET_LOCK(…, 0)` for the session, MongoDB a lock document a
+crashed migrator leaves until `migrate-cli --force-unlock` clears it, and SQLite
+`BEGIN IMMEDIATE`. The lock is taken only when there is work, so a run with
+nothing to apply writes nothing.
 
 The server build copies `db/schema/` and `db/migrations/` to `server/dist/db/`,
 and the loaders read them beside their own module.

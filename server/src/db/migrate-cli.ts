@@ -1,10 +1,17 @@
 /**
- * `npm run migrate --workspace server`
+ * `npm run migrate` (from a checkout) or `node server/dist/db/migrate-cli.js`
+ * (in the image): the migrate command.
  *
- * Loads the environment, builds the configured store, creates the base schema
- * in an empty database, applies every pending forward migration in order, and
- * exits. The server does the same on boot, so this exists for deployments that
- * upgrade the schema as a separate step, with every instance stopped.
+ * Loads the environment, builds the configured store, creates the schema in an
+ * empty database or applies every pending forward migration in order, and
+ * exits. It is the only thing that upgrades a database: server startup creates
+ * an empty one but refuses to start while migrations are pending. Run it once
+ * per upgrade, with every Nexus instance stopped, after a backup.
+ *
+ * It takes an exclusive migration lock and refuses, exiting non-zero, while
+ * another migrator holds it. `--force-unlock` first clears a lock a crashed
+ * migrator left behind (MongoDB only; the other backends' locks end with
+ * their session): use it only after confirming no migrator is running.
  *
  * A database this build cannot run against — created before v0.6.0, upgraded
  * by a newer release, or recording a migration whose checksum differs from
@@ -17,7 +24,17 @@ import { loadConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
 import { createStore } from './index.js';
 
+const USAGE = 'Usage: migrate-cli [--force-unlock]';
+
 async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const unknown = args.filter((arg) => arg !== '--force-unlock');
+  if (unknown.length > 0) {
+    process.stderr.write(`Unknown argument ${unknown[0]}. ${USAGE}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const forceUnlock = args.includes('--force-unlock');
   // The documented quickstart edits a root `.env`; exported variables win.
   const { env, file } = environmentWithEnvFile();
   if (file !== null) process.stdout.write(`Loaded ${file}\n`);
@@ -25,7 +42,10 @@ async function main(): Promise<void> {
   const store = createStore(config);
   try {
     await store.init();
-    await store.migrate();
+    if (forceUnlock) {
+      process.stdout.write('Clearing any migration lock a crashed migrator left behind.\n');
+    }
+    await store.migrate({ mode: 'migrate', forceUnlock });
     process.stdout.write(`Schema ready (driver: ${store.driver}).\n`);
   } finally {
     await store.close();

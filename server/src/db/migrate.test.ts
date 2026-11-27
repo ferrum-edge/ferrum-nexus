@@ -15,11 +15,15 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { conflict, isNexusError } from '../lib/errors.js';
+import { mongoMigration, type MongoMigrationStep } from './adapters/mongodb/index.js';
 import { createSqliteSchemaDriver, openSqliteDatabase } from './adapters/sqlite/index.js';
 import {
   ensureSchema,
   loadMigrations,
+  refuseTransactionControl,
+  schemaBusyError,
   sqlMigration,
+  topLevelStatements,
   validateMigrations,
   verifyShippedMigrations,
   type LedgerEntry,
@@ -38,7 +42,14 @@ const NAMES_FAILED_MIGRATION = /^Schema migration 017_broken failed: .*no such t
 const MALFORMED = /Malformed schema migration id/;
 const INTERRUPTED = /That upgrade was interrupted part-way \(017_widget_name in progress\)/;
 const NEVER_RECORDS = /holds migrations in progress/;
-const INCOMPLETE = /migration files do not match the migrations it ships/;
+const INCOMPLETE = /migrations do not match the migrations it ships/;
+const PENDING =
+  /needs schema migrations this release ships \(016_widgets\).*run the migrate command once/s;
+const RESUME =
+  /interrupted part-way \(017_widget_name in progress\).*run the migrate command again/s;
+const BUSY = /holds the test schema migration lock/;
+const IN_TRANSACTION = /cannot run inside its migration transaction/;
+const NOT_PLAIN_KEY = /not a plain object of field directions/;
 const MODIFIED = /The image or installation is modified/;
 const INJECTED = /injected interruption/;
 const ORDER = /repeated or out of order/;
@@ -448,6 +459,8 @@ function nonTransactionalDriver(): SchemaDriver<SqlMigration> & {
   began: string[];
   ran: string[];
   failNext: boolean;
+  lockHeldByOther: boolean;
+  locks: number;
 } {
   const ledger = new Map<string, LedgerEntry>();
   const driver = {
@@ -455,6 +468,16 @@ function nonTransactionalDriver(): SchemaDriver<SqlMigration> & {
     began: [] as string[],
     ran: [] as string[],
     failNext: false,
+    lockHeldByOther: false,
+    locks: 0,
+    async acquireLock(): Promise<() => Promise<void>> {
+      if (driver.lockHeldByOther) throw schemaBusyError('test');
+      driver.locks += 1;
+      return async () => undefined;
+    },
+    async lockHeld(): Promise<boolean> {
+      return driver.lockHeldByOther;
+    },
     async ensureLedger(): Promise<void> {},
     async listRecorded(): Promise<LedgerEntry[]> {
       return [...ledger.values()].map((entry) => ({ ...entry }));
@@ -580,5 +603,153 @@ describe('shipped migrations', () => {
 
   it('refuse a packaged file whose checksum differs from the manifest', () => {
     assert.throws(() => verifyShippedMigrations([WIDGETS], 'pg', manifest), MODIFIED);
+  });
+});
+
+describe('server startup', () => {
+  it('creates a completely empty database, baseline and migrations, in one go', async () => {
+    const db = openSqliteDatabase(':memory:');
+    try {
+      const result = await ensureSchema(
+        createSqliteSchemaDriver(db),
+        loadBaseSchema('sqlite'),
+        [WIDGETS, WIDGET_NAME],
+        { mode: 'startup' },
+      );
+      assert.deepEqual(result, { created: true, applied: [WIDGETS.id, WIDGET_NAME.id] });
+      assert.deepEqual(
+        ledger(db).map((entry) => entry.id),
+        [BASE_SCHEMA_ID, WIDGETS.id, WIDGET_NAME.id],
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('refuses an existing database with migrations pending, changing nothing', async () => {
+    const db = v060Database();
+    try {
+      await assert.rejects(
+        ensureSchema(createSqliteSchemaDriver(db), loadBaseSchema('sqlite'), [WIDGETS], {
+          mode: 'startup',
+        }),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.match(error.message, PENDING);
+          assert.deepEqual(error.details, {
+            pending: [WIDGETS.id],
+            inProgress: [],
+            lockHeld: false,
+          });
+          return true;
+        },
+      );
+      assert.deepEqual(ledgerColumns(db), ['id', 'applied_at']);
+      assert.equal(tables(db).includes('widgets'), false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('refuses an interrupted upgrade, telling the operator to run migrate again', async () => {
+    const driver = nonTransactionalDriver();
+    const schema = loadBaseSchema('sqlite');
+    await ensureSchema(driver, schema, [WIDGETS]);
+    driver.failNext = true;
+    await assert.rejects(ensureSchema(driver, schema, [WIDGETS, WIDGET_NAME]), INJECTED);
+    await assert.rejects(
+      ensureSchema(driver, schema, [WIDGETS, WIDGET_NAME], { mode: 'startup' }),
+      (error: unknown) => isNexusError(error) && RESUME.test(error.message),
+    );
+  });
+});
+
+describe('the migration lock', () => {
+  it('is taken only when there is work, and a held lock refuses a second migrator', async () => {
+    const driver = nonTransactionalDriver();
+    const schema = loadBaseSchema('sqlite');
+    await ensureSchema(driver, schema, [WIDGETS]);
+    assert.equal(driver.locks, 1);
+    // Nothing pending: the ledger is read, no lock is taken, nothing is written.
+    await ensureSchema(driver, schema, [WIDGETS]);
+    assert.equal(driver.locks, 1);
+
+    driver.lockHeldByOther = true;
+    await assert.rejects(ensureSchema(driver, schema, [WIDGETS, WIDGET_NAME]), (error) => {
+      assert.ok(isNexusError(error));
+      assert.equal(error.code, 'CONFLICT');
+      assert.match(error.message, BUSY);
+      return true;
+    });
+    assert.equal(driver.ledger.has(WIDGET_NAME.id), false, 'nothing was recorded');
+  });
+});
+
+describe('migration statements', () => {
+  const migration = (sql: string): SqlMigration => sqlMigration('016_probe', 'probe.sql', sql);
+
+  it('refuse transaction control that would end the migration transaction', () => {
+    for (const sql of [
+      'CREATE TABLE a (id TEXT); COMMIT;',
+      'BEGIN; CREATE TABLE a (id TEXT);',
+      'SAVEPOINT s; CREATE TABLE a (id TEXT);',
+      'start  transaction; CREATE TABLE a (id TEXT);',
+      'ROLLBACK',
+      'VACUUM;',
+    ]) {
+      assert.throws(() => refuseTransactionControl(migration(sql), 'sqlite'), IN_TRANSACTION, sql);
+      assert.throws(() => refuseTransactionControl(migration(sql), 'pg'), IN_TRANSACTION, sql);
+    }
+    assert.throws(
+      () => refuseTransactionControl(migration('CREATE INDEX CONCURRENTLY ix ON a (id);'), 'pg'),
+      IN_TRANSACTION,
+    );
+  });
+
+  it('accept the same words inside quotes, comments and statement bodies', () => {
+    const pg = migration(`
+      -- COMMIT; in a comment
+      /* BEGIN; in a block comment */
+      CREATE TABLE a (note TEXT DEFAULT 'COMMIT; inside a string');
+      DO $$
+      BEGIN
+        UPDATE a SET note = 'x';
+      END
+      $$;
+      CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;
+    `);
+    refuseTransactionControl(pg, 'pg');
+    assert.equal(topLevelStatements(pg.sql).length, 3);
+    const sqlite = migration(`
+      CREATE TABLE a (id TEXT, n INT);
+      CREATE TRIGGER t AFTER INSERT ON a BEGIN
+        UPDATE a SET n = CASE WHEN n IS NULL THEN 0 ELSE n END;
+      END;
+    `);
+    refuseTransactionControl(sqlite, 'sqlite');
+    assert.equal(topLevelStatements(sqlite.sql).length, 2);
+  });
+});
+
+describe('MongoDB step checksums', () => {
+  const step = (key: Record<string, 1 | -1>): MongoMigrationStep => ({
+    id: '016_probe',
+    indexes: [{ collection: 'users', name: 'ix_probe', key }],
+  });
+
+  it('change with every part of an index, key fields and their order included', () => {
+    const base = mongoMigration(step({ a: 1, b: 1 })).checksum;
+    assert.notEqual(mongoMigration(step({ a: 1, c: 1 })).checksum, base);
+    assert.notEqual(mongoMigration(step({ b: 1, a: 1 })).checksum, base);
+    assert.notEqual(mongoMigration(step({ a: 1, b: -1 })).checksum, base);
+    assert.equal(mongoMigration(step({ a: 1, b: 1 })).checksum, base);
+  });
+
+  it('refuse an index key the checksum could not see', () => {
+    const mapped: MongoMigrationStep = {
+      id: '016_probe',
+      indexes: [{ collection: 'users', name: 'ix_probe', key: new Map([['a', 1]]) }],
+    };
+    assert.throws(() => mongoMigration(mapped), NOT_PLAIN_KEY);
   });
 });

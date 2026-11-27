@@ -116,6 +116,7 @@ import type {
 } from '@ferrum-nexus/shared';
 
 import { NexusError } from '../lib/errors.js';
+import type { SchemaOptions } from './migrate.js';
 
 /* ── Generic helpers ────────────────────────────────────────────────────── */
 
@@ -2146,13 +2147,17 @@ export interface NexusStore {
   /** Open connections and validate the deployment (e.g. Mongo replica-set check). */
   init(): Promise<void>;
   /**
-   * Create the frozen base schema in an empty database, then apply every
-   * forward migration the ledger lacks, in order; idempotent, safe to call on
-   * every boot. Refuses, changing nothing, a database created before v0.6.0,
+   * Bring the schema to this build's (`db/migrate.ts`). In the default
+   * `'migrate'` mode (the migrate command): create the frozen base schema and
+   * every migration in an empty database, or apply the migrations an existing
+   * one lacks, under an exclusive lock a second migrator is refused. In
+   * `'startup'` mode (server startup): create an empty database the same way,
+   * but only verify an existing one, refusing to start while migrations are
+   * pending. Both refuse, changing nothing, a database created before v0.6.0,
    * one a newer release upgraded (downgrade), and one whose recorded migration
-   * checksums differ from this build's (`db/migrate.ts`).
+   * checksums differ from this build's. Idempotent.
    */
-  migrate(): Promise<void>;
+  migrate(options?: SchemaOptions): Promise<void>;
   /** Close pools/handles. Safe to call more than once. */
   close(): Promise<void>;
   /** Cheap probe for `GET /api/health`. Never throws. */

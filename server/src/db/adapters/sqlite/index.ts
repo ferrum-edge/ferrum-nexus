@@ -102,8 +102,10 @@ import {
   checksumMismatchError,
   ensureSchema,
   loadShippedMigrations,
+  refuseTransactionControl,
   type LedgerEntry,
   type SchemaDriver,
+  type SchemaOptions,
   type SqlMigration,
 } from '../../migrate.js';
 import { loadBaseSchema, SCHEMA_LEDGER_TABLE, type BaseSchema } from '../../schema.js';
@@ -865,6 +867,8 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigratio
     },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
       const create = db.transaction((base: BaseSchema) => {
+        // Re-read under the write lock: another process may have created it.
+        if (queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).length > 0) return;
         db.exec(base.sql);
         db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
           base.id,
@@ -872,6 +876,25 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigratio
         );
       });
       create.immediate(schema);
+    },
+    async createFresh(schema: BaseSchema, migrations: readonly SqlMigration[]): Promise<void> {
+      // One transaction: another process sees an empty database or a complete one.
+      const create = db.transaction((base: BaseSchema, steps: readonly SqlMigration[]) => {
+        if (queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).length > 0) return;
+        db.exec(base.sql);
+        db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
+          base.id,
+          nowIso(),
+        );
+        for (const step of steps) {
+          db.exec(step.sql);
+          db.prepare(
+            `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
+              "VALUES (?, ?, ?, 'applied')",
+          ).run(step.id, nowIso(), step.checksum);
+        }
+      });
+      create.immediate(schema, migrations);
     },
     async prepareLedger(): Promise<void> {
       // Under the write lock, so a second process cannot add the same column
@@ -1066,12 +1089,12 @@ class SqliteStore implements NexusStore {
     this.db.pragma('foreign_keys = ON');
   }
 
-  async migrate(): Promise<void> {
-    await ensureSchema(
-      createSqliteSchemaDriver(this.db),
-      loadBaseSchema('sqlite'),
-      this.migrations ?? loadShippedMigrations('sqlite'),
-    );
+  async migrate(options: SchemaOptions = {}): Promise<void> {
+    const migrations = this.migrations ?? loadShippedMigrations('sqlite');
+    for (const migration of migrations) refuseTransactionControl(migration, 'sqlite');
+    await ensureSchema(createSqliteSchemaDriver(this.db), loadBaseSchema('sqlite'), migrations, {
+      mode: options.mode ?? 'migrate',
+    });
   }
 
   async close(): Promise<void> {

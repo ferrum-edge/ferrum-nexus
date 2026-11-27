@@ -60,6 +60,7 @@ import {
   MongoClient,
   type ClientSession,
   type Collection,
+  type CollectionOptions,
   type Db,
   type Document,
   type Filter,
@@ -111,9 +112,12 @@ import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
   ensureSchema,
+  schemaBusyError,
+  verifyShippedMigrations,
   type LedgerEntry,
   type Migration,
   type SchemaDriver,
+  type SchemaOptions,
   type SchemaResult,
 } from '../../migrate.js';
 import {
@@ -1543,12 +1547,36 @@ async function createIndex(db: Db, index: IndexDefinition): Promise<void> {
 }
 
 /**
+ * Refuse an index a migration step declares unless its key is a plain object
+ * of field names to `1`, `-1` or an index type string. Other driver forms (a
+ * `Map`, an array, a bare string) would not appear in the canonical form the
+ * checksum covers, so a changed key could keep its checksum.
+ */
+function assertCanonicalKey(stepId: string, index: IndexDefinition): void {
+  const key: unknown = index.key;
+  const plain =
+    key !== null &&
+    typeof key === 'object' &&
+    Object.getPrototypeOf(key) === Object.prototype &&
+    Object.keys(key).length > 0 &&
+    Object.values(key).every((value) => value === 1 || value === -1 || typeof value === 'string');
+  if (!plain) {
+    throw new NexusError(
+      'INTERNAL',
+      `MongoDB migration ${stepId} declares index ${index.name} with a key that is not a ` +
+        'plain object of field directions',
+    );
+  }
+}
+
+/**
  * Give a step the identity and checksum the runner records for it: the
- * SHA-256 of its id, canonical indexes and updates. Refuses a step whose
- * updates are not plain JSON, since those would not round-trip into the
- * checksum.
+ * SHA-256 of its id, its indexes in order (collection, name, key fields in
+ * order, uniqueness, partial filter) and its updates. Refuses a step whose
+ * index keys or updates would not round-trip into that checksum.
  */
 export function mongoMigration(step: MongoMigrationStep): MongoMigration {
+  for (const index of step.indexes) assertCanonicalKey(step.id, index);
   const updates = step.updates ?? [];
   if (!isDeepStrictEqual(JSON.parse(JSON.stringify(updates)), updates)) {
     throw new NexusError(
@@ -1604,207 +1632,114 @@ function isDuplicateKey(error: unknown): boolean {
   return (error as { code?: unknown }).code === 11000;
 }
 
-/** The collection and document that serialize schema work across instances. */
-const SCHEMA_LOCK_COLLECTION = 'schema_migrations_lock';
-const SCHEMA_LOCK_ID = 'schema';
-const SCHEMA_LOCK_TTL_MS = 60_000;
-const MAX_SCHEMA_LOCK_WAIT_MS = 30_000;
-const SCHEMA_LOCK_POLL_MS = 250;
-
-/** An ISO-8601 timestamp for `ms`, the form every Nexus expiry is stored in. */
-function isoAt(ms: number): string {
-  return new Date(ms).toISOString();
-}
-
-/** Options for {@link acquireMongoSchemaLock}; tests shorten them. */
-export interface MongoSchemaLockOptions {
-  /** How long a holder that stops renewing keeps the lock. */
-  ttlMs?: number;
-  /** How long to wait for another holder, at most 30 s. */
-  waitMs?: number;
-  /** Renew in the background every `ttlMs / 3` (default `true`). */
-  heartbeat?: boolean;
-}
-
-/** A held schema lock. */
-export interface MongoSchemaLock {
-  /** The owner token written into the lock document. */
-  readonly token: string;
-  /**
-   * Renew the lock, or throw if another instance has taken it over. Called
-   * before every schema write, so a migrator that stalled past the TTL stops
-   * instead of writing after its successor.
-   */
-  assertOwned(): Promise<void>;
-  /** Stop renewing and delete the lock if this holder still owns it. */
-  release(): Promise<void>;
-}
-
 /**
- * Take the MongoDB schema lock: one document whose owner token and expiry
- * every holder renews, claimed the way `edge_leases` claims a lease (an upsert
- * that matches only an expired lock and otherwise collides on `_id`). MongoDB
- * has no advisory lock, so this is the equivalent of PostgreSQL's and MySQL's.
- * A lock left by a holder that died is taken over once it expires.
+ * The collection and document of the migration lock. Created only when there
+ * is schema work to do, so a run with nothing to apply changes nothing.
+ * Exported for the tests that hold it.
  */
-export async function acquireMongoSchemaLock(
-  db: Db,
-  options: MongoSchemaLockOptions = {},
-): Promise<MongoSchemaLock> {
-  const ttlMs = options.ttlMs ?? SCHEMA_LOCK_TTL_MS;
-  const waitMs = options.waitMs ?? MAX_SCHEMA_LOCK_WAIT_MS;
-  if (!Number.isInteger(ttlMs) || ttlMs < 100) {
-    throw new RangeError('MongoDB schema lock TTL must be an integer of at least 100 ms');
-  }
-  if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > MAX_SCHEMA_LOCK_WAIT_MS) {
-    throw new RangeError('MongoDB schema lock wait must be an integer from 0 to 30000 ms');
-  }
-  const locks = db.collection<NexusDoc>(SCHEMA_LOCK_COLLECTION);
-  const token = newId();
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    const now = Date.now();
-    try {
-      // Matches only an expired lock; when the document exists and is held,
-      // the upsert's insert collides on `_id` instead.
-      await locks.updateOne(
-        { _id: SCHEMA_LOCK_ID, expires_at: { $lte: isoAt(now) } } as Filter<NexusDoc>,
-        { $set: { owner: token, expires_at: isoAt(now + ttlMs) } },
-        { upsert: true },
-      );
-      break;
-    } catch (error) {
-      if (!isDuplicateKey(error)) throw error;
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        'MongoDB schema setup is busy; retry after the other instance finishes migrating',
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, SCHEMA_LOCK_POLL_MS));
-  }
-
-  let lost = false;
-  const renew = async (): Promise<boolean> => {
-    const result = await locks.updateOne(
-      { _id: SCHEMA_LOCK_ID, owner: token } as Filter<NexusDoc>,
-      { $set: { expires_at: isoAt(Date.now() + ttlMs) } },
-    );
-    if (result.matchedCount !== 1) lost = true;
-    return !lost;
-  };
-  const timer =
-    options.heartbeat === false
-      ? null
-      : setInterval(
-          () => {
-            renew().catch(() => undefined);
-          },
-          Math.floor(ttlMs / 3),
-        );
-  timer?.unref();
-  return {
-    token,
-    async assertOwned(): Promise<void> {
-      if (lost || !(await renew())) {
-        throw new Error(
-          'Another instance took over the MongoDB schema lock; this run stopped before ' +
-            'writing. Start again once the other instance has finished.',
-        );
-      }
-    },
-    async release(): Promise<void> {
-      if (timer !== null) clearInterval(timer);
-      await locks.deleteOne({ _id: SCHEMA_LOCK_ID, owner: token } as Filter<NexusDoc>);
-    },
-  };
-}
-
-/** Options for {@link ensureMongoSchema}. */
-export interface MongoSchemaOptions {
-  /** Lock timings; tests only. */
-  lock?: MongoSchemaLockOptions;
-}
+export const SCHEMA_LOCK_COLLECTION = 'schema_migrations_lock';
+export const SCHEMA_LOCK_ID = 'schema';
 
 /**
- * Bring the database to this build's schema (`migrate.ts`), holding the
- * schema lock ({@link acquireMongoSchemaLock}) throughout and checking it
- * before every write. Index builds and updates cannot commit with their ledger
- * entry, so each migration is recorded in progress first and marked applied
- * last; an interrupted one is resumed by re-running its idempotent step.
- * `steps` defaults to the shipped ones; the upgrade tests pass their own.
+ * Every ledger and lock read goes to the primary with majority read concern,
+ * and every write waits for a majority, whatever the application's URL says:
+ * a lagging secondary must never hide a migration a newer release recorded.
+ */
+const SCHEMA_COLLECTION_OPTIONS: CollectionOptions = {
+  readPreference: 'primary',
+  readConcern: { level: 'majority' },
+  writeConcern: { w: 'majority' },
+};
+
+/**
+ * Bring the database to this build's schema (`migrate.ts`). The migration
+ * lock is a document with an owner token, inserted only when there is work
+ * and never taken over: a second migrator is refused, and a lock a crashed
+ * migrator left behind stays until the operator clears it
+ * (`options.forceUnlock`, the migrate command's `--force-unlock`). Index builds
+ * and updates cannot commit with their ledger entry, so each migration is
+ * recorded in progress first and marked applied last; an interrupted one is
+ * resumed by re-running its idempotent step. `steps` defaults to the shipped
+ * ones, checked against the compiled manifest; the upgrade tests pass their
+ * own.
  */
 export async function ensureMongoSchema(
   db: Db,
-  steps: readonly MongoMigrationStep[] = MONGO_MIGRATIONS,
-  options: MongoSchemaOptions = {},
+  steps?: readonly MongoMigrationStep[],
+  options: SchemaOptions = {},
 ): Promise<SchemaResult> {
-  const migrations = steps.map(mongoMigration);
-  const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE);
-  const lock = await acquireMongoSchemaLock(db, options.lock);
-  try {
-    const driver: SchemaDriver<MongoMigration> = {
-      ensureLedger: async (): Promise<void> => {
-        // `_id` is the ledger id, so the implicit unique index is all the
-        // bookkeeping this needs; the collection is created on first insert.
-      },
-      listRecorded: async (): Promise<LedgerEntry[]> => {
-        const docs = await ledger.find({}).toArray();
-        return docs.map((doc) => ({
-          id: str(doc._id),
-          checksum: typeof doc.checksum === 'string' ? doc.checksum : null,
-          inProgress: doc.state === 'in_progress',
-        }));
-      },
-      createBaseSchema: async (base: BaseSchema): Promise<void> => {
-        for (const index of BASE_INDEXES) {
-          await lock.assertOwned();
-          await createIndex(db, index);
-        }
-        await lock.assertOwned();
-        await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
-      },
-      prepareLedger: async (): Promise<void> => {
-        // Documents carry `checksum` and `state` as fields; nothing to alter.
-      },
-      beginMigration: async (migration: MongoMigration): Promise<void> => {
-        await lock.assertOwned();
-        await ledger.insertOne({
+  const migrations = (steps ?? MONGO_MIGRATIONS).map(mongoMigration);
+  if (steps === undefined) verifyShippedMigrations(migrations, 'mongodb');
+  const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE, SCHEMA_COLLECTION_OPTIONS);
+  const locks = db.collection<NexusDoc>(SCHEMA_LOCK_COLLECTION, SCHEMA_COLLECTION_OPTIONS);
+  if (options.forceUnlock === true) await locks.deleteOne({ _id: SCHEMA_LOCK_ID });
+  const driver: SchemaDriver<MongoMigration> = {
+    ensureLedger: async (): Promise<void> => {
+      // `_id` is the ledger id, so the implicit unique index is all the
+      // bookkeeping this needs; the collection is created on first insert.
+    },
+    listRecorded: async (): Promise<LedgerEntry[]> => {
+      const docs = await ledger.find({}).toArray();
+      return docs.map((doc) => ({
+        id: str(doc._id),
+        checksum: typeof doc.checksum === 'string' ? doc.checksum : null,
+        inProgress: doc.state === 'in_progress',
+      }));
+    },
+    acquireLock: async (): Promise<() => Promise<void>> => {
+      const owner = newId();
+      try {
+        await locks.insertOne({ _id: SCHEMA_LOCK_ID, owner, acquired_at: nowIso() });
+      } catch (error) {
+        if (!isDuplicateKey(error)) throw error;
+        const held = await locks.findOne({ _id: SCHEMA_LOCK_ID });
+        throw schemaBusyError(
+          'MongoDB',
+          ` (taken ${str(held?.acquired_at)}). If no migrator is running (one crashed), clear ` +
+            'it with the migrate command and --force-unlock',
+        );
+      }
+      return async (): Promise<void> => {
+        await locks.deleteOne({ _id: SCHEMA_LOCK_ID, owner } as Filter<NexusDoc>);
+      };
+    },
+    lockHeld: async (): Promise<boolean> => (await locks.findOne({ _id: SCHEMA_LOCK_ID })) !== null,
+    createBaseSchema: async (base: BaseSchema): Promise<void> => {
+      for (const index of BASE_INDEXES) await createIndex(db, index);
+      await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
+    },
+    prepareLedger: async (): Promise<void> => {
+      // Documents carry `checksum` and `state` as fields; nothing to alter.
+    },
+    beginMigration: async (migration: MongoMigration): Promise<void> => {
+      await ledger.insertOne({
+        _id: migration.id,
+        applied_at: nowIso(),
+        checksum: migration.checksum,
+        state: 'in_progress',
+      });
+    },
+    applyMigration: async (migration: MongoMigration): Promise<void> => {
+      for (const index of migration.step.indexes) await createIndex(db, index);
+      for (const change of migration.step.updates ?? []) {
+        await db
+          .collection(change.collection)
+          .updateMany(change.filter as Filter<Document>, change.update as UpdateFilter<Document>);
+      }
+      const result = await ledger.updateOne(
+        {
           _id: migration.id,
-          applied_at: nowIso(),
           checksum: migration.checksum,
           state: 'in_progress',
-        });
-      },
-      applyMigration: async (migration: MongoMigration): Promise<void> => {
-        for (const index of migration.step.indexes) {
-          await lock.assertOwned();
-          await createIndex(db, index);
-        }
-        for (const change of migration.step.updates ?? []) {
-          await lock.assertOwned();
-          await db
-            .collection(change.collection)
-            .updateMany(change.filter as Filter<Document>, change.update as UpdateFilter<Document>);
-        }
-        await lock.assertOwned();
-        const result = await ledger.updateOne(
-          {
-            _id: migration.id,
-            checksum: migration.checksum,
-            state: 'in_progress',
-          } as Filter<NexusDoc>,
-          { $set: { state: 'applied', applied_at: nowIso() } },
-        );
-        if (result.matchedCount !== 1) {
-          throw new Error(`MongoDB migration ${migration.id} lost its in-progress ledger entry`);
-        }
-      },
-    };
-    return await ensureSchema(driver, MONGO_BASE_SCHEMA, migrations);
-  } finally {
-    await lock.release();
-  }
+        } as Filter<NexusDoc>,
+        { $set: { state: 'applied', applied_at: nowIso() } },
+      );
+      if (result.matchedCount !== 1) {
+        throw new Error(`MongoDB migration ${migration.id} lost its in-progress ledger entry`);
+      }
+    },
+  };
+  return ensureSchema(driver, MONGO_BASE_SCHEMA, migrations, { mode: options.mode ?? 'migrate' });
 }
 
 /* ── Shared connection state ────────────────────────────────────────────── */
@@ -1963,8 +1898,8 @@ class MongoStore implements NexusStore {
     }
   }
 
-  async migrate(): Promise<void> {
-    await ensureMongoSchema(this.ctx.db, this.ctx.migrations ?? MONGO_MIGRATIONS);
+  async migrate(options: SchemaOptions = {}): Promise<void> {
+    await ensureMongoSchema(this.ctx.db, this.ctx.migrations, options);
   }
 
   async close(): Promise<void> {

@@ -9,7 +9,19 @@
  * here so all four adapters behave identically (docs/operations.md, "Schema
  * and upgrades").
  *
- * On every start ({@link ensureSchema}):
+ * Two callers, two modes ({@link ensureSchema}):
+ *
+ * - **the migrate command** (`migrate-cli.ts`, mode `'migrate'`) creates an
+ *   empty database and applies pending migrations to an existing one. The
+ *   operator runs it once per upgrade, with every Nexus instance stopped,
+ *   after a backup. It takes an exclusive lock and never waits for or takes
+ *   over another migrator's: a second migrator refuses.
+ * - **server startup** (mode `'startup'`) creates a completely empty database
+ *   (no ledger rows at all) the same way, so a first start needs no separate
+ *   step, but never changes an existing one: unless the ledger equals this
+ *   build's migrations exactly, it refuses to start and says what to run.
+ *
+ * Reading the ledger:
  *
  * - an empty ledger means a new database: create the base schema and record
  *   `BASE_SCHEMA_ID`, then apply every migration;
@@ -54,7 +66,11 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 import { NexusError, isNexusError } from '../lib/errors.js';
-import { MIGRATION_MANIFEST, type MigrationManifestEntry } from './migration-manifest.js';
+import {
+  MIGRATION_MANIFEST,
+  type MigrationBackend,
+  type MigrationManifestEntry,
+} from './migration-manifest.js';
 import {
   artifactChecksum,
   SCHEMA_POLICY_DOC,
@@ -86,6 +102,25 @@ export interface LedgerEntry {
   inProgress?: boolean;
 }
 
+/**
+ * Which caller {@link ensureSchema} serves: the migrate command (creates and
+ * upgrades) or server startup (creates an empty database, otherwise only
+ * verifies).
+ */
+export type SchemaMode = 'migrate' | 'startup';
+
+/** Options for `NexusStore.migrate`. */
+export interface SchemaOptions {
+  /** Default `'migrate'`. Server startup passes `'startup'`. */
+  mode?: SchemaMode;
+  /**
+   * Clear a migration lock a crashed migrator left behind before starting
+   * (the migrate command's `--force-unlock`). Only MongoDB keeps a lock that
+   * can outlive its holder; the other backends' locks end with their session.
+   */
+  forceUnlock?: boolean;
+}
+
 /** The primitives an adapter provides to {@link ensureSchema}. */
 export interface SchemaDriver<M extends Migration = Migration> {
   /** Create the ledger if it does not exist. Must be idempotent. */
@@ -94,9 +129,26 @@ export interface SchemaDriver<M extends Migration = Migration> {
   listRecorded(): Promise<LedgerEntry[]>;
   /**
    * Create the base schema **and** record its id, atomically where the
-   * driver supports DDL transactions. Called only on an empty ledger.
+   * driver supports DDL transactions. Called only on an empty ledger, and a
+   * no-op if another instance recorded the baseline meanwhile.
    */
   createBaseSchema(schema: BaseSchema): Promise<void>;
+  /**
+   * Where the backend has transactional DDL: create the base schema and apply
+   * every migration in **one** transaction, so another instance sees either
+   * an empty database or a complete one. Used instead of
+   * {@link createBaseSchema} plus each migration when the ledger is empty.
+   */
+  createFresh?(schema: BaseSchema, migrations: readonly M[]): Promise<void>;
+  /**
+   * Take the exclusive migration lock, or refuse at once (a `CONFLICT`) when
+   * another migrator holds it: never wait for it, never take it over. Returns
+   * its release. Backends that lock inside each transaction instead leave this
+   * out.
+   */
+  acquireLock?(): Promise<() => Promise<void>>;
+  /** Whether another migrator holds the lock right now; for refusal messages. */
+  lockHeld?(): Promise<boolean>;
   /**
    * Give the ledger its `checksum` and `state` columns if it lacks them (a
    * ledger v0.6.0 created has only `id` and `applied_at`). Called only once
@@ -135,30 +187,66 @@ const MIGRATION_ID = /^\d{3,}_[a-z0-9_]+$/;
 const QUOTED_IDS = 4;
 
 /**
- * Bring a database to this build's schema: create the baseline in an empty
- * one, refuse one this build cannot run against, and apply the migrations the
- * ledger lacks. Idempotent: a second call against the same database changes
- * nothing.
+ * Bring a database to this build's schema: create the baseline (and every
+ * migration) in an empty one, refuse one this build cannot run against, and,
+ * in `'migrate'` mode, apply the migrations the ledger lacks. Writes nothing
+ * when there is nothing to do: the ledger is read first, and the lock taken
+ * only when there is work. Idempotent.
  */
 export async function ensureSchema<M extends Migration>(
   driver: SchemaDriver<M>,
   base: BaseSchema,
   migrations: readonly M[],
+  options: { mode?: SchemaMode } = {},
 ): Promise<SchemaResult> {
+  const mode = options.mode ?? 'migrate';
   validateMigrations(migrations, base.id);
   await driver.ensureLedger();
+  const initial = await driver.listRecorded();
+  const fresh = initial.length === 0;
+  if (!fresh) {
+    const pending = pendingMigrations(initial, base, migrations);
+    if (pending.length === 0) return { created: false, applied: [] };
+    if (mode === 'startup') {
+      throw notMigratedError(pending, initial, (await driver.lockHeld?.()) === true);
+    }
+  }
+  const release = driver.acquireLock === undefined ? undefined : await driver.acquireLock();
+  try {
+    return await applySchema(driver, base, migrations, mode === 'migrate' || fresh);
+  } finally {
+    await release?.();
+  }
+}
+
+/** The locked half of {@link ensureSchema}: re-read the ledger, then do the work. */
+async function applySchema<M extends Migration>(
+  driver: SchemaDriver<M>,
+  base: BaseSchema,
+  migrations: readonly M[],
+  mayApply: boolean,
+): Promise<SchemaResult> {
   let recorded = await driver.listRecorded();
   let created = false;
   if (recorded.length === 0) {
     try {
-      await driver.createBaseSchema(base);
+      if (driver.createFresh !== undefined) {
+        await driver.createFresh(base, migrations);
+      } else {
+        await driver.createBaseSchema(base);
+      }
     } catch (error) {
       throw schemaFailure(base, error);
     }
     created = true;
-    recorded = [{ id: base.id, checksum: null }];
+    recorded = await driver.listRecorded();
   }
   const pending = pendingMigrations(recorded, base, migrations);
+  // A fresh database created in one transaction already holds every migration.
+  const applied: string[] =
+    created && driver.createFresh !== undefined ? migrations.map((migration) => migration.id) : [];
+  if (pending.length === 0) return { created, applied };
+  if (!mayApply) throw notMigratedError(pending, recorded, false);
   const resuming = new Set(
     recorded.filter((entry) => entry.inProgress === true).map((entry) => entry.id),
   );
@@ -170,8 +258,6 @@ export async function ensureSchema<M extends Migration>(
       { inProgress: [...resuming].sort() },
     );
   }
-  const applied: string[] = [];
-  if (pending.length === 0) return { created, applied };
   await driver.prepareLedger();
   for (const migration of pending) {
     try {
@@ -312,6 +398,50 @@ export function newerSchemaError(
   );
 }
 
+/** The command operators run to apply migrations, quoted in refusals. */
+const MIGRATE_COMMAND = 'node server/dist/db/migrate-cli.js (npm run migrate from a checkout)';
+
+/**
+ * Server startup's refusal for a database that needs migrations this build
+ * ships: startup never applies them.
+ */
+export function notMigratedError(
+  pending: readonly Migration[],
+  recorded: readonly LedgerEntry[],
+  lockHeld: boolean,
+): NexusError {
+  const ids = pending.map((migration) => migration.id);
+  const interrupted = recorded
+    .filter((entry) => entry.inProgress === true && ids.includes(entry.id))
+    .map((entry) => entry.id);
+  const next = lockHeld
+    ? 'Another instance is migrating it right now; start again once it has finished.'
+    : interrupted.length > 0
+      ? `An upgrade by this release was interrupted part-way (${quote(interrupted)} in ` +
+        `progress). With every Nexus instance stopped, run the migrate command again with ` +
+        `this same release: ${MIGRATE_COMMAND}.`
+      : `With every Nexus instance stopped and a backup taken, run the migrate command once: ` +
+        `${MIGRATE_COMMAND}. Then start the server.`;
+  return new NexusError(
+    'INTERNAL',
+    `This database needs schema migrations this release ships (${quote(ids)}), and the ` +
+      `server never applies migrations at startup; nothing was changed. ${next} See ` +
+      `${SCHEMA_POLICY_DOC}.`,
+    { pending: ids, inProgress: interrupted, lockHeld },
+  );
+}
+
+/** The refusal when another migrator holds the migration lock. */
+export function schemaBusyError(backend: string, detail = ''): NexusError {
+  return new NexusError(
+    'CONFLICT',
+    `Another Nexus instance holds the ${backend} schema migration lock${detail}, so nothing ` +
+      `was changed. Wait for it to finish, then run the command (or start the server) again. ` +
+      `See ${SCHEMA_POLICY_DOC}.`,
+    { reason: 'schema_lock_held' },
+  );
+}
+
 /** The refusal for a recorded migration whose shipped artifact changed. */
 export function checksumMismatchError(entry: LedgerEntry, migration: Migration): NexusError {
   return new NexusError(
@@ -358,6 +488,133 @@ function migrationFailure(migration: Migration, error: unknown): unknown {
   return new Error(`Schema migration ${migration.id} failed: ${message}`, { cause: error });
 }
 
+/* ── Statements a migration may not contain ──────────────────────────── */
+
+const TRANSACTION_CONTROL =
+  /^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|START\s+TRANSACTION|END|ABORT|VACUUM)\b/i;
+/** PostgreSQL statements that cannot run inside a transaction block. */
+const PG_OUTSIDE_TRANSACTION = /\bCONCURRENTLY\b|^CREATE\s+DATABASE\b|^DROP\s+DATABASE\b/i;
+const CREATE_HEAD = /^CREATE\b/i;
+const BLOCK_OPEN = /\b(BEGIN|CASE)\b/gi;
+const BLOCK_CLOSE = /\bEND\b/gi;
+const DOLLAR_TAG = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/;
+const WHITESPACE_RUN = /\s+/g;
+
+/** Net `BEGIN`/`CASE` … `END` nesting in a `CREATE` statement's unquoted text. */
+function blockDepth(statement: string): number {
+  if (!CREATE_HEAD.test(statement)) return 0;
+  return (statement.match(BLOCK_OPEN)?.length ?? 0) - (statement.match(BLOCK_CLOSE)?.length ?? 0);
+}
+
+/**
+ * A SQL script's top-level statements with every comment and quoted text
+ * blanked out (`'…'`, `"…"` and PostgreSQL `$tag$…$tag$` become `''`), for
+ * checking what each statement is. A semicolon inside quotes, inside a
+ * comment, or inside the `BEGIN … END` body of a `CREATE TRIGGER` or
+ * `BEGIN ATOMIC` function does not end a statement.
+ */
+export function topLevelStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let i = 0;
+  const skipQuoted = (quote: string): void => {
+    i += 1;
+    while (i < sql.length) {
+      if (sql[i] === quote) {
+        if (sql[i + 1] === quote) {
+          i += 2;
+          continue;
+        }
+        break;
+      }
+      i += 1;
+    }
+    current += "''";
+  };
+  while (i < sql.length) {
+    const char = sql[i] ?? '';
+    const next = sql[i + 1] ?? '';
+    if (char === '-' && next === '-') {
+      while (i < sql.length && sql[i] !== '\n') i += 1;
+      current += ' ';
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < sql.length && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth += 1;
+          i += 2;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth -= 1;
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+      current += ' ';
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      skipQuoted(char);
+      i += 1;
+      continue;
+    }
+    if (char === '$') {
+      const tag = DOLLAR_TAG.exec(sql.slice(i))?.[0];
+      if (tag !== undefined) {
+        const close = sql.indexOf(tag, i + tag.length);
+        i = close === -1 ? sql.length : close + tag.length;
+        current += "''";
+        continue;
+      }
+    }
+    if (char === ';') {
+      const statement = current.trim();
+      if (blockDepth(statement) > 0) {
+        current += ';';
+        i += 1;
+        continue;
+      }
+      if (statement.length > 0) statements.push(statement);
+      current = '';
+      i += 1;
+      continue;
+    }
+    current += char;
+    i += 1;
+  }
+  const tail = current.trim();
+  if (tail.length > 0) statements.push(tail);
+  return statements;
+}
+
+/**
+ * Refuse a SQLite or PostgreSQL migration containing a statement that would
+ * end, nest or escape the transaction the runner applies it in (`BEGIN`,
+ * `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `VACUUM`, and on PostgreSQL anything
+ * `CONCURRENTLY` or `CREATE DATABASE`): a `COMMIT` part-way would leave changes
+ * without their ledger row. Called before anything runs.
+ */
+export function refuseTransactionControl(migration: SqlMigration, dialect: 'sqlite' | 'pg'): void {
+  for (const statement of topLevelStatements(migration.sql)) {
+    const head = statement.replace(WHITESPACE_RUN, ' ').slice(0, 60);
+    if (
+      TRANSACTION_CONTROL.test(statement) ||
+      (dialect === 'pg' && PG_OUTSIDE_TRANSACTION.test(statement))
+    ) {
+      throw new NexusError(
+        'INTERNAL',
+        `Schema migration ${migration.id} (${migration.source}) contains a statement that ` +
+          `cannot run inside its migration transaction: ${head}. Migrations run in one ` +
+          `transaction with their ledger row; remove transaction control from the file.`,
+        { id: migration.id, statement: head },
+      );
+    }
+  }
+}
+
 /* ── Loading SQL migration files ────────────────────────────────────────── */
 
 const FILE_PATTERN: Readonly<Record<SchemaDialect, RegExp>> = {
@@ -397,25 +654,28 @@ export function loadMigrations(
 }
 
 /**
- * Check that `migrations` are exactly the shipped ones for `dialect`, by id,
- * order and checksum. Exported for its tests; production calls
- * {@link loadShippedMigrations}.
+ * Check that `migrations` are exactly the shipped ones for `dialect` (a SQL
+ * dialect or `mongodb`), by id, order and checksum. Production calls it on
+ * every `migrate()` that uses the shipped migrations: through
+ * {@link loadShippedMigrations} for SQL, and in the MongoDB adapter.
  */
 export function verifyShippedMigrations(
-  migrations: readonly SqlMigration[],
-  dialect: SchemaDialect,
+  migrations: readonly Migration[],
+  dialect: MigrationBackend,
   manifest: readonly MigrationManifestEntry[] = MIGRATION_MANIFEST,
 ): void {
   const expected = manifest.map((entry) => entry.id);
   const found = migrations.map((migration) => migration.id);
   const missing = expected.filter((id) => !found.includes(id));
   const extra = found.filter((id) => !expected.includes(id));
-  if (missing.length > 0 || extra.length > 0) {
+  const order = found.join(',') === expected.join(',');
+  if (missing.length > 0 || extra.length > 0 || !order) {
+    const where = dialect === 'mongodb' ? 'MONGO_MIGRATIONS' : migrationsDir();
     throw new NexusError(
       'INTERNAL',
-      `This build's ${dialect} migration files do not match the migrations it ships ` +
+      `This build's ${dialect} migrations do not match the migrations it ships ` +
         `(missing: ${missing.length > 0 ? quote(missing) : 'none'}; unexpected: ` +
-        `${extra.length > 0 ? quote(extra) : 'none'}) in ${migrationsDir()}. The image or ` +
+        `${extra.length > 0 ? quote(extra) : 'none'}) in ${where}. The image or ` +
         `installation is incomplete or modified; nothing was changed. Reinstall an official ` +
         `release. See ${SCHEMA_POLICY_DOC}.`,
       { dialect, missing, extra },

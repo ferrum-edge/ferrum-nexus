@@ -21,10 +21,12 @@
  *   intended definition is skipped, one with any other definition is refused.
  *   The whole file is validated before any of it runs.
  *
- * One database advisory lock covers the ledger reads, every statement and the
- * ledger writes, so two instances starting together change the schema once.
- * The pre-0.6 migration runner was written the same way; the replay checks are
- * its, minus the steps only its released migrations needed.
+ * When there is work, one database advisory lock (`GET_LOCK`, never waited
+ * for) covers the ledger re-read, every statement and the ledger writes: a
+ * second migrator is refused rather than interleaved. The lock belongs to the
+ * session, so a crashed migrator cannot leave it held. The pre-0.6 migration
+ * runner used the same lock name; the replay checks are its, minus the steps
+ * only its released migrations needed.
  */
 import { createHash } from 'node:crypto';
 import type mysql from 'mysql2/promise';
@@ -32,7 +34,9 @@ import { nowIso } from '../../../lib/ids.js';
 import {
   ensureSchema,
   loadShippedMigrations,
+  schemaBusyError,
   type LedgerEntry,
+  type SchemaOptions,
   type SchemaResult,
   type SqlMigration,
 } from '../../migrate.js';
@@ -133,7 +137,15 @@ interface AddCheck {
 }
 
 /** A replayable statement: a `CREATE TABLE IF NOT EXISTS` (as text) or a checked change. */
-export type MigrationStep = string | AddColumn | AddIndex | WidenColumn | AddCheck;
+interface AddTable {
+  kind: 'table';
+  /** The statement as written (it may span lines). */
+  statement: string;
+  table: string;
+}
+
+/** A replayable migration statement and what it changes. */
+export type MigrationStep = AddTable | AddColumn | AddIndex | WidenColumn | AddCheck;
 
 /**
  * A CHECK condition without identifier quotes, whitespace, case or enclosing
@@ -148,13 +160,15 @@ function checkClause(text: string): string {
 
 /**
  * Parse a MySQL migration into replay-verifiable steps, refusing the whole
- * file if any statement is not one of: `CREATE TABLE IF NOT EXISTS`, `ALTER
- * TABLE … ADD COLUMN` (a `VARCHAR(n) NULL`, `VARCHAR(n) NOT NULL DEFAULT ''`,
- * `INT NOT NULL DEFAULT n` or `LONGTEXT DEFAULT NULL` column), `CREATE INDEX`,
- * a LONGTEXT widening, or a boolean CHECK. Arbitrary DML is never accepted:
- * MySQL could commit it before the ledger row is written, and a replay would
- * run it again. A migration that needs another kind of statement extends this
- * parser with its replay check first.
+ * file if any statement is not one of: a plain `CREATE TABLE` of a new table,
+ * `ALTER TABLE … ADD COLUMN` (a `VARCHAR(n) NULL`, `VARCHAR(n) NOT NULL
+ * DEFAULT ''`, `INT NOT NULL DEFAULT n` or `LONGTEXT DEFAULT NULL` column),
+ * `CREATE INDEX`, a LONGTEXT widening, or a boolean CHECK, each on a
+ * different object. `IF [NOT] EXISTS` forms are refused: MySQL would skip such
+ * a statement without comparing the definition already there. Arbitrary DML is
+ * never accepted: MySQL could commit it before the ledger row is written, and
+ * a replay would run it again. A migration that needs another kind of
+ * statement extends this parser with its replay check first.
  */
 export function migrationSteps(migration: SqlMigration): MigrationStep[] {
   const steps = parseSteps(migration);
@@ -162,7 +176,8 @@ export function migrationSteps(migration: SqlMigration): MigrationStep[] {
   return steps;
 }
 
-const CREATED_TABLE = /^CREATE TABLE IF NOT EXISTS ([a-z][a-z0-9_]*)/i;
+const CREATE_TABLE = /^CREATE TABLE ([a-z][a-z0-9_]*) ?\(/i;
+const IF_EXISTS = /\bIF (NOT )?EXISTS\b/i;
 
 /**
  * Refuse a file that changes one object twice (a column added then widened,
@@ -187,11 +202,9 @@ function refuseRepeatedTargets(migration: SqlMigration, steps: readonly Migratio
 
 /** The schema object a step creates or changes, for {@link refuseRepeatedTargets}. */
 function stepTarget(step: MigrationStep): string {
-  if (typeof step === 'string') {
-    const table = CREATED_TABLE.exec(step.replace(WHITESPACE_RUN, ' ').trim())?.[1] ?? '';
-    return `table ${table}`.toLowerCase();
-  }
   switch (step.kind) {
+    case 'table':
+      return `table ${step.table}`.toLowerCase();
     case 'column':
     case 'widen':
       return `column ${step.table}.${step.column}`.toLowerCase();
@@ -206,7 +219,14 @@ function stepTarget(step: MigrationStep): string {
 function parseSteps(migration: SqlMigration): MigrationStep[] {
   return splitSqlStatements(migration.sql).map<MigrationStep>((sql) => {
     const statement = sql.replace(WHITESPACE_RUN, ' ').trim();
-    if (CREATE_TABLE_IF_NOT_EXISTS.test(statement)) return sql;
+    if (IF_EXISTS.test(statement)) {
+      throw new Error(
+        `MySQL migration ${migration.id} uses an IF [NOT] EXISTS form, which MySQL skips ` +
+          'without comparing the existing definition; write the plain statement',
+      );
+    }
+    const table = CREATE_TABLE.exec(statement);
+    if (table) return { kind: 'table', statement: sql, table: table[1]! };
     const widen = WIDEN_TO_LONGTEXT.exec(statement);
     if (widen) {
       return {
@@ -404,12 +424,25 @@ async function indexExists(connection: mysql.PoolConnection, step: AddIndex): Pr
   return true;
 }
 
-/** Whether one checked step already landed with exactly its intended definition. */
-function stepPresent(
-  connection: mysql.PoolConnection,
-  step: Exclude<MigrationStep, string>,
-): Promise<boolean> {
+/** Whether a table of this name exists. */
+async function tableExists(connection: mysql.PoolConnection, table: string): Promise<boolean> {
+  const [rows] = await connection.execute<mysql.RowDataPacket[]>(
+    'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+    [table],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Whether one step already landed with exactly its intended definition. A
+ * table counts as landed when it exists: `beginMigration` refused the
+ * migration unless every table it creates was absent, and the migration lock
+ * excludes other writers, so a table found on a resume is this migration's.
+ */
+function stepPresent(connection: mysql.PoolConnection, step: MigrationStep): Promise<boolean> {
   switch (step.kind) {
+    case 'table':
+      return tableExists(connection, step.table);
     case 'column':
       return columnExists(connection, step);
     case 'widen':
@@ -439,7 +472,14 @@ async function beginMigration(
   connection: mysql.PoolConnection,
   migration: SqlMigration,
 ): Promise<void> {
-  migrationSteps(migration);
+  for (const step of migrationSteps(migration)) {
+    if (step.kind === 'table' && (await tableExists(connection, step.table))) {
+      throw new Error(
+        `MySQL migration ${migration.id} creates table ${step.table}, which already exists; a ` +
+          'migration creates only new tables',
+      );
+    }
+  }
   await connection.execute(
     `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
       "VALUES (?, ?, ?, 'in_progress')",
@@ -459,10 +499,6 @@ async function applyMigration(
   // Validate the whole file before applying any of it.
   const steps = migrationSteps(migration);
   for (const step of steps) {
-    if (typeof step === 'string') {
-      await connection.query(step);
-      continue;
-    }
     if (await stepPresent(connection, step)) continue;
     await connection.query(step.statement);
     if (!(await stepPresent(connection, step))) {
@@ -490,11 +526,16 @@ async function ledgerColumns(connection: mysql.PoolConnection): Promise<Set<stri
 }
 
 /** Options for {@link ensureMysqlSchema}. */
-export interface MysqlSchemaOptions {
+export interface MysqlSchemaOptions extends SchemaOptions {
   /** Tests may shorten the metadata-lock wait (1 to 30 s); nothing may lengthen it. */
   lockWaitTimeoutSeconds?: number;
   /** Forward migrations to apply; the shipped ones by default. A test seam. */
   migrations?: readonly SqlMigration[];
+}
+
+/** The advisory lock name for a database: the pre-0.6 runner's, so old and new serialize. */
+export function mysqlSchemaLockName(database: string): string {
+  return `nexus:migrations:${digest(database).slice(0, 32)}`;
 }
 
 /**
@@ -538,22 +579,32 @@ export async function ensureMysqlSchema(
     const [rows] = await connection.query<mysql.RowDataPacket[]>('SELECT DATABASE() AS db');
     if (typeof rows[0]?.db !== 'string')
       throw new Error('MySQL schema setup requires a selected database');
-    // The pre-0.6 runner's lock name: an older process provisioning the same
-    // database serializes with this one rather than interleaving.
-    const name = `nexus:migrations:${digest(rows[0].db).slice(0, 32)}`;
-    // Acquisition can commit server-side before a transport error reaches us.
-    lockName = name;
-    const [locks] = await connection.execute<mysql.RowDataPacket[]>(
-      'SELECT GET_LOCK(?, 30) AS acquired',
-      [name],
-    );
-    if (Number(locks[0]?.acquired) !== 1) {
-      throw new Error(
-        'MySQL schema setup is busy; retry after the other instance finishes migrating',
-      );
-    }
+    const name = mysqlSchemaLockName(rows[0].db);
     return await ensureSchema(
       {
+        // Taken only when there is work, without waiting: a second migrator
+        // is refused. The session ends the lock, so a crash cannot leave it
+        // held; it is released below.
+        async acquireLock() {
+          // Acquisition can commit server-side before a transport error reaches us.
+          lockName = name;
+          const [locks] = await connection.execute<mysql.RowDataPacket[]>(
+            'SELECT GET_LOCK(?, 0) AS acquired',
+            [name],
+          );
+          if (Number(locks[0]?.acquired) !== 1) {
+            lockName = undefined;
+            throw schemaBusyError('MySQL');
+          }
+          return async () => undefined;
+        },
+        async lockHeld() {
+          const [used] = await connection.execute<mysql.RowDataPacket[]>(
+            'SELECT IS_USED_LOCK(?) AS holder',
+            [name],
+          );
+          return used[0]?.holder !== null && used[0]?.holder !== undefined;
+        },
         async ensureLedger() {
           await connection.query(`CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
           id VARCHAR(191) NOT NULL, applied_at VARCHAR(32) NOT NULL, checksum VARCHAR(64) NULL,
@@ -592,6 +643,7 @@ export async function ensureMysqlSchema(
       },
       schema,
       migrations,
+      { mode: options.mode ?? 'migrate' },
     );
   } finally {
     if (lockName) {

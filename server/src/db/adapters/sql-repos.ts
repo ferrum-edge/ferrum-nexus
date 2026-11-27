@@ -173,6 +173,7 @@ import {
   type SqlParam,
   type SqlTransactionRunner,
 } from './sql-common.js';
+import type { SchemaOptions } from '../migrate.js';
 import { runWithTransactionRetry } from './transaction-retry.js';
 import { carriesConfigKey, configKeyProbe } from './config-keys.js';
 
@@ -4180,7 +4181,7 @@ export interface SqlStoreBackend {
   /** Executor bound to the connection pool, used outside transactions. */
   readonly pool: SqlExecutor;
   init(): Promise<void>;
-  migrate(): Promise<void>;
+  migrate(options?: SchemaOptions): Promise<void>;
   close(): Promise<void>;
   healthCheck(): Promise<StoreHealth>;
   /**
@@ -4319,8 +4320,8 @@ class SqlStore implements NexusStore {
     return this.backend.init();
   }
 
-  migrate(): Promise<void> {
-    return this.backend.migrate();
+  migrate(options?: SchemaOptions): Promise<void> {
+    return this.backend.migrate(options);
   }
 
   close(): Promise<void> {

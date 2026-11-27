@@ -6275,10 +6275,7 @@ async function olderMongo(baseUrl: string, ledger: string[]): Promise<OlderDatab
           users: userDocs.map((doc) => JSON.stringify(doc)),
           // Collections, plus any index beyond `_id` the refused start created.
           tables: [
-            // The schema lock's own collection is bookkeeping, emptied on release.
-            ...collections
-              .map((collection) => collection.name)
-              .filter((name) => name !== 'schema_migrations_lock'),
+            ...collections.map((collection) => collection.name),
             ...users.filter((index) => index.name !== '_id_').map((index) => String(index.name)),
           ].sort(),
         };
