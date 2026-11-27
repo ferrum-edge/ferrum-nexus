@@ -1384,6 +1384,11 @@ export interface GrantRepo {
 }
 
 /** Show-once gateway credential metadata (fingerprint + last4 only). */
+/** What {@link CredentialRepo.create} takes: the store assigns `edge_ordinal` unless given. */
+export type CreateCredentialInput = Omit<CreateInput<CredentialRecord>, 'edge_ordinal'> & {
+  edge_ordinal?: number;
+};
+
 export interface CredentialRepo {
   /**
    * Insert a row and assign its `edge_ordinal`.
@@ -1397,7 +1402,7 @@ export interface CredentialRepo {
    * on `(consumer, type, ordinal)` turns a breach of that rule into a
    * `CONFLICT` rather than two rows claiming one Edge slot.
    */
-  create(input: CreateInput<CredentialRecord>): Promise<CredentialRecord>;
+  create(input: CreateCredentialInput): Promise<CredentialRecord>;
   findById(id: Uuid): Promise<CredentialRecord | null>;
   /** `edge_ordinal` is not updatable: a row's position is fixed at append time. */
   update(
@@ -1425,10 +1430,9 @@ export interface CredentialRepo {
   ): Promise<CredentialRecord | null>;
   list(filter: CredentialFilter, options?: ListOptions): Promise<Paginated<CredentialRecord>>;
   /**
-   * All credentials of a consumer in gateway order: rows without an ordinal
-   * first (every one of them predates every row that has one), then by
-   * `edge_ordinal`, then by `created_at` and `id` as a tie-break only the
-   * unresolved rows need.
+   * All credentials of a consumer in gateway order: by `edge_ordinal`, then
+   * by `created_at` and `id` as a tie-break that never decides between two
+   * rows of one type.
    *
    * `statuses` restricts the read to rows in one of those states; omitted, it
    * returns every row. The credential paths pass the live statuses: rotation

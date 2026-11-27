@@ -149,11 +149,7 @@ export interface StringListFieldSpec {
  * the body sent to `POST /plugins/config`.
  */
 export type PluginFieldSpec =
-  | BooleanFieldSpec
-  | IntegerFieldSpec
-  | StringFieldSpec
-  | EnumFieldSpec
-  | StringListFieldSpec;
+  BooleanFieldSpec | IntegerFieldSpec | StringFieldSpec | EnumFieldSpec | StringListFieldSpec;
 
 /* ── Descriptors ────────────────────────────────────────────────────────── */
 

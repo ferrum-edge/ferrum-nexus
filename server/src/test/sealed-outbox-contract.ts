@@ -297,6 +297,5 @@ export function runSealedOutboxContract(
       assert.deepEqual(deliveredTo(subjectOnly.entry.to_email), [], 'no ciphertext was sent');
       assert.deepEqual(deliveredTo(bodyOnly.entry.to_email), [], 'no ciphertext was sent');
     });
-
   });
 }

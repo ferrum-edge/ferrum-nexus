@@ -33,7 +33,7 @@ import {
   type ShowOnceSecret,
 } from '@ferrum-nexus/shared';
 
-import type { CreateInput, CredentialRecord } from '../db/store.js';
+import type { CreateCredentialInput } from '../db/store.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 import { mockBasicPasswordHash } from './mock-ferrum-edge.js';
 
@@ -124,7 +124,7 @@ describe('credential positions follow the append ordinal', () => {
     shape: RowShape,
   ): Promise<IssueCredentialResponse> {
     const real = harness.store.credentials.create.bind(harness.store.credentials);
-    harness.store.credentials.create = async (input: CreateInput<CredentialRecord>) => {
+    harness.store.credentials.create = async (input: CreateCredentialInput) => {
       harness.store.credentials.create = real;
       return real({ ...input, ...shape });
     };

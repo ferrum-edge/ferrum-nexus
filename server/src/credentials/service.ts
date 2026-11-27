@@ -215,7 +215,7 @@ import { approvalGroupsForIdentity } from '../access/approval-groups.js';
 import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
-  CreateInput,
+  CreateCredentialInput,
   CredentialFilter,
   CredentialRecord,
   GatewayIdentityRecord,
@@ -2056,7 +2056,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
     const generated = generateCredential(input.type, input.consumerUsername);
     const fingerprint = crypto.fingerprint(generated.material);
-    const row: CreateInput<CredentialRecord> = {
+    const row: CreateCredentialInput = {
       user_id: input.ownerId,
       application_id: input.applicationId ?? null,
       ferrum_consumer_id: input.consumerId,
