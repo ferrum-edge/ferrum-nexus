@@ -196,14 +196,6 @@ export const AuditAction = {
    */
   API_PLUGIN_ROLLBACK: 'api.plugin_rollback',
   /**
-   * The startup pass finished for a namespace with every palette config that
-   * carried a key Edge has removed (`ip_restriction.mode`, issue #727)
-   * rewritten. `v0.6.0` recorded it once per namespace; nothing writes it any
-   * more, and the action stays in the catalog so those rows remain listable
-   * and filterable.
-   */
-  API_PLUGIN_KEYS_STRIPPED: 'api.plugin_keys_stripped',
-  /**
    * A `spec_enforcement` conversion could neither finish nor put the original
    * proxy back, so the API has no gateway object at all.
    *
@@ -336,13 +328,6 @@ export const AuditAction = {
    */
   ACCESS_REVOKE_COMPLETE: 'access.revoke_complete',
   /**
-   * The one-time repair queued access gateway jobs for decisions a release
-   * before `access_gateway_jobs` may have left half-applied. `v0.6.0`
-   * recorded it at its first start; nothing writes it any more, and the
-   * action stays in the catalog so those rows remain listable and filterable.
-   */
-  ACCESS_STRANDED_REPAIR_QUEUED: 'access.stranded_repair_queued',
-  /**
    * A provider's agent publish or spec build is about to add the API's MCP-all
    * group to an all-tools grantee whose consumer holds the REST group but not
    * that one. Committed before the consumer write.
@@ -442,13 +427,6 @@ export const AuditAction = {
 
   /* admin */
   ADMIN_SETTINGS_UPDATE: 'admin.settings_update',
-  /**
-   * The one-time startup conversion of unbound legacy (`v1`) encrypted
-   * settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). `v0.6.0`
-   * recorded it at its first start; nothing writes it any more, and the
-   * action stays in the catalog so those rows remain listable and filterable.
-   */
-  SETTINGS_ENCRYPTION_BOUND: 'settings.encryption_bound',
   ADMIN_TEMPLATE_UPDATE: 'admin.template_update',
   /** An email template override was removed, restoring the built-in default. */
   ADMIN_TEMPLATE_RESET: 'admin.template_reset',
@@ -628,9 +606,6 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_PLUGIN_REMOVE_START]: INTENT,
   [AuditAction.API_PLUGIN_REMOVE]: TRANSACTIONAL,
   [AuditAction.API_PLUGIN_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
-  [AuditAction.API_PLUGIN_KEYS_STRIPPED]: rowOnly(
-    'Historical: v0.6.0 committed it alone once per namespace; nothing writes it any more.',
-  ),
   [AuditAction.API_GATEWAY_REPAIR_REQUIRED]: postCommit(
     `${COMPENSATION_TRAIL} The reconciliation flag, which is a change of its own, records ` +
       'it in its transaction.',
@@ -665,9 +640,6 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.ACCESS_REVOKE]: TRANSACTIONAL,
   [AuditAction.ACCESS_REVOKE_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.ACCESS_REVOKE_COMPLETE]: TRANSACTIONAL,
-  [AuditAction.ACCESS_STRANDED_REPAIR_QUEUED]: rowOnly(
-    'Historical: v0.6.0 committed it alone at its first start; nothing writes it any more.',
-  ),
   [AuditAction.ACCESS_MCP_ENROLL]: INTENT,
   [AuditAction.ACCESS_MCP_ENROLL_SKIP]: rowOnly(
     'Records a write that was deliberately not made; there is no portal change to commit with it.',
@@ -691,9 +663,6 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
     "Marks the caller's own notifications read; no authority, access or shared state changes.",
   ),
   [AuditAction.ADMIN_SETTINGS_UPDATE]: TRANSACTIONAL,
-  [AuditAction.SETTINGS_ENCRYPTION_BOUND]: rowOnly(
-    'Historical: v0.6.0 committed it alone at its first start; nothing writes it any more.',
-  ),
   [AuditAction.ADMIN_TEMPLATE_UPDATE]: TRANSACTIONAL,
   [AuditAction.ADMIN_TEMPLATE_RESET]: TRANSACTIONAL,
   [AuditAction.ADMIN_MASS_EMAIL]: INTENT,
