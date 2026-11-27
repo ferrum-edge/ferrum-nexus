@@ -643,7 +643,7 @@ narrowed `public_only_guaranteed` alone.
 
 [`release/compatibility.env`](../release/compatibility.env) pins the Edge image and
 `contracts/ferrum-contracts/PIN` the vendored contracts. See
-[the adoption facts](edge-0.9.11-adoption.md) and the separate
+[the adoption facts](history/edge-0.9.11-adoption.md) and the separate
 [packaged public-only fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
@@ -704,7 +704,7 @@ Replay and cleanup use only Edge's conditional deployment API with the journal's
 complete encrypted original snapshot and its strong `deployment-v1` token: no
 fresh-token retry, unconditional cleanup or namespace replacement. The
 acknowledgement rules and replay limits are in the
-[released protocol and qualification limits](edge-conversion-recovery-blocker.md);
+[released protocol and qualification limits](conversion-recovery-protocol.md);
 resolve an unconfirmed outcome with the runbook below.
 
 ### Resolving an unconfirmed gateway deployment mutation
@@ -1910,7 +1910,7 @@ a digest-pinned `node:22-bookworm-slim`. The supported Node range since `v0.4.0`
 `^22.22.2 || ^24.15.0 || >=26.0.0`; releases before it supported Node 22.14 or later.
 Dependabot advances the pinned digest within that channel, so the exact Node 22
 patch release changes over time; the
-[migration notes](dependency-majors-449-higher-floor-draft.md) record the published OCI
+[migration notes](history/dependency-majors-449-higher-floor-draft.md) record the published OCI
 evidence for the digest `v0.4.0` through `v0.5.2` shipped (Node 22.23.3) and the
 rollback boundary; `v0.6.0` ships Node 22.23.5. The image sets:
 
@@ -2103,7 +2103,7 @@ individual resources and repeats egress admission. Conditional Edge backup does 
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
 procedure below. The Edge release and contracts each Nexus release pairs with are
 listed under [Compatible versions](#compatible-versions); see also
-[the adoption facts](edge-0.9.11-adoption.md).
+[the adoption facts](history/edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 

@@ -2178,7 +2178,7 @@ cutover use Edge's conditional deployment protocol; a `412` or a `507` keeps the
 journal, and no fresh-token retry or unconditional fallback is allowed. Journal
 custody is described in
 [Gateway recovery journals](operations.md#gateway-recovery-journals), the
-protocol in the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
+protocol in the [released protocol and replay limits](conversion-recovery-protocol.md).
 To resolve an unconfirmed mutation, follow the
 [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
 

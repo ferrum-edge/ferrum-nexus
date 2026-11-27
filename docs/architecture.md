@@ -478,7 +478,7 @@ Admin/traffic identity, or a control plane whose data-plane attestation covers a
 least `NEXUS_EXPECTED_DATA_PLANES` settled data planes. See
 [`operations.md`](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 for the topology and [gateway recovery journals](operations.md#gateway-recovery-journals),
-and the [released recovery protocol](edge-conversion-recovery-blocker.md).
+and the [released recovery protocol](conversion-recovery-protocol.md).
 
 ### 5.3 The plugin naming trap
 

@@ -164,7 +164,7 @@ them.
 
 APIs published before tool subsets require an authenticated provider republish before
 accepting a subset, including empty subsets. See the
-[upgrade tradeoff](mcp-subsets-migration-draft.md).
+[upgrade tradeoff](history/mcp-subsets-migration-draft.md).
 
 Connection recipes follow the primary client documentation for
 [VS Code MCP configuration](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)

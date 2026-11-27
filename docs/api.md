@@ -2685,7 +2685,7 @@ An unchanged original can still be reconciled read-only. An absent identity can
 be rebuilt from the retained original resources on staging; corrected `routes`
 replacement and spec-owned cutover each require their own recorded authority.
 Frozen external references and resources Nexus cannot replay require operator
-resolution. See the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
+resolution. See the [released protocol and replay limits](conversion-recovery-protocol.md).
 The encrypted journal and repair state commit before teardown and clear together
 with catalog, ownership and completion audit under the existing lease fences.
 Large journals use encrypted, authenticated chunks and a manifest committed in one
@@ -2741,7 +2741,7 @@ reported these as `deployment_acknowledgement_uncertain`, which now covers only
 Uncertain/refused results retain the attempted identity, security configs and
 encrypted journal with `withdrawn: false` and `repair_required`; no refreshed-token
 retry or unconditional fallback is performed. See the
-[released protocol and bounded replay limits](edge-conversion-recovery-blocker.md).
+[released protocol and bounded replay limits](conversion-recovery-protocol.md).
 
 ### `POST /api/apis/:id/test-consumer`
 
@@ -3090,7 +3090,7 @@ approved tool, on the identity's one consumer, so any change that would take a c
 past 500 groups (an approval, a tool request approval, a re-enable or a repair) is
 refused with `409 CONFLICT` and `details.reason: "acl_group_limit"` before the write. Ordinary spec revisions, rollbacks, agents
 edits, restores and conversions read no grantee consumer from the gateway. See the
-[migration notes](mcp-subsets-migration-draft.md).
+[migration notes](history/mcp-subsets-migration-draft.md).
 
 ---
 
