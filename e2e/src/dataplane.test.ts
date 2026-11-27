@@ -2646,10 +2646,22 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const probeProxy = parityProxy('plugins');
     const proxy = await gatewayAdmin('POST', '/proxies', probeProxy);
     assert.equal(proxy.status, 201, messagesOf(await adminBody(proxy)));
+    // Edge admits one enabled global `prometheus_metrics` and refuses a second
+    // before reading its config, so when the stack already runs one the probe
+    // is a replace of that config, which the probe key makes Edge refuse too.
+    const listed = await gatewayAdmin('GET', `/plugins/config?limit=${EDGE_MAX_PAGE_SIZE}`);
+    assert.equal(listed.status, 200);
+    const configs = ((await listed.json()) as { data: EdgePluginRow[] }).data;
+    const metricsOwner = configs.find(
+      (row) => row.plugin_name === 'prometheus_metrics' && row.enabled && row.scope === 'global',
+    );
+    const problems: string[] = [];
     try {
       for (const [pluginName, keys] of Object.entries(PLUGIN_CONFIG_ALLOWED_KEYS)) {
         const global = pluginName === 'prometheus_metrics';
-        const response = await gatewayAdmin('POST', '/plugins/config', {
+        const replace = global && metricsOwner !== undefined;
+        const target = replace ? `/plugins/config/${encodeURIComponent(metricsOwner.id)}` : '';
+        const response = await gatewayAdmin(replace ? 'PUT' : 'POST', `/plugins/config${target}`, {
           plugin_name: pluginName,
           scope: global ? 'global' : 'proxy',
           ...(global ? {} : { proxy_id: probeProxy.id }),
@@ -2662,19 +2674,19 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
           },
         });
         const body = await adminBody(response);
-        if (response.status < 300) {
+        if (response.status < 300 && !replace) {
           const id = (body as { id?: unknown }).id;
           if (typeof id === 'string') {
             await gatewayAdmin('DELETE', `/plugins/config/${encodeURIComponent(id)}`);
           }
         }
-        assert.equal(response.status, 400, `${pluginName}: ${messagesOf(body)}`);
-        assert.deepEqual(
-          unknownKeysNamed(messagesOf(body)),
-          [PARITY_PROBE_KEY],
-          `${pluginName}: the keys Edge refuses (${messagesOf(body)})`,
-        );
+        const refused = unknownKeysNamed(messagesOf(body));
+        if (response.status !== 400 || refused.join() !== PARITY_PROBE_KEY) {
+          problems.push(`${pluginName} (${response.status}): ${messagesOf(body)}`);
+        }
       }
+      // Every plugin is checked before failing, so one run reports them all.
+      assert.deepEqual(problems, [], 'Edge refuses only the probe key of each plugin');
     } finally {
       await gatewayAdmin('DELETE', `/proxies/${encodeURIComponent(probeProxy.id)}`);
     }
@@ -2826,6 +2838,14 @@ async function proxyPluginIds(proxyId: string): Promise<string[]> {
   assert.equal(response.status, 200);
   const page = (await response.json()) as { data: { id: string }[] };
   return page.data.map((plugin) => plugin.id).sort();
+}
+
+/** The fields of an Edge plugin config the copied-rule cases read. */
+interface EdgePluginRow {
+  id: string;
+  plugin_name: string;
+  enabled: boolean;
+  scope: string;
 }
 
 /** The slice of a reconciliation report the Edge restore case compares. */
