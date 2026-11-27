@@ -101,7 +101,7 @@ import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
   checksumMismatchError,
   ensureSchema,
-  loadMigrations,
+  loadShippedMigrations,
   type LedgerEntry,
   type SchemaDriver,
   type SqlMigration,
@@ -820,10 +820,10 @@ export function openSqliteDatabase(path: string): Database {
   return db;
 }
 
-/** Whether the ledger has the `checksum` column (a v0.6.0 ledger does not). */
-function ledgerHasChecksum(db: Database): boolean {
-  return queryAll(db, `PRAGMA table_info(${SCHEMA_LEDGER_TABLE})`).some(
-    (row) => row.name === 'checksum',
+/** The ledger's columns (a v0.6.0 ledger has only `id` and `applied_at`). */
+function ledgerColumns(db: Database): Set<string> {
+  return new Set(
+    queryAll(db, `PRAGMA table_info(${SCHEMA_LEDGER_TABLE})`).map((row) => String(row.name)),
   );
 }
 
@@ -834,6 +834,15 @@ function ledgerId(value: unknown): string {
   return typeof value === 'string' ? value : `<non-text ${typeof value} id>`;
 }
 
+/** One ledger row as the runner reads it. */
+function ledgerEntry(row: Row): LedgerEntry {
+  return {
+    id: ledgerId(row.id),
+    checksum: typeof row.checksum === 'string' ? row.checksum : null,
+    inProgress: row.state === 'in_progress',
+  };
+}
+
 /** The SQLite schema primitives; exported for the schema tests. */
 export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigration> {
   return {
@@ -842,16 +851,17 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigratio
         `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
            id TEXT PRIMARY KEY,
            applied_at TEXT NOT NULL,
-           checksum TEXT
+           checksum TEXT,
+           state TEXT
          )`,
       );
     },
     async listRecorded(): Promise<LedgerEntry[]> {
-      const columns = ledgerHasChecksum(db) ? 'id, checksum' : 'id';
-      return queryAll(db, `SELECT ${columns} FROM ${SCHEMA_LEDGER_TABLE}`).map((row) => ({
-        id: ledgerId(row.id),
-        checksum: typeof row.checksum === 'string' ? row.checksum : null,
-      }));
+      const present = ledgerColumns(db);
+      const columns = ['id', 'checksum', 'state'].filter((column) => present.has(column));
+      return queryAll(db, `SELECT ${columns.join(', ')} FROM ${SCHEMA_LEDGER_TABLE}`).map(
+        ledgerEntry,
+      );
     },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
       const create = db.transaction((base: BaseSchema) => {
@@ -864,9 +874,17 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigratio
       create.immediate(schema);
     },
     async prepareLedger(): Promise<void> {
-      if (!ledgerHasChecksum(db)) {
-        db.exec(`ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN checksum TEXT`);
-      }
+      // Under the write lock, so a second process cannot add the same column
+      // between this check and the ALTER.
+      const prepare = db.transaction(() => {
+        const present = ledgerColumns(db);
+        for (const column of ['checksum', 'state']) {
+          if (!present.has(column)) {
+            db.exec(`ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN ${column} TEXT`);
+          }
+        }
+      });
+      prepare.immediate();
     },
     async applyMigration(migration: SqlMigration): Promise<void> {
       // BEGIN IMMEDIATE takes the write lock first; the ledger is re-read under
@@ -875,20 +893,18 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigratio
       const apply = db.transaction((step: SqlMigration) => {
         const existing = queryAll(
           db,
-          `SELECT id, checksum FROM ${SCHEMA_LEDGER_TABLE} WHERE id = ?`,
+          `SELECT id, checksum, state FROM ${SCHEMA_LEDGER_TABLE} WHERE id = ?`,
           [step.id],
         )[0];
         if (existing !== undefined) {
-          const entry: LedgerEntry = {
-            id: step.id,
-            checksum: typeof existing.checksum === 'string' ? existing.checksum : null,
-          };
-          if (entry.checksum === step.checksum) return;
+          const entry = ledgerEntry(existing);
+          if (entry.checksum === step.checksum && entry.inProgress !== true) return;
           throw checksumMismatchError(entry, step);
         }
         db.exec(step.sql);
         db.prepare(
-          `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum) VALUES (?, ?, ?)`,
+          `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
+            "VALUES (?, ?, ?, 'applied')",
         ).run(step.id, nowIso(), step.checksum);
       });
       apply.immediate(migration);
@@ -1054,7 +1070,7 @@ class SqliteStore implements NexusStore {
     await ensureSchema(
       createSqliteSchemaDriver(this.db),
       loadBaseSchema('sqlite'),
-      this.migrations ?? loadMigrations('sqlite'),
+      this.migrations ?? loadShippedMigrations('sqlite'),
     );
   }
 

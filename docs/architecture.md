@@ -314,20 +314,28 @@ with its checksum and time.
   database), a recorded checksum that differs from the build's, or a gap in
   the order is refused. Downgrades are not supported.
 - Otherwise the missing migrations run in id order. SQLite and PostgreSQL run
-  each one and its ledger row in one transaction. MySQL DDL commits on its own,
-  so a MySQL migration may contain only statements whose finished state the
-  runner can read back from `information_schema`; a replay skips what already
-  landed and refuses anything else. MongoDB steps (indexes plus an optional
-  idempotent transform) are re-run safely.
+  each one and its ledger row in one transaction (PostgreSQL receives the file
+  whole). MySQL DDL commits on its own, so a MySQL migration may contain only
+  statements whose finished state the runner can read back from
+  `information_schema`, each on a different object; MongoDB steps are data
+  (indexes, then `updateMany` changes), all covered by their checksum. On both,
+  the driver records the migration in progress before its first change and
+  marks it applied after its last: a build that knows it resumes an
+  interrupted one, skipping what already landed, and every other build refuses
+  the database.
+- The shipped migrations and their checksums are compiled in
+  (`db/migration-manifest.ts`), so startup refuses an installation whose
+  migration files are missing or altered.
 - Every refusal is a `NexusError` raised before anything is written and before
   any service reads the data
   ([operations](operations.md#schema-and-upgrades)).
 
 Concurrent starts follow the single-writer model: PostgreSQL and MySQL take a
 database-scoped advisory lock for the whole check (`pg_try_advisory_lock`,
-`GET_LOCK`), SQLite applies each migration under `BEGIN IMMEDIATE` and re-reads
-the ledger, and MongoDB tolerates a peer recording the same entry first as long
-as its checksum matches.
+`GET_LOCK`), MongoDB takes a lock document with an owner token and an expiry
+(claimed like an `edge_leases` lease) that it renews and checks before every
+schema write, and SQLite applies each migration under `BEGIN IMMEDIATE` and
+re-reads the ledger.
 
 The server build copies `db/schema/` and `db/migrations/` to `server/dist/db/`,
 and the loaders read them beside their own module.

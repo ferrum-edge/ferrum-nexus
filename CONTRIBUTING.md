@@ -66,8 +66,8 @@ coverage changes visible.
 base schema (`server/src/db/schema/base.sql`, `base.pg.sql`, `base.mysql.sql`, and `BASE_INDEXES` in
 the MongoDB adapter) is the 1.0 baseline, unchanged since `v0.6.0`, and is never edited:
 `server/src/db/frozen-baseline.test.ts` fails on any change. A schema change adds
-`server/src/db/migrations/NNN_description.sql`, `.pg.sql` and `.mysql.sql` plus a `MONGO_MIGRATIONS`
-step of the same id, in one change. From 1.0.0 onward a migration that shipped in a release is never
+`server/src/db/migrations/NNN_description.sql`, `.pg.sql` and `.mysql.sql`, a `MONGO_MIGRATIONS`
+step of the same id, and its checksums in `server/src/db/migration-manifest.ts`, in one change. From 1.0.0 onward a migration that shipped in a release is never
 edited, renamed or removed, and every release opens the database the previous one left. Until it
 ships, a migration may still change; a development database that applied the earlier text is then
 refused and must be recreated. See

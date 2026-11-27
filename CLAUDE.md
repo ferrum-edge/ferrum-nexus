@@ -30,7 +30,9 @@ forward:
   checksums and fails on any change.
 - A schema change is a new migration with the next id (numbered from `016`; `001` to `015` belong
   to the pre-0.6 chain): `server/src/db/migrations/NNN_description.sql`, `.pg.sql` and
-  `.mysql.sql`, plus a step of the same id in `MONGO_MIGRATIONS` (MongoDB adapter). Once a release
+  `.mysql.sql`, a step of the same id in `MONGO_MIGRATIONS` (MongoDB adapter: indexes and
+  declarative `updateMany` changes, no code), and its checksums in
+  `server/src/db/migration-manifest.ts` (`frozen-baseline.test.ts` prints them). Once a release
   ships it, a migration is never edited, renamed, reordered or deleted; until then it may change,
   and a development database that applied the earlier text is refused and must be recreated.
 - `store.migrate()` (`server/src/db/migrate.ts`) creates the baseline in an empty database, then
@@ -40,9 +42,11 @@ forward:
   recorded migration whose checksum differs. See
   [docs/operations.md, "Schema and upgrades"](docs/operations.md#schema-and-upgrades).
 - MySQL DDL commits on its own, so the MySQL base schema is only `CREATE TABLE IF NOT EXISTS`, and a
-  MySQL migration may use only the replay-verifiable statements `adapters/mysql/schema.ts` accepts
-  (no data changes). MongoDB steps must be idempotent. `server/src/test/schema-upgrade.test.ts`
-  proves a migration applies on top of a `v0.6.0` database on all four backends.
+  MySQL migration may use only the replay-verifiable statements `adapters/mysql/schema.ts` accepts,
+  each on a different object (no data changes). MySQL and MongoDB record a migration in progress
+  before its first change, so an interrupted upgrade resumes; MongoDB steps must be idempotent.
+  `server/src/test/schema-upgrade.test.ts` proves a migration applies on top of a `v0.6.0`
+  database on all four backends.
 
 ## Workspace layout
 
@@ -211,8 +215,9 @@ container image.
   service into `server/src/index.ts` (the "COMPOSITION" sections), add DTOs to
   `shared/src/api-contract.ts`, and add the call to `web/src/lib/api.ts`.
 - **Adding a DB column or table**: add a forward migration, never an edit to the frozen base
-  schema: `server/src/db/migrations/NNN_description.sql`, `.pg.sql` and `.mysql.sql`, plus a
-  `MONGO_MIGRATIONS` step in the MongoDB adapter declaring any index. Then update `NexusStore`,
+  schema: `server/src/db/migrations/NNN_description.sql`, `.pg.sql` and `.mysql.sql`, a
+  `MONGO_MIGRATIONS` step in the MongoDB adapter declaring any index, and its entry in
+  `server/src/db/migration-manifest.ts`. Then update `NexusStore`,
   implement it in sqlite, sql-repos, and mongodb, and extend the smoke suite.
 - **Touching the Edge integration**: only through `server/src/ferrum-admin/`, and extend the mock
   in `server/src/test/mock-ferrum-edge.ts` to match.

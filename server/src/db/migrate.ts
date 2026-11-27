@@ -26,6 +26,20 @@
  * Every refusal happens before anything is written, so a refused database is
  * left exactly as it was.
  *
+ * Where a migration cannot commit with its ledger row (MySQL DDL, MongoDB
+ * steps), the driver records the migration **in progress** before its first
+ * change, and marks it applied only after its last. An interrupted upgrade
+ * therefore leaves its id in the ledger: a build that does not know the id
+ * refuses the database as one a newer release changed (and v0.6.0 refuses any
+ * ledger but its baseline), while a build that knows it, with the same
+ * checksum, resumes it. Each step of such a migration checks the live schema
+ * before it changes anything, so resuming is safe.
+ *
+ * The shipped migrations are listed, with their checksums, in
+ * `migration-manifest.ts`. {@link loadShippedMigrations} refuses to run when a
+ * SQL file is missing, extra or altered, so a packaging mistake stops startup
+ * instead of silently skipping a migration.
+ *
  * SQL migration files live in `db/migrations/` and are named
  * `NNN_description.sql` (SQLite), `NNN_description.pg.sql` (PostgreSQL) and
  * `NNN_description.mysql.sql` (MySQL). The numeric prefix plus the
@@ -40,6 +54,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 import { NexusError, isNexusError } from '../lib/errors.js';
+import { MIGRATION_MANIFEST, type MigrationManifestEntry } from './migration-manifest.js';
 import {
   artifactChecksum,
   SCHEMA_POLICY_DOC,
@@ -67,6 +82,8 @@ export interface SqlMigration extends Migration {
 export interface LedgerEntry {
   id: string;
   checksum: string | null;
+  /** `true` while a non-transactional migration has started but not finished. */
+  inProgress?: boolean;
 }
 
 /** The primitives an adapter provides to {@link ensureSchema}. */
@@ -81,15 +98,24 @@ export interface SchemaDriver<M extends Migration = Migration> {
    */
   createBaseSchema(schema: BaseSchema): Promise<void>;
   /**
-   * Give the ledger its `checksum` column if it lacks one (a ledger v0.6.0
-   * created has only `id` and `applied_at`). Called only once every check
-   * passed and at least one migration is about to be applied. Idempotent.
+   * Give the ledger its `checksum` and `state` columns if it lacks them (a
+   * ledger v0.6.0 created has only `id` and `applied_at`). Called only once
+   * every check passed and at least one migration is about to be applied.
+   * Idempotent, and safe when two instances call it at once.
    */
   prepareLedger(): Promise<void>;
   /**
-   * Execute one migration **and** record its id, checksum and time,
-   * atomically where the driver supports DDL transactions. Called only for
-   * ids the ledger lacks, in order.
+   * For a backend that cannot commit a migration with its ledger row: record
+   * the migration as in progress, with its checksum, before its first change.
+   * Not called when the ledger already holds it in progress (a resume).
+   * Backends with transactional DDL leave this out.
+   */
+  beginMigration?(migration: M): Promise<void>;
+  /**
+   * Execute one migration and record it applied, with its checksum and time —
+   * atomically where the driver supports DDL transactions, otherwise by
+   * marking its in-progress entry applied after the last change. Called only
+   * for ids the ledger lacks (or holds in progress), in order.
    */
   applyMigration(migration: M): Promise<void>;
 }
@@ -133,11 +159,25 @@ export async function ensureSchema<M extends Migration>(
     recorded = [{ id: base.id, checksum: null }];
   }
   const pending = pendingMigrations(recorded, base, migrations);
+  const resuming = new Set(
+    recorded.filter((entry) => entry.inProgress === true).map((entry) => entry.id),
+  );
+  if (resuming.size > 0 && driver.beginMigration === undefined) {
+    throw new NexusError(
+      'INTERNAL',
+      `The schema ledger holds migrations in progress (${quote([...resuming])}), which this ` +
+        `backend never records. Its schema and data were not changed. See ${SCHEMA_POLICY_DOC}.`,
+      { inProgress: [...resuming].sort() },
+    );
+  }
   const applied: string[] = [];
   if (pending.length === 0) return { created, applied };
   await driver.prepareLedger();
   for (const migration of pending) {
     try {
+      if (driver.beginMigration !== undefined && !resuming.has(migration.id)) {
+        await driver.beginMigration(migration);
+      }
       await driver.applyMigration(migration);
     } catch (error) {
       throw migrationFailure(migration, error);
@@ -163,9 +203,7 @@ export function pendingMigrations<M extends Migration>(
     );
   }
   const known = new Map(migrations.map((migration) => [migration.id, migration]));
-  const unknown = recorded
-    .map((entry) => entry.id)
-    .filter((id) => id !== base.id && !known.has(id));
+  const unknown = recorded.filter((entry) => entry.id !== base.id && !known.has(entry.id));
   if (unknown.length > 0) throw newerSchemaError(unknown, migrations);
   for (const entry of recorded) {
     const migration = known.get(entry.id);
@@ -173,12 +211,17 @@ export function pendingMigrations<M extends Migration>(
       throw checksumMismatchError(entry, migration);
     }
   }
-  const done = new Set(recorded.map((entry) => entry.id));
+  // A migration in progress still needs applying; anything recorded after the
+  // first migration that does is a gap.
+  const done = new Set(
+    recorded.filter((entry) => entry.inProgress !== true).map((entry) => entry.id),
+  );
+  const seen = new Set(recorded.map((entry) => entry.id));
   const firstPending = migrations.findIndex((migration) => !done.has(migration.id));
   if (firstPending === -1) return [];
   const appliedLater = migrations
     .slice(firstPending + 1)
-    .filter((migration) => done.has(migration.id))
+    .filter((migration) => seen.has(migration.id))
     .map((migration) => migration.id);
   const missing = migrations[firstPending];
   if (appliedLater.length > 0 && missing !== undefined) {
@@ -240,20 +283,32 @@ export function olderSchemaError(recorded: readonly string[], schema: BaseSchema
   );
 }
 
-/** The refusal for a database a newer release upgraded: downgrades are not supported. */
+/**
+ * The refusal for a database a newer release upgraded, or started upgrading:
+ * downgrades are not supported.
+ */
 export function newerSchemaError(
-  unknown: readonly string[],
+  unknown: readonly LedgerEntry[],
   migrations: readonly Migration[],
 ): NexusError {
-  const sorted = [...unknown].sort();
+  const sorted = unknown.map((entry) => entry.id).sort();
+  const inProgress = unknown
+    .filter((entry) => entry.inProgress === true)
+    .map((entry) => entry.id)
+    .sort();
+  const interrupted =
+    inProgress.length > 0
+      ? ` That upgrade was interrupted part-way (${quote(inProgress)} in progress): finish it ` +
+        `with the same release before anything else.`
+      : '';
   return new NexusError(
     'INTERNAL',
     `This database records schema migrations this build of Ferrum Nexus does not know ` +
       `(${quote(sorted)}): a newer release upgraded it. Downgrades are not supported, and ` +
-      `its schema and data were not changed. Run the release that upgraded it, or a newer ` +
-      `one, or restore the backup taken before that upgrade. Never edit schema_migrations to ` +
-      `get past this check. See ${SCHEMA_POLICY_DOC}.`,
-    { unknown: sorted, known: migrations.map((migration) => migration.id) },
+      `its schema and data were not changed.${interrupted} Run the release that upgraded it, ` +
+      `or a newer one, or restore the backup taken before that upgrade. Never edit ` +
+      `schema_migrations to get past this check. See ${SCHEMA_POLICY_DOC}.`,
+    { unknown: sorted, inProgress, known: migrations.map((migration) => migration.id) },
   );
 }
 
@@ -339,4 +394,54 @@ export function loadMigrations(
     files.push(sqlMigration(id, filename, readFileSync(join(dir, filename), 'utf8')));
   }
   return files.sort((a, b) => compareIds(a.id, b.id));
+}
+
+/**
+ * Check that `migrations` are exactly the shipped ones for `dialect`, by id,
+ * order and checksum. Exported for its tests; production calls
+ * {@link loadShippedMigrations}.
+ */
+export function verifyShippedMigrations(
+  migrations: readonly SqlMigration[],
+  dialect: SchemaDialect,
+  manifest: readonly MigrationManifestEntry[] = MIGRATION_MANIFEST,
+): void {
+  const expected = manifest.map((entry) => entry.id);
+  const found = migrations.map((migration) => migration.id);
+  const missing = expected.filter((id) => !found.includes(id));
+  const extra = found.filter((id) => !expected.includes(id));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new NexusError(
+      'INTERNAL',
+      `This build's ${dialect} migration files do not match the migrations it ships ` +
+        `(missing: ${missing.length > 0 ? quote(missing) : 'none'}; unexpected: ` +
+        `${extra.length > 0 ? quote(extra) : 'none'}) in ${migrationsDir()}. The image or ` +
+        `installation is incomplete or modified; nothing was changed. Reinstall an official ` +
+        `release. See ${SCHEMA_POLICY_DOC}.`,
+      { dialect, missing, extra },
+    );
+  }
+  for (const entry of manifest) {
+    const migration = migrations.find((candidate) => candidate.id === entry.id);
+    if (migration !== undefined && migration.checksum !== entry.sha256[dialect]) {
+      throw new NexusError(
+        'INTERNAL',
+        `This build's ${migration.source} has checksum ${migration.checksum}, but the ` +
+          `release ships ${entry.sha256[dialect]}. The image or installation is modified; ` +
+          `nothing was changed. Reinstall an official release. See ${SCHEMA_POLICY_DOC}.`,
+        { dialect, id: entry.id, found: migration.checksum, expected: entry.sha256[dialect] },
+      );
+    }
+  }
+}
+
+/**
+ * The shipped migrations for a dialect, read from {@link migrationsDir} and
+ * checked against `migration-manifest.ts` (see {@link verifyShippedMigrations}).
+ * What every adapter's `migrate()` applies unless a test overrides it.
+ */
+export function loadShippedMigrations(dialect: SchemaDialect): SqlMigration[] {
+  const migrations = loadMigrations(dialect);
+  verifyShippedMigrations(migrations, dialect);
+  return migrations;
 }

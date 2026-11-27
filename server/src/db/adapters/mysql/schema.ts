@@ -12,10 +12,14 @@
  *   replays the file — the tables it already created are skipped — and
  *   records it;
  * - a forward migration may contain only statements whose finished state can
- *   be read back from `information_schema` (see {@link migrationSteps}). On a
- *   replay each step is checked first: one that already landed with exactly
- *   the intended definition is skipped, one with any other definition is
- *   refused. The whole file is validated before any of it runs.
+ *   be read back from `information_schema` (see {@link migrationSteps}), each
+ *   changing a different object. It is recorded **in progress** before its
+ *   first statement and marked applied after its last, so an interrupted
+ *   upgrade stays visible to every later start: a build that does not know
+ *   the id refuses the database, and one that does resumes it. On a resume
+ *   each step is checked first: one that already landed with exactly the
+ *   intended definition is skipped, one with any other definition is refused.
+ *   The whole file is validated before any of it runs.
  *
  * One database advisory lock covers the ledger reads, every statement and the
  * ledger writes, so two instances starting together change the schema once.
@@ -27,7 +31,7 @@ import type mysql from 'mysql2/promise';
 import { nowIso } from '../../../lib/ids.js';
 import {
   ensureSchema,
-  loadMigrations,
+  loadShippedMigrations,
   type LedgerEntry,
   type SchemaResult,
   type SqlMigration,
@@ -153,6 +157,53 @@ function checkClause(text: string): string {
  * parser with its replay check first.
  */
 export function migrationSteps(migration: SqlMigration): MigrationStep[] {
+  const steps = parseSteps(migration);
+  refuseRepeatedTargets(migration, steps);
+  return steps;
+}
+
+const CREATED_TABLE = /^CREATE TABLE IF NOT EXISTS ([a-z][a-z0-9_]*)/i;
+
+/**
+ * Refuse a file that changes one object twice (a column added then widened,
+ * two indexes of one name, one table created twice). Each step's replay check
+ * compares the live schema with that step's own end state, which a later step
+ * on the same object would have changed, so a replay after an interruption
+ * would refuse the file. Dependent changes go in separate migrations.
+ */
+function refuseRepeatedTargets(migration: SqlMigration, steps: readonly MigrationStep[]): void {
+  const seen = new Set<string>();
+  for (const step of steps) {
+    const target = stepTarget(step);
+    if (seen.has(target)) {
+      throw new Error(
+        `MySQL migration ${migration.id} changes ${target} twice; put dependent changes in ` +
+          'separate migrations',
+      );
+    }
+    seen.add(target);
+  }
+}
+
+/** The schema object a step creates or changes, for {@link refuseRepeatedTargets}. */
+function stepTarget(step: MigrationStep): string {
+  if (typeof step === 'string') {
+    const table = CREATED_TABLE.exec(step.replace(WHITESPACE_RUN, ' ').trim())?.[1] ?? '';
+    return `table ${table}`.toLowerCase();
+  }
+  switch (step.kind) {
+    case 'column':
+    case 'widen':
+      return `column ${step.table}.${step.column}`.toLowerCase();
+    case 'index':
+      return `index ${step.table}.${step.name}`.toLowerCase();
+    case 'check':
+      return `check ${step.name}`.toLowerCase();
+  }
+}
+
+/** Parse every statement of a migration into a step, refusing unsupported ones. */
+function parseSteps(migration: SqlMigration): MigrationStep[] {
   return splitSqlStatements(migration.sql).map<MigrationStep>((sql) => {
     const statement = sql.replace(WHITESPACE_RUN, ' ').trim();
     if (CREATE_TABLE_IF_NOT_EXISTS.test(statement)) return sql;
@@ -383,6 +434,24 @@ async function createBaseSchema(
   ]);
 }
 
+/** Record a migration in progress, after validating the whole file. */
+async function beginMigration(
+  connection: mysql.PoolConnection,
+  migration: SqlMigration,
+): Promise<void> {
+  migrationSteps(migration);
+  await connection.execute(
+    `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
+      "VALUES (?, ?, ?, 'in_progress')",
+    [migration.id, nowIso(), migration.checksum],
+  );
+}
+
+/**
+ * Run (or resume) a migration recorded in progress, then mark it applied. Every
+ * checked step is skipped when it already landed with its intended definition,
+ * so a resume after an interruption finishes the file.
+ */
 async function applyMigration(
   connection: mysql.PoolConnection,
   migration: SqlMigration,
@@ -400,20 +469,24 @@ async function applyMigration(
       throw new Error(`MySQL migration ${migration.id} failed to change ${step.table}`);
     }
   }
-  await connection.execute(
-    `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum) VALUES (?, ?, ?)`,
-    [migration.id, nowIso(), migration.checksum],
+  const [result] = await connection.execute<mysql.ResultSetHeader>(
+    `UPDATE ${SCHEMA_LEDGER_TABLE} SET state = 'applied', applied_at = ? ` +
+      "WHERE id = ? AND checksum = ? AND state = 'in_progress'",
+    [nowIso(), migration.id, migration.checksum],
   );
+  if (result.affectedRows !== 1) {
+    throw new Error(`MySQL migration ${migration.id} lost its in-progress ledger entry`);
+  }
 }
 
-/** Whether the ledger has the `checksum` column (a v0.6.0 ledger does not). */
-async function ledgerHasChecksum(connection: mysql.PoolConnection): Promise<boolean> {
+/** The ledger's columns (a v0.6.0 ledger has only `id` and `applied_at`). */
+async function ledgerColumns(connection: mysql.PoolConnection): Promise<Set<string>> {
   const [rows] = await connection.execute<mysql.RowDataPacket[]>(
-    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'checksum'`,
+    `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
     [SCHEMA_LEDGER_TABLE],
   );
-  return rows.length > 0;
+  return new Set(rows.map((row) => String(row.name)));
 }
 
 /** Options for {@link ensureMysqlSchema}. */
@@ -442,7 +515,7 @@ export async function ensureMysqlSchema(
   ) {
     throw new RangeError('MySQL schema lock wait timeout must be an integer from 1 to 30');
   }
-  const migrations = options.migrations ?? loadMigrations('mysql');
+  const migrations = options.migrations ?? loadShippedMigrations('mysql');
   const connection = await pool.getConnection();
   let lockName: string | undefined;
   let originalLockWaitTimeout: number | undefined;
@@ -484,27 +557,37 @@ export async function ensureMysqlSchema(
         async ensureLedger() {
           await connection.query(`CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
           id VARCHAR(191) NOT NULL, applied_at VARCHAR(32) NOT NULL, checksum VARCHAR(64) NULL,
-          PRIMARY KEY (id)
+          state VARCHAR(16) NULL, PRIMARY KEY (id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`);
         },
         async listRecorded(): Promise<LedgerEntry[]> {
-          const columns = (await ledgerHasChecksum(connection)) ? 'id, checksum' : 'id';
+          const present = await ledgerColumns(connection);
+          const columns = ['id', 'checksum', 'state'].filter((column) => present.has(column));
           const [recorded] = await connection.query<mysql.RowDataPacket[]>(
-            `SELECT ${columns} FROM ${SCHEMA_LEDGER_TABLE}`,
+            `SELECT ${columns.join(', ')} FROM ${SCHEMA_LEDGER_TABLE}`,
           );
           return recorded.map((row) => ({
             id: String(row.id),
             checksum: typeof row.checksum === 'string' ? row.checksum : null,
+            inProgress: row.state === 'in_progress',
           }));
         },
         createBaseSchema: (base) => createBaseSchema(connection, base),
         async prepareLedger() {
-          if (!(await ledgerHasChecksum(connection))) {
+          // Under the advisory lock, so no other instance alters it meanwhile.
+          const present = await ledgerColumns(connection);
+          if (!present.has('checksum')) {
             await connection.query(
               `ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN checksum VARCHAR(64) NULL`,
             );
           }
+          if (!present.has('state')) {
+            await connection.query(
+              `ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN state VARCHAR(16) NULL`,
+            );
+          }
         },
+        beginMigration: (migration) => beginMigration(connection, migration),
         applyMigration: (migration) => applyMigration(connection, migration),
       },
       schema,

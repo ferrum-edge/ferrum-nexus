@@ -9,8 +9,8 @@
  *   {@link formatSql} (`?` → `$1 … $n`) and reports `rowCount` as the affected
  *   row count;
  * - the schema primitives (`migrate.ts`): creating `schema/base.pg.sql` and
- *   applying each forward migration, each in one transaction with its ledger
- *   row (PostgreSQL has transactional DDL, so a statement and its ledger row
+ *   applying each forward migration file as one script, in one transaction
+ *   with its ledger row (PostgreSQL has transactional DDL, so a statement and its ledger row
  *   commit or roll back together), all under a session advisory lock so two
  *   instances starting together migrate once;
  * - `transaction()`, which is a real `BEGIN`/`COMMIT`/`ROLLBACK` on a
@@ -33,7 +33,7 @@ import type { NexusConfig } from '../../../config/index.js';
 import { nowIso } from '../../../lib/ids.js';
 import {
   ensureSchema,
-  loadMigrations,
+  loadShippedMigrations,
   type LedgerEntry,
   type SchemaDriver,
   type SchemaResult,
@@ -97,14 +97,14 @@ async function inTransaction(client: PgClient, work: () => Promise<void>): Promi
   }
 }
 
-/** Whether the ledger has the `checksum` column (a v0.6.0 ledger does not). */
-async function ledgerHasChecksum(client: PgClient): Promise<boolean> {
+/** The ledger's columns (a v0.6.0 ledger has only `id` and `applied_at`). */
+async function ledgerColumns(client: PgClient): Promise<Set<string>> {
   const result = await client.query(
-    `SELECT 1 FROM information_schema.columns
-      WHERE table_schema = current_schema() AND table_name = $1 AND column_name = 'checksum'`,
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = $1`,
     [SCHEMA_LEDGER_TABLE],
   );
-  return result.rows.length > 0;
+  return new Set((result.rows as { column_name: unknown }[]).map((row) => String(row.column_name)));
 }
 
 /**
@@ -118,16 +118,19 @@ export function createPostgresSchemaDriver(client: PgClient): SchemaDriver<SqlMi
         `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
            id TEXT PRIMARY KEY,
            applied_at TEXT NOT NULL,
-           checksum TEXT
+           checksum TEXT,
+           state TEXT
          )`,
       );
     },
     async listRecorded(): Promise<LedgerEntry[]> {
-      const columns = (await ledgerHasChecksum(client)) ? 'id, checksum' : 'id';
-      const result = await client.query(`SELECT ${columns} FROM ${SCHEMA_LEDGER_TABLE}`);
-      return (result.rows as { id: unknown; checksum?: unknown }[]).map((row) => ({
+      const present = await ledgerColumns(client);
+      const columns = ['id', 'checksum', 'state'].filter((column) => present.has(column));
+      const result = await client.query(`SELECT ${columns.join(', ')} FROM ${SCHEMA_LEDGER_TABLE}`);
+      return (result.rows as { id: unknown; checksum?: unknown; state?: unknown }[]).map((row) => ({
         id: String(row.id),
         checksum: typeof row.checksum === 'string' ? row.checksum : null,
+        inProgress: row.state === 'in_progress',
       }));
     },
     async createBaseSchema(schema: BaseSchema): Promise<void> {
@@ -143,16 +146,19 @@ export function createPostgresSchemaDriver(client: PgClient): SchemaDriver<SqlMi
     },
     async prepareLedger(): Promise<void> {
       await client.query(
-        `ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN IF NOT EXISTS checksum TEXT`,
+        `ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN IF NOT EXISTS checksum TEXT, ` +
+          'ADD COLUMN IF NOT EXISTS state TEXT',
       );
     },
     async applyMigration(migration: SqlMigration): Promise<void> {
       await inTransaction(client, async () => {
-        for (const statement of splitSqlStatements(migration.sql)) {
-          await client.query(statement);
-        }
+        // The whole file in one parameterless query: PostgreSQL parses it
+        // itself (simple protocol), so dollar-quoted bodies, and semicolons in
+        // strings or comments, reach it intact.
+        await client.query(migration.sql);
         await client.query(
-          `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum) VALUES ($1, $2, $3)`,
+          `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
+            "VALUES ($1, $2, $3, 'applied')",
           [migration.id, nowIso(), migration.checksum],
         );
       });
@@ -182,7 +188,7 @@ async function acquireSchemaLock(client: PgClient, waitMs: number): Promise<bool
  */
 export async function ensurePostgresSchema(
   pool: PgPool,
-  migrations: readonly SqlMigration[] = loadMigrations('pg'),
+  migrations: readonly SqlMigration[] = loadShippedMigrations('pg'),
   options: { lockWaitMs?: number } = {},
 ): Promise<SchemaResult> {
   const waitMs = options.lockWaitMs ?? MAX_SCHEMA_LOCK_WAIT_MS;
@@ -248,7 +254,7 @@ class PostgresBackend implements SqlStoreBackend {
   }
 
   async migrate(): Promise<void> {
-    await ensurePostgresSchema(this.db, this.migrations ?? loadMigrations('pg'));
+    await ensurePostgresSchema(this.db, this.migrations ?? loadShippedMigrations('pg'));
   }
 
   async close(): Promise<void> {

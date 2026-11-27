@@ -21,6 +21,8 @@ import {
   loadMigrations,
   sqlMigration,
   validateMigrations,
+  verifyShippedMigrations,
+  type LedgerEntry,
   type SchemaDriver,
   type SqlMigration,
 } from './migrate.js';
@@ -34,6 +36,11 @@ const OUT_OF_ORDER = /Migrations apply only in id order/;
 const NAMES_FAILED_SCHEMA = /^Creating the base schema base_test failed: .*no such table: missing/;
 const NAMES_FAILED_MIGRATION = /^Schema migration 017_broken failed: .*no such table: missing/;
 const MALFORMED = /Malformed schema migration id/;
+const INTERRUPTED = /That upgrade was interrupted part-way \(017_widget_name in progress\)/;
+const NEVER_RECORDS = /holds migrations in progress/;
+const INCOMPLETE = /migration files do not match the migrations it ships/;
+const MODIFIED = /The image or installation is modified/;
+const INJECTED = /injected interruption/;
 const ORDER = /repeated or out of order/;
 
 /** What a v0.5.2 database records: the released pre-0.6 migration chain. */
@@ -148,7 +155,7 @@ describe('ensureSchema', () => {
         created: false,
         applied: [WIDGETS.id],
       });
-      assert.deepEqual(ledgerColumns(db), ['id', 'applied_at', 'checksum']);
+      assert.deepEqual(ledgerColumns(db), ['id', 'applied_at', 'checksum', 'state']);
       assert.deepEqual(await ensureSchema(driver, schema, [WIDGETS, WIDGET_NAME]), {
         created: false,
         applied: [WIDGET_NAME.id],
@@ -231,7 +238,11 @@ describe('ensureSchema', () => {
         assert.ok(isNexusError(error));
         assert.match(error.message, NEWER);
         assert.ok(error.message.includes(WIDGET_NAME.id), error.message);
-        assert.deepEqual(error.details, { unknown: [WIDGET_NAME.id], known: [WIDGETS.id] });
+        assert.deepEqual(error.details, {
+          unknown: [WIDGET_NAME.id],
+          inProgress: [],
+          known: [WIDGETS.id],
+        });
         return true;
       });
       // The shipped build knows no migration at all: it refuses as well.
@@ -424,5 +435,150 @@ describe('migration lists', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * A backend that cannot commit a migration with its ledger row (the shape of
+ * MySQL and MongoDB), in memory: it records an in-progress marker first and
+ * can be told to stop part-way through a migration.
+ */
+function nonTransactionalDriver(): SchemaDriver<SqlMigration> & {
+  ledger: Map<string, LedgerEntry>;
+  began: string[];
+  ran: string[];
+  failNext: boolean;
+} {
+  const ledger = new Map<string, LedgerEntry>();
+  const driver = {
+    ledger,
+    began: [] as string[],
+    ran: [] as string[],
+    failNext: false,
+    async ensureLedger(): Promise<void> {},
+    async listRecorded(): Promise<LedgerEntry[]> {
+      return [...ledger.values()].map((entry) => ({ ...entry }));
+    },
+    async createBaseSchema(schema: BaseSchema): Promise<void> {
+      ledger.set(schema.id, { id: schema.id, checksum: null });
+    },
+    async prepareLedger(): Promise<void> {},
+    async beginMigration(migration: SqlMigration): Promise<void> {
+      driver.began.push(migration.id);
+      ledger.set(migration.id, {
+        id: migration.id,
+        checksum: migration.checksum,
+        inProgress: true,
+      });
+    },
+    async applyMigration(migration: SqlMigration): Promise<void> {
+      driver.ran.push(migration.id);
+      if (driver.failNext) {
+        driver.failNext = false;
+        throw new Error('injected interruption');
+      }
+      const entry = ledger.get(migration.id);
+      assert.equal(entry?.inProgress, true, 'applied only after it was begun');
+      ledger.set(migration.id, { id: migration.id, checksum: migration.checksum });
+    },
+  };
+  return driver;
+}
+
+describe('migrations on a backend without transactional DDL', () => {
+  it('records an interrupted migration in progress, refuses builds without it, then resumes', async () => {
+    const driver = nonTransactionalDriver();
+    const schema = loadBaseSchema('sqlite');
+    await ensureSchema(driver, schema, [WIDGETS]);
+    driver.failNext = true;
+    await assert.rejects(ensureSchema(driver, schema, [WIDGETS, WIDGET_NAME]), INJECTED);
+    assert.deepEqual(driver.ledger.get(WIDGET_NAME.id), {
+      id: WIDGET_NAME.id,
+      checksum: WIDGET_NAME.checksum,
+      inProgress: true,
+    });
+
+    // The release before it does not know the id: it refuses, naming the interruption.
+    await assert.rejects(ensureSchema(driver, schema, [WIDGETS]), (error: unknown) => {
+      assert.ok(isNexusError(error));
+      assert.match(error.message, NEWER);
+      assert.match(error.message, INTERRUPTED);
+      assert.deepEqual(error.details, {
+        unknown: [WIDGET_NAME.id],
+        inProgress: [WIDGET_NAME.id],
+        known: [WIDGETS.id],
+      });
+      return true;
+    });
+    // A build whose copy of the migration differs refuses too.
+    const edited = sqlMigration(WIDGET_NAME.id, WIDGET_NAME.source, 'SELECT 2;');
+    await assert.rejects(ensureSchema(driver, schema, [WIDGETS, edited]), MISMATCH);
+
+    // The same build resumes it without recording it again, then marks it applied.
+    driver.began.length = 0;
+    driver.ran.length = 0;
+    assert.deepEqual(await ensureSchema(driver, schema, [WIDGETS, WIDGET_NAME]), {
+      created: false,
+      applied: [WIDGET_NAME.id],
+    });
+    assert.deepEqual(driver.began, []);
+    assert.deepEqual(driver.ran, [WIDGET_NAME.id]);
+    assert.deepEqual(driver.ledger.get(WIDGET_NAME.id), {
+      id: WIDGET_NAME.id,
+      checksum: WIDGET_NAME.checksum,
+    });
+  });
+
+  it('refuses a migration in progress that is not the next one', async () => {
+    const driver = nonTransactionalDriver();
+    const schema = loadBaseSchema('sqlite');
+    await ensureSchema(driver, schema, []);
+    driver.ledger.set(WIDGET_NAME.id, {
+      id: WIDGET_NAME.id,
+      checksum: WIDGET_NAME.checksum,
+      inProgress: true,
+    });
+    await assert.rejects(ensureSchema(driver, schema, [WIDGETS, WIDGET_NAME]), OUT_OF_ORDER);
+  });
+
+  it('refuses an in-progress marker on a backend that never records one', async () => {
+    const db = v060Database();
+    try {
+      const driver = createSqliteSchemaDriver(db);
+      const schema = loadBaseSchema('sqlite');
+      await ensureSchema(driver, schema, [WIDGETS]);
+      db.prepare(`UPDATE ${SCHEMA_LEDGER_TABLE} SET state = 'in_progress' WHERE id = ?`).run(
+        WIDGETS.id,
+      );
+      await assert.rejects(ensureSchema(driver, schema, [WIDGETS]), NEVER_RECORDS);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('shipped migrations', () => {
+  const manifest = [
+    {
+      id: WIDGETS.id,
+      sha256: { sqlite: WIDGETS.checksum, pg: 'x', mysql: 'x', mongodb: 'x' },
+    },
+  ];
+
+  it('accept exactly the packaged files the manifest lists', () => {
+    verifyShippedMigrations([WIDGETS], 'sqlite', manifest);
+    verifyShippedMigrations([], 'sqlite', []);
+  });
+
+  it('refuse a package missing a migration file, or carrying an extra one', () => {
+    assert.throws(() => verifyShippedMigrations([], 'sqlite', manifest), INCOMPLETE);
+    assert.throws(
+      () => verifyShippedMigrations([WIDGETS, WIDGET_NAME], 'sqlite', manifest),
+      INCOMPLETE,
+    );
+  });
+
+  it('refuse a packaged file whose checksum differs from the manifest', () => {
+    assert.throws(() => verifyShippedMigrations([WIDGETS], 'pg', manifest), MODIFIED);
   });
 });

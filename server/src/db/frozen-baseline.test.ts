@@ -29,8 +29,10 @@ import {
   canonicalIndexes,
   MONGO_BASE_SCHEMA,
   MONGO_MIGRATIONS,
+  mongoMigration,
 } from './adapters/mongodb/index.js';
-import { loadMigrations, migrationsDir } from './migrate.js';
+import { loadMigrations, loadShippedMigrations, migrationsDir } from './migrate.js';
+import { MIGRATION_MANIFEST } from './migration-manifest.js';
 import {
   artifactChecksum,
   BASE_SCHEMA_FILE,
@@ -56,10 +58,16 @@ const LAST_PRE_0_6_NUMBER = 15;
 
 const MIGRATION_FILE = /^(\d{3,})_[a-z0-9_]+(\.pg|\.mysql)?\.sql$/;
 
+const MANIFEST_REMEDY =
+  'If this migration has not shipped in a release yet, record that checksum in ' +
+  'server/src/db/migration-manifest.ts. If it has shipped, it is immutable: revert the edit and ' +
+  'add a new migration (docs/operations.md, "Schema and upgrades").';
+
 const ADD_A_MIGRATION =
   'The base schema is frozen from Ferrum Nexus 1.0.0 onward. Revert this edit and add a ' +
   'numbered forward migration instead: server/src/db/migrations/NNN_description.sql, ' +
-  '.pg.sql and .mysql.sql, plus a MONGO_MIGRATIONS step of the same id ' +
+  '.pg.sql and .mysql.sql, a MONGO_MIGRATIONS step of the same id, and its entry in ' +
+  'server/src/db/migration-manifest.ts ' +
   '(docs/operations.md, "Schema and upgrades"). Never update the frozen checksum.';
 
 describe('frozen baseline', () => {
@@ -127,19 +135,20 @@ describe('forward migrations', () => {
     }
   });
 
-  it('implement the same ids on every backend, numbered after the pre-0.6 chain', () => {
-    const ids = loadMigrations('sqlite').map((migration) => migration.id);
+  it('are listed in the manifest, on every backend, numbered after the pre-0.6 chain', () => {
+    const ids = MIGRATION_MANIFEST.map((entry) => entry.id);
     for (const dialect of DIALECTS) {
       assert.deepEqual(
         loadMigrations(dialect).map((migration) => migration.id),
         ids,
-        `${dialect} must ship exactly the migration ids SQLite does`,
+        `server/src/db/migrations/ must hold exactly one ${dialect} file per id in ` +
+          'server/src/db/migration-manifest.ts',
       );
     }
     assert.deepEqual(
       MONGO_MIGRATIONS.map((step) => step.id),
       ids,
-      'MONGO_MIGRATIONS must declare exactly the migration ids the SQL dialects ship',
+      'MONGO_MIGRATIONS must declare exactly the ids in server/src/db/migration-manifest.ts',
     );
     for (const id of ids) {
       // 001 to 015 name the pre-0.6 chain in databases that are refused; reusing
@@ -149,5 +158,28 @@ describe('forward migrations', () => {
         `${id}: number new migrations from 016 on`,
       );
     }
+  });
+
+  it('match the checksums the manifest records', () => {
+    for (const entry of MIGRATION_MANIFEST) {
+      for (const dialect of DIALECTS) {
+        const migration = loadMigrations(dialect).find((candidate) => candidate.id === entry.id);
+        assert.equal(
+          migration?.checksum,
+          entry.sha256[dialect],
+          `${migration?.source ?? entry.id} has SHA-256 ${migration?.checksum ?? '(missing)'}. ` +
+            MANIFEST_REMEDY,
+        );
+      }
+      const step = MONGO_MIGRATIONS.find((candidate) => candidate.id === entry.id);
+      const actual = step === undefined ? '(missing)' : mongoMigration(step).checksum;
+      assert.equal(
+        actual,
+        entry.sha256.mongodb,
+        `MONGO_MIGRATIONS step ${entry.id} has SHA-256 ${actual}. ${MANIFEST_REMEDY}`,
+      );
+    }
+    // What startup runs: it must accept exactly what the source tree ships.
+    for (const dialect of DIALECTS) loadShippedMigrations(dialect);
   });
 });

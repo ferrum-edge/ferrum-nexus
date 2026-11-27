@@ -9,12 +9,36 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { describe, it } from 'node:test';
 import mysql from 'mysql2/promise';
-import { ensureMysqlSchema } from '../db/adapters/mysql/schema.js';
+import { ensureMysqlSchema, migrationSteps } from '../db/adapters/mysql/schema.js';
+import { sqlMigration } from '../db/migrate.js';
 import { loadBaseSchema, splitSqlStatements } from '../db/schema.js';
 
 const WHITESPACE_RUN = /\s+/g;
 const HYPHENS = /-/g;
 const NOT_REPLAYABLE = /not a replayable CREATE TABLE IF NOT EXISTS/;
+const NEWER = /a newer release upgraded it/;
+const INTERRUPTED = /interrupted part-way/;
+const TWICE = /changes column users\.probe_note twice/;
+const UNSUPPORTED = /unsupported non-replayable DDL/;
+
+/**
+ * A forward migration using every statement kind a MySQL migration may
+ * contain, each on its own object.
+ */
+const PROBE = sqlMigration(
+  '016_recovery_probe',
+  '016_recovery_probe.mysql.sql',
+  `
+  CREATE TABLE IF NOT EXISTS recovery_probe (
+    id VARCHAR(64) NOT NULL, note TEXT NULL, PRIMARY KEY (id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+  ALTER TABLE users ADD COLUMN recovery_probe_note VARCHAR(64) NULL;
+  CREATE INDEX ix_recovery_probe_users ON users (recovery_probe_note);
+  ALTER TABLE recovery_probe MODIFY COLUMN note LONGTEXT DEFAULT NULL;
+  ALTER TABLE users ADD COLUMN recovery_probe_flag INT NOT NULL DEFAULT 0;
+  ALTER TABLE users ADD CONSTRAINT ck_users_recovery_probe_flag CHECK (recovery_probe_flag IN (0, 1));
+  `,
+);
 
 const adminUrl = process.env.NEXUS_TEST_MYSQL_URL;
 const base = loadBaseSchema('mysql');
@@ -215,7 +239,7 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
       const creator = mysql.createPool({ uri: url, connectionLimit: 1 });
       const operations = [
         'CREATE TABLE',
-        'SELECT id, checksum FROM schema_migrations',
+        'SELECT id, checksum, state FROM schema_migrations',
         'INSERT INTO schema_migrations',
       ];
       const observed = new Set<string>();
@@ -393,5 +417,95 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
         await second.end();
       }
     });
+  });
+});
+
+describe('MySQL migration preflight', () => {
+  it('refuses a file that changes one object twice, before any of it runs', () => {
+    const twice = sqlMigration(
+      '016_twice',
+      '016_twice.mysql.sql',
+      'ALTER TABLE users ADD COLUMN probe_note VARCHAR(64) NULL;\n' +
+        'ALTER TABLE users MODIFY COLUMN probe_note LONGTEXT DEFAULT NULL;\n',
+    );
+    assert.throws(() => migrationSteps(twice), TWICE);
+  });
+
+  it('refuses data changes and other statements it cannot verify on a replay', () => {
+    const update = sqlMigration('016_update', 'x', "UPDATE users SET company = 'x';");
+    assert.throws(() => migrationSteps(update), UNSUPPORTED);
+  });
+
+  it('accepts every supported statement kind', () => {
+    assert.equal(migrationSteps(PROBE).length, 6);
+  });
+});
+
+describe('MySQL forward migration recovery', { skip: !adminUrl, timeout: 600_000 }, () => {
+  it('resumes a migration interrupted after every committed statement', async () => {
+    const expected = await fixture(async (pool) => {
+      await ensureMysqlSchema(pool, base, { migrations: [PROBE] });
+      return schema(pool);
+    });
+    const statements = splitSqlStatements(PROBE.sql);
+    for (const boundary of [...statements, 'ledger']) {
+      await fixture(async (pool, url) => {
+        await ensureMysqlSchema(pool, base, { migrations: [] });
+        let fired = false;
+        const faulty = intercept(pool, (method, sql, _params, after) => {
+          if (fired) return;
+          const ledger =
+            boundary === 'ledger' &&
+            method === 'execute' &&
+            !after &&
+            sql.startsWith("UPDATE schema_migrations SET state = 'applied'");
+          const ddl = method === 'query' && after && normalize(sql) === normalize(boundary);
+          if (ledger || ddl) {
+            fired = true;
+            throw new Error(interruption);
+          }
+        });
+        await assert.rejects(
+          () => ensureMysqlSchema(faulty, base, { migrations: [PROBE] }),
+          INTERRUPTION,
+        );
+        assert.ok(fired, boundary);
+        const [marker] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT id, state, checksum FROM schema_migrations WHERE id = ?',
+          [PROBE.id],
+        );
+        assert.deepEqual(
+          marker.map((row) => [row.id, row.state, row.checksum]),
+          [[PROBE.id, 'in_progress', PROBE.checksum]],
+          boundary,
+        );
+        // A build that does not know the migration refuses the half-upgraded database.
+        await assert.rejects(
+          () => ensureMysqlSchema(pool, base, { migrations: [] }),
+          (error: unknown) =>
+            error instanceof Error && NEWER.test(error.message) && INTERRUPTED.test(error.message),
+        );
+        // The same build resumes it from a fresh pool.
+        const restarted = mysql.createPool(url);
+        try {
+          await ensureMysqlSchema(restarted, base, { migrations: [PROBE] });
+          await ensureMysqlSchema(restarted, base, { migrations: [PROBE] });
+        } finally {
+          await restarted.end();
+        }
+        const [ledger] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT id, state FROM schema_migrations ORDER BY id',
+        );
+        assert.deepEqual(
+          ledger.map((row) => [row.id, row.state]),
+          [
+            [base.id, null],
+            [PROBE.id, 'applied'],
+          ],
+          boundary,
+        );
+        assert.deepEqual(await schema(pool), expected, boundary);
+      });
+    }
   });
 });
