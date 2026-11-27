@@ -925,6 +925,34 @@ export function findProviderPlugin(name: string): ProviderPluginDescriptor | und
 }
 
 /**
+ * The keys of `config` that the palette descriptor of `pluginName` does not
+ * declare, in their order; empty for a plugin outside the palette.
+ *
+ * Nexus writes exactly the declared keys. A key Edge retires leaves the
+ * descriptor in the release that adopts that Edge, so a stored row or a live
+ * config that still carries it shows up here (issue #727).
+ */
+export function undeclaredPaletteKeys(
+  pluginName: string,
+  config: Readonly<Record<string, unknown>>,
+): string[] {
+  const descriptor = findProviderPlugin(pluginName);
+  if (!descriptor) return [];
+  const declared = new Set(descriptor.fields.map((field) => field.key));
+  return Object.keys(config).filter((key) => !declared.has(key));
+}
+
+/** `config` limited to the keys the palette descriptor of `pluginName` declares. */
+export function declaredPaletteConfig(
+  pluginName: string,
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  const undeclared = undeclaredPaletteKeys(pluginName, config);
+  if (undeclared.length === 0) return config;
+  return Object.fromEntries(Object.entries(config).filter(([key]) => !undeclared.includes(key)));
+}
+
+/**
  * Edge plugins Nexus manages from a dedicated field on the API rather than from
  * the palette, mapped to the field that owns them.
  *

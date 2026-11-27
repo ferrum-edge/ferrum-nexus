@@ -8,6 +8,7 @@ import { isNexusError } from '../lib/errors.js';
 import {
   assertDeploymentApplied,
   assertDeploymentEvidence,
+  checkRetainedAuthority,
   deploymentSpecDocument,
   isDeploymentAcknowledgement,
   isDeploymentNonCommit,
@@ -93,6 +94,27 @@ describe('published contracts-edge-0.9.21 deployment fixtures', () => {
       assert.equal(isDeploymentSnapshot(current), true, file);
       assertDeploymentEvidence(current, current.namespace);
     }
+  });
+
+  it('refuses incomplete retained v2 authority with the typed conflict, not a gateway error', () => {
+    const snapshot = oneSpecSnapshot({ openapi: '3.1.0', paths: {} });
+    const spec = snapshot.api_specs[0] as unknown as Record<string, unknown>;
+    snapshot.api_spec_contents = [];
+    assert.equal(isDeploymentSnapshot(snapshot), true, 'the envelope alone passes');
+    // A live response keeps its gateway error...
+    assert.throws(() => deploymentSpecDocument(snapshot, spec), CANNOT_VERIFIED);
+    // ...retained authority is the one typed refusal.
+    assert.throws(
+      () => checkRetainedAuthority(() => deploymentSpecDocument(snapshot, spec)),
+      invalidAuthority,
+    );
+    const broken = structuredClone(snapshot);
+    (broken.evidence as unknown as Record<string, unknown>).resources = 'not evidence';
+    assert.throws(() => assertDeploymentEvidence(broken, broken.namespace));
+    assert.throws(
+      () => checkRetainedAuthority(() => assertDeploymentEvidence(broken, broken.namespace)),
+      invalidAuthority,
+    );
   });
 
   it('treats only a not-committed 507 acknowledgement as a definite refusal', () => {

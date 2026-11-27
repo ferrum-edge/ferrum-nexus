@@ -40,8 +40,9 @@ releases. A limitation that is lifted is removed here in the same change.
   and [gateway recovery journals](operations.md#gateway-recovery-journals).
 - **Agent APIs bridge five methods.** An agent (MCP) tool can call a REST operation whose
   method is `GET`, `POST`, `PUT`, `PATCH` or `DELETE`. Ferrum Edge does not bridge
-  `HEAD`, `OPTIONS`, `TRACE` or `CONNECT`, so operations with those methods cannot be
-  selected as tools. See
+  `HEAD`, `OPTIONS` or `TRACE`, so the picker shows operations with those methods
+  disabled and they cannot be selected as tools (`CONNECT` is not an OpenAPI operation
+  method and never appears). See
   [the agent marketplace](agent-marketplace.md#exact-configuration-boundary).
 
 ## Single sign-on

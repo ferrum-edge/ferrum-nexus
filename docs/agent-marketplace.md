@@ -44,10 +44,12 @@ Nexus supplies document `x-ferrum-mcp` keys `enabled`, `endpoint.path` and
 `namespace`. Each operation has explicit `expose`; selected operations additionally
 have `name`, `description` and `annotations.readOnlyHint`/`destructiveHint`.
 Provider-supplied gateway extensions do not select operations or configure policy.
-The bridge supports GET/POST/PUT/PATCH/DELETE: Ferrum Edge does not bridge HEAD,
-OPTIONS, TRACE or CONNECT (`McpGatewayOpenApiOperation.method` in Edge's
-`openapi.yaml`), so the picker shows those operations disabled. Nexus offers
-exactly what Edge bridges; see [known limitations](known-limitations.md).
+The bridge supports GET/POST/PUT/PATCH/DELETE (`McpGatewayOpenApiOperation.method`
+in Edge's `openapi.yaml`). The picker lists every OpenAPI operation of the document
+and shows HEAD, OPTIONS and TRACE operations disabled, because Ferrum Edge does not
+bridge them. CONNECT is not an OpenAPI operation method, so it never appears in the
+picker and is outside the bridge contract. Nexus offers exactly what Edge bridges;
+see [known limitations](known-limitations.md).
 
 The embedded gateway uses `mode: aggregate_router`, an exact `endpoint.path`,
 `policy.default_action: deny`, `policy.hide_denied_tools: true`, and an

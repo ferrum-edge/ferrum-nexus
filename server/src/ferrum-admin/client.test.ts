@@ -487,6 +487,36 @@ describe('ferrum admin client', () => {
     assert.equal(wellFormed.status, 404);
   });
 
+  it('adopts the consumer a concurrent create placed at the derived id', async () => {
+    const username = 'nexus-user-raced';
+    const id = client.consumers.derivedId(username);
+    // The create lands but answers 409, as when another creation won the race.
+    edge.queueLostAck(409, { error: 'Consumer identity conflicts' }, '/consumers', 'POST');
+    const before = edge.requests.length;
+    const result = await client.consumers.ensure({ username });
+    assert.equal(result.created, false);
+    assert.equal(result.consumer.id, id);
+    assert.equal(result.consumer.username, username);
+    assert.deepEqual(
+      edge.requests.slice(before).map((request) => `${request.method} ${request.path}`),
+      [`GET /consumers/${id}`, 'POST /consumers', `GET /consumers/${id}`],
+    );
+  });
+
+  it('rethrows a create conflict when the derived id holds nothing', async () => {
+    const username = 'nexus-user-conflicted';
+    edge.queueFailure(409, { error: 'Consumer identity conflicts' }, '/consumers', 'POST');
+    await assert.rejects(
+      () => client.consumers.ensure({ username }),
+      (error: unknown) =>
+        isNexusError(error) &&
+        typeof error.details === 'object' &&
+        error.details !== null &&
+        (error.details as { status?: unknown }).status === 409,
+    );
+    assert.equal(edge.consumers.size, 0, 'nothing was adopted or created');
+  });
+
   it('does not scan or create after a failed direct identity lookup', async () => {
     edge.queueFailure(503, { error: 'unavailable' }, '/consumers/', 'GET');
     await assert.rejects(() => client.consumers.ensure({ username: 'nexus-user-direct' }));

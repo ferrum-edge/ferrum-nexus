@@ -713,6 +713,85 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     }
   });
 
+  it('refuses a conversion over a palette config carrying a key the portal does not write', async () => {
+    // Edge accepts any key on a disabled config, so a config edited by hand
+    // (or one a newer Edge retired a key from) can sit on a serving API. The
+    // conversion must refuse before recording anything, naming the plugin,
+    // and the API must keep serving.
+    const client = await newClient();
+    const api = await publishApi(provider, {
+      name: `E2E undeclared key ${RUN}`,
+      slug: `e2e-undeclared-key-${RUN}`,
+      authPlugin: 'key_auth',
+    });
+    await grantAccess(client, provider, api.id);
+    const credential = await issueCredential(client, 'keyauth');
+    const headers = authHeadersFor(credential, 'keyauth');
+    const allow = ['203.0.113.0/24'];
+    await portal('PUT', `/api/apis/${api.id}/plugins/ip_restriction`, {
+      session: provider,
+      body: { enabled: false, config: { allow } },
+    });
+    const stored = await portal<{ api: { ferrum_proxy_id: string } }>(
+      'GET',
+      `/api/apis/${api.id}`,
+      { session: provider },
+    );
+    const proxyId = stored.api.ferrum_proxy_id;
+    const listed = await gatewayAdmin(
+      'GET',
+      `/plugins/config?proxy_id=${encodeURIComponent(proxyId)}&limit=100`,
+    );
+    assert.equal(listed.status, 200);
+    const configs = (await listed.json()) as {
+      data: { id: string; plugin_name: string; enabled: boolean; config: object }[];
+    };
+    const restriction = configs.data.find((entry) => entry.plugin_name === 'ip_restriction');
+    assert.ok(restriction, 'the disabled ip_restriction is on the gateway');
+    const expected = `expected_proxy_ids=${encodeURIComponent(proxyId)}`;
+    const edited = await gatewayAdmin('PUT', `/plugins/config/${restriction.id}?${expected}`, {
+      plugin_name: 'ip_restriction',
+      scope: 'proxy',
+      proxy_id: proxyId,
+      enabled: false,
+      config: { allow, mode: 'allow_first' },
+    });
+    assert.equal(edited.status, 200, await edited.text());
+
+    const refused = await portal<{
+      error: { code: string; details: { kind: string; plugin_name: string; keys: string[] } };
+    }>('PATCH', `/api/apis/${api.id}`, {
+      session: provider,
+      body: { spec_enforcement: 'routes' },
+      expect: 409,
+    });
+    assert.equal(refused.error.code, 'CONFLICT');
+    assert.equal(refused.error.details.kind, 'palette_config_undeclared_keys');
+    assert.equal(refused.error.details.plugin_name, 'ip_restriction');
+    assert.deepEqual(refused.error.details.keys, ['mode']);
+    const after = await portal<{ api: { gateway_state: string; spec_enforcement: string } }>(
+      'GET',
+      `/api/apis/${api.id}`,
+      { session: provider },
+    );
+    assert.equal(after.api.gateway_state, 'deployed', 'the serving API is not marked for repair');
+    assert.equal(after.api.spec_enforcement, 'docs_only');
+    await waitFor(`${api.listen_path} to keep serving`, async () => {
+      const response = await callGateway(`${api.listen_path}/invoices`, { headers });
+      return response.status === 200;
+    });
+
+    // Saving the plugin again writes exactly its declared keys; then it converts.
+    await portal('PUT', `/api/apis/${api.id}/plugins/ip_restriction`, {
+      session: provider,
+      body: { enabled: false, config: { allow } },
+    });
+    await portal('PATCH', `/api/apis/${api.id}`, {
+      session: provider,
+      body: { spec_enforcement: 'routes' },
+    });
+  });
+
   /* ── Agent tools, through the same consumer authorization ────────────── */
 
   interface ToolResult {

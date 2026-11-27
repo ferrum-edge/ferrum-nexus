@@ -3720,29 +3720,6 @@ class SqliteStore implements NexusStore {
       return job;
     },
 
-    enqueueIfAbsent: async (input, now) =>
-      execute(
-        this.db,
-        `INSERT INTO access_gateway_jobs
-           (id, generation, kind, subject_id, api_id, user_id, application_id, requested_by,
-            status, attempts, next_attempt_at, last_error, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)
-         ON CONFLICT (subject_id) DO NOTHING`,
-        [
-          newId(),
-          newId(),
-          input.kind,
-          input.subject_id,
-          input.api_id,
-          input.user_id,
-          input.application_id,
-          input.requested_by,
-          now,
-          now,
-          now,
-        ],
-      ) > 0,
-
     findBySubject: async (subjectId) => {
       const row = queryOne(this.db, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
         subjectId,
@@ -3878,21 +3855,6 @@ class SqliteStore implements NexusStore {
       const created = await this.settings.get(key);
       if (!created) throw new Error('settings.set: row vanished immediately after upsert');
       return created;
-    },
-
-    insertIfAbsent: async (key, value, encrypted = false) => {
-      const at = nowIso();
-      // `ON CONFLICT DO NOTHING` reports 0 changed rows when the key is taken,
-      // which is the whole answer — no read, no transaction.
-      return (
-        execute(
-          this.db,
-          `INSERT INTO app_settings (key, value_json, encrypted, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT (key) DO NOTHING`,
-          [key, JSON.stringify(value ?? null), encodeBool(encrypted), at, at],
-        ) > 0
-      );
     },
 
     setMany: async (entries) => {

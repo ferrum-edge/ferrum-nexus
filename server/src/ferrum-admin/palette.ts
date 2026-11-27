@@ -1,4 +1,4 @@
-import type { ApiPluginTrigger } from '@ferrum-nexus/shared';
+import { declaredPaletteConfig, type ApiPluginTrigger } from '@ferrum-nexus/shared';
 
 import type { EdgeRateLimitSyncConfig } from '../config/index.js';
 import type {
@@ -123,18 +123,21 @@ export function edgeTriggerFor(trigger: ApiPluginTrigger | null): EdgePluginTrig
  * Only `request_deduplication` differs from what the provider saved: its
  * dedupe window has to be shared across replicas or two Nexus instances
  * deduplicate against two different memories, so an operator-configured Redis
- * endpoint is folded in here rather than being stored on the row. Every other
- * plugin is written as the provider configured it.
+ * endpoint is folded in here rather than being stored on the row. Every
+ * plugin is written with exactly the keys its descriptor declares: a key the
+ * descriptor dropped because Edge retired it is never written back from a
+ * stored row, so a rebuild or restore keeps working on that Edge (issue #727).
  */
 export function paletteGatewaySettings(
   pluginName: string,
   saved: Record<string, unknown>,
   sync: EdgeRateLimitSyncConfig,
 ): EdgePluginSettings {
-  if (pluginName !== 'request_deduplication') return saved;
-  if (sync.syncMode !== 'redis' || sync.redisUrl === undefined) return saved;
+  const settings = declaredPaletteConfig(pluginName, saved);
+  if (pluginName !== 'request_deduplication') return settings;
+  if (sync.syncMode !== 'redis' || sync.redisUrl === undefined) return settings;
   return {
-    ...saved,
+    ...settings,
     sync_mode: 'redis',
     redis_url: sync.redisUrl,
     redis_tls: sync.redisTls,

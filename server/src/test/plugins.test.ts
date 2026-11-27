@@ -42,6 +42,7 @@ const DOES_NOT_ACCEPT_EXECUTION = /does not accept an execution trigger/;
 const VALIDATION_FAILED_CODE = /VALIDATION_FAILED/;
 const CORRELATION_ID_CONFIGURATION_NOT = /Correlation ID configuration is not valid/i;
 const ACL_GROUPS_CAP = /acl_groups must not have more than 500 entries \(got 501\)/;
+const CARRIES_UNWRITTEN = /ip_restriction plugin on the gateway carries settings .* \(mode\)/;
 const AI_AGENTS = /AI agents/;
 const GATEWAY_OPERATOR = /gateway operator/;
 
@@ -51,6 +52,10 @@ function errorCode(body: string): string {
 
 function errorMessage(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.message;
+}
+
+function errorDetails(body: string): unknown {
+  return (JSON.parse(body) as ApiErrorBody).error.details;
 }
 
 /** The plugin names Edge would actually run for a proxy, sorted. */
@@ -282,6 +287,52 @@ describe('provider plugin palette', () => {
           .some((request) => request.method !== 'GET' && request.path.startsWith('/plugins')),
         false,
       );
+    });
+
+    // Review of #767, F1: Edge accepts any key on a disabled config, so a
+    // live config can carry a key the portal does not write (edited by hand,
+    // or retired by a newer Edge). A conversion replays live configs verbatim,
+    // so it is refused before any intent is recorded, naming the plugin.
+    it('refuses a conversion while a live palette config carries a key the portal does not write', async () => {
+      const allow = ['203.0.113.0/24'];
+      const saved = await setPlugin('ip_restriction', { enabled: false, config: { allow } });
+      assert.equal(saved.statusCode, 200, saved.body);
+      const configId = String(edgeConfig('ip_restriction').id);
+      storedConfig(configId).config = { allow, mode: 'allow_first' };
+
+      const before = harness.edge.requests.length;
+      const refused = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.match(errorMessage(refused.body), CARRIES_UNWRITTEN);
+      assert.deepEqual(errorDetails(refused.body), {
+        kind: 'palette_config_undeclared_keys',
+        plugin_name: 'ip_restriction',
+        plugin_config_id: configId,
+        keys: ['mode'],
+      });
+      assert.equal(
+        harness.edge.requests.slice(before).some((request) => request.method !== 'GET'),
+        false,
+        'nothing was written to the gateway',
+      );
+      const api = await harness.store.apis.findById(apiId);
+      assert.equal(api?.gateway_state, 'deployed', 'the serving API is not marked for repair');
+      assert.equal(await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`), null);
+
+      // Saving the plugin again writes exactly its declared keys.
+      const resaved = await setPlugin('ip_restriction', { enabled: false, config: { allow } });
+      assert.equal(resaved.statusCode, 200, resaved.body);
+      assert.deepEqual(edgeConfig('ip_restriction').config, { allow });
+      const converted = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(converted.statusCode, 200, converted.body);
     });
 
     it('bot_detection: patterns, allow list, missing-UA policy and status', async () => {

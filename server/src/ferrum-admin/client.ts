@@ -109,6 +109,7 @@ import { consumerMetadataCredentials } from './consumer-metadata.js';
 import {
   assertDeploymentApplied,
   assertDeploymentEvidence,
+  checkRetainedAuthority,
   deploymentTarget,
   isDeploymentAcknowledgement,
   isDeploymentNonCommit,
@@ -2013,7 +2014,7 @@ export function createFerrumAdminClient(
     id: string,
     original: EdgeDeploymentSnapshot,
   ): Promise<void> {
-    assertDeploymentEvidence(original, namespace);
+    checkRetainedAuthority(() => assertDeploymentEvidence(original, namespace));
     if (!isDeploymentTag(original.namespace_etag)) {
       throw edgeError('Original deployment-v1 authority is required');
     }

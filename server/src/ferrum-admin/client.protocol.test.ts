@@ -981,9 +981,14 @@ describe('released deployment authority over HTTP sockets', () => {
     const { client, reply, requests } = await fixture(t);
     reply.policyForDeployment = true;
     const legacy = fixtureSnapshot('v1');
+    // A v2 envelope whose evidence is incomplete is refused the same way.
+    const incomplete = fixtureSnapshot('v2');
+    (incomplete.evidence as unknown as Record<string, unknown>).resources = 'not evidence';
     for (const attempt of [
       () => client.deployments.prepare('remove', 'proxy-1', legacy),
       () => client.deployments.remove('proxy-1', legacy),
+      () => client.deployments.prepare('remove', 'proxy-1', incomplete),
+      () => client.deployments.remove('proxy-1', incomplete),
     ]) {
       await assert.rejects(attempt(), (error: unknown) => {
         assert.ok(isNexusError(error));

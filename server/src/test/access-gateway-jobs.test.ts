@@ -37,7 +37,7 @@ import {
   type AccessGatewayWorker,
 } from '../access/gateway-job-worker.js';
 import { canonicalConsumerLockKey } from '../credentials/consumers.js';
-import type { NexusStore } from '../db/store.js';
+import type { AccessGatewayJobInput, NexusStore } from '../db/store.js';
 import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { crashingStore, type CrashingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -93,6 +93,16 @@ function testClock(): { now(): Date; advance(ms: number): void } {
       ms += delta;
     },
   };
+}
+
+/**
+ * Leave a decision's gateway job pending and due, the way an interrupted
+ * attempt does: the live claim, then the reschedule that hands it back.
+ */
+async function queueInterruptedJob(store: NexusStore, input: AccessGatewayJobInput): Promise<void> {
+  const now = new Date().toISOString();
+  const claimed = await store.accessGatewayJobs.upsertClaimed(input, now);
+  assert.ok(await store.accessGatewayJobs.reschedule(claimed, now, 'interrupted'));
 }
 
 describe('access gateway jobs survive a crash between the claim and the Edge write', () => {
@@ -991,17 +1001,14 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     consumer.acl_groups = consumer.acl_groups.filter((group) => group !== removeGroup);
     // Recovery of an interrupted decision for this identity sets the groups
     // to the grant's current subset.
-    await database.accessGatewayJobs.enqueueIfAbsent(
-      {
-        kind: 'approve',
-        subject_id: f.requestId,
-        api_id: f.api.id,
-        user_id: f.client.user.id,
-        application_id: null,
-        requested_by: provider.user.id,
-      },
-      new Date().toISOString(),
-    );
+    await queueInterruptedJob(database, {
+      kind: 'approve',
+      subject_id: f.requestId,
+      api_id: f.api.id,
+      user_id: f.client.user.id,
+      application_id: null,
+      requested_by: provider.user.id,
+    });
     const tick = await worker(testClock()).tick();
     assert.equal(tick.completed, 1);
     assert.ok(groupsOf(f.client.user.id).includes(removeGroup), 'the covered tool is back');
@@ -1018,17 +1025,14 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     assert.deepEqual(groupsOf(client.user.id).sort(), [apiId, otherApi].map(aclGroupForApi).sort());
     // The API is still recorded under a namespace the portal has since left.
     await database.apis.update(apiId, { namespace: 'retired-namespace' });
-    await database.accessGatewayJobs.enqueueIfAbsent(
-      {
-        kind: 'approve',
-        subject_id: requestId,
-        api_id: apiId,
-        user_id: client.user.id,
-        application_id: null,
-        requested_by: provider.user.id,
-      },
-      new Date().toISOString(),
-    );
+    await queueInterruptedJob(database, {
+      kind: 'approve',
+      subject_id: requestId,
+      api_id: apiId,
+      user_id: client.user.id,
+      application_id: null,
+      requested_by: provider.user.id,
+    });
     const tick = await worker(testClock()).tick();
     assert.equal(tick.completed, 1);
     // Per-API: only the foreign API's group comes off; the other grant's stays.

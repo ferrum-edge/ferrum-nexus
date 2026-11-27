@@ -4667,57 +4667,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.accessGatewayJobs.findBySubject(subject), null);
     });
 
-    it('accessGatewayJobs: enqueueIfAbsent inserts a due pending row once and never re-owns one', async () => {
-      const grantee = await makeUser();
-      const input = {
-        kind: 'approve' as const,
-        subject_id: newId(),
-        api_id: newId(),
-        user_id: grantee.id,
-        application_id: null,
-        requested_by: null,
-      };
-      const due = nowIso();
-      assert.equal(await store.accessGatewayJobs.enqueueIfAbsent(input, due), true);
-      const queued = await store.accessGatewayJobs.findBySubject(input.subject_id);
-      assert.ok(queued);
-      assert.equal(queued.kind, 'approve');
-      assert.equal(queued.status, 'pending');
-      assert.equal(queued.attempts, 0);
-      assert.equal(queued.next_attempt_at, due);
-      assert.equal(queued.last_error, null);
-      const claimable = await store.accessGatewayJobs.claimDue(nowIso(), 50);
-      const mine = claimable.find((row) => row.subject_id === input.subject_id);
-      assert.ok(mine, 'the queued row is due at once');
-      assert.equal(await store.accessGatewayJobs.reschedule(mine, due, 'back to pending'), true);
-      const before = await store.accessGatewayJobs.findBySubject(input.subject_id);
-      assert.ok(before);
-
-      // A second call, and one for a row a live decision owns, leave it exactly as it is.
-      assert.equal(
-        await store.accessGatewayJobs.enqueueIfAbsent({ ...input, kind: 'revoke' }, nowIso()),
-        false,
-      );
-      assert.deepEqual(await store.accessGatewayJobs.findBySubject(input.subject_id), before);
-      const owned = await store.accessGatewayJobs.upsertClaimed(
-        { ...input, subject_id: newId() },
-        nowIso(),
-      );
-      assert.equal(
-        await store.accessGatewayJobs.enqueueIfAbsent(
-          { ...input, subject_id: owned.subject_id },
-          nowIso(),
-        ),
-        false,
-      );
-      const untouched = await store.accessGatewayJobs.findBySubject(owned.subject_id);
-      assert.equal(untouched?.id, owned.id);
-      assert.equal(untouched?.generation, owned.generation);
-      assert.equal(untouched?.status, 'sending');
-      await store.accessGatewayJobs.deleteBySubject(input.subject_id);
-      await store.accessGatewayJobs.deleteBySubject(owned.subject_id);
-    });
-
     it('stores spec metadata and audit details as large as the API accepts (#604, #605)', async () => {
       // MySQL held these in VARCHAR(255), VARCHAR(64) and TEXT (65,535 bytes),
       // narrower than what the parser and the agents schema accept; strict
@@ -5014,45 +4963,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.settings.delete(plainKey), true);
       assert.equal(await store.settings.delete(plainKey), false);
       assert.equal(await store.settings.get(plainKey), null);
-    });
-
-    it('settings: exactly one concurrent insertIfAbsent wins the key', async () => {
-      const key = `bootstrap-claim-${newId().slice(0, 8)}`;
-
-      // Six callers race for the same key with nothing serialising them. The
-      // unique constraint on `app_settings.key` is the only arbiter, which is
-      // the property the super_admin election depends on — a transaction is
-      // not enough, because two of them can both observe "absent".
-      const results = await Promise.all(
-        Array.from({ length: 6 }, (_unused, index) =>
-          store.settings.insertIfAbsent(key, { winner: index }),
-        ),
-      );
-      assert.equal(
-        results.filter(Boolean).length,
-        1,
-        `expected exactly one winner, got ${results.filter(Boolean).join(', ')}`,
-      );
-
-      const stored = await store.settings.get(key);
-      const winner = results.indexOf(true);
-      assert.deepEqual(stored?.value, { winner }, 'the winner’s value is the one stored');
-      assert.equal(stored?.encrypted, false);
-
-      // A later call never overwrites, and never throws.
-      assert.equal(await store.settings.insertIfAbsent(key, { winner: 99 }), false);
-      assert.deepEqual((await store.settings.get(key))?.value, { winner });
-
-      // The encrypted flag is honoured on the insert that wins.
-      const secretKey = `claim-secret-${newId().slice(0, 8)}`;
-      assert.equal(await store.settings.insertIfAbsent(secretKey, 'v1:aa:bb:cc', true), true);
-      assert.equal((await store.settings.get(secretKey))?.encrypted, true);
-
-      // …and a key `set` created first is respected, too.
-      const takenKey = `claim-taken-${newId().slice(0, 8)}`;
-      await store.settings.set(takenKey, { from: 'set' });
-      assert.equal(await store.settings.insertIfAbsent(takenKey, { from: 'claim' }), false);
-      assert.deepEqual((await store.settings.get(takenKey))?.value, { from: 'set' });
     });
 
     /* ── email templates ──────────────────────────────────────────────── */

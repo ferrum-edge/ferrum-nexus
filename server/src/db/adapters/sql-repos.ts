@@ -3638,44 +3638,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         return mapAccessGatewayJob(row);
       }),
 
-    enqueueIfAbsent: async (input, now) =>
-      inTransaction(async (tx) => {
-        // Yield to an existing row instead of failing on it: a failed INSERT
-        // aborts a PostgreSQL transaction outright. MySQL spells the no-op
-        // `ON DUPLICATE KEY UPDATE id = id`, not `INSERT IGNORE` (which would
-        // downgrade a NOT NULL or CHECK violation to a warning), and its
-        // affected-row count cannot say which way that went, so the id of the
-        // row that now holds the subject does.
-        const id = newId();
-        const insertSql = `INSERT INTO access_gateway_jobs
-           (id, generation, kind, subject_id, api_id, user_id, application_id, requested_by,
-            status, attempts, next_attempt_at, last_error, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)`;
-        await execute(
-          tx,
-          dialect === 'pg'
-            ? `${insertSql} ON CONFLICT (subject_id) DO NOTHING`
-            : `${insertSql} ON DUPLICATE KEY UPDATE id = id`,
-          [
-            id,
-            newId(),
-            input.kind,
-            input.subject_id,
-            input.api_id,
-            input.user_id,
-            input.application_id,
-            input.requested_by,
-            now,
-            now,
-            now,
-          ],
-        );
-        const row = await queryOne(tx, 'SELECT id FROM access_gateway_jobs WHERE subject_id = ?', [
-          input.subject_id,
-        ]);
-        return row !== undefined && text(row.id) === id;
-      }),
-
     findBySubject: async (subjectId) => {
       const row = await queryOne(exec, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
         subjectId,
@@ -3801,15 +3763,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     ['value_json', 'encrypted', 'updated_at'],
   );
 
-  // "Insert unless the key is taken", spelled for each server. Both report 0
-  // affected rows when the row already existed, which is the return value.
-  const SETTINGS_INSERT_IF_ABSENT =
-    dialect === 'pg'
-      ? `INSERT INTO app_settings ("key", value_json, encrypted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?) ON CONFLICT ("key") DO NOTHING`
-      : `INSERT IGNORE INTO app_settings ("key", value_json, encrypted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)`;
-
   const settings: SettingRepo = {
     get: async (key) => {
       const row = await queryOne(exec, 'SELECT * FROM app_settings WHERE "key" = ?', [key]);
@@ -3828,18 +3781,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       const stored = await settings.get(key);
       if (!stored) throw new Error('settings.set: row vanished immediately after upsert');
       return stored;
-    },
-
-    insertIfAbsent: async (key, value, encrypted = false) => {
-      const at = nowIso();
-      const affected = await execute(exec, SETTINGS_INSERT_IF_ABSENT, [
-        key,
-        JSON.stringify(value ?? null),
-        encodeBool(encrypted),
-        at,
-        at,
-      ]);
-      return affected > 0;
     },
 
     setMany: async (entries) => {

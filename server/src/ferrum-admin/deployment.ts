@@ -106,6 +106,22 @@ export function invalidDeploymentAuthority(): NexusError {
 }
 
 /**
+ * Run the checks of **retained** authority (a recovery journal's, or one a
+ * caller hands back for a conditional mutation): any failure is
+ * {@link invalidDeploymentAuthority}, so an incomplete envelope, evidence or
+ * stored content is one typed refusal before anything is sent. A snapshot Edge
+ * just answered is checked without this, so a malformed live response stays a
+ * gateway protocol error.
+ */
+export function checkRetainedAuthority<T>(check: () => T): T {
+  try {
+    return check();
+  } catch {
+    throw invalidDeploymentAuthority();
+  }
+}
+
+/**
  * An acknowledgement that proves the mutation was never committed: `durable`
  * `not_started` (refused before the mutation transaction opened) or
  * `not_committed` (raised inside it, rolled back). Edge v0.9.14 also reports a

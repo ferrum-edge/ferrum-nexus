@@ -295,6 +295,39 @@ describe('restoring a missing gateway deployment', () => {
     assert.equal(live?.id, afterRow.ferrum_plugin_config_id);
   });
 
+  // Review of #767, F1: a palette row an older release saved can carry a key
+  // the adopted Edge no longer accepts on an enabled config. The restore
+  // writes exactly the keys the palette declares, so the retired key cannot
+  // fail the rebuild of a published API.
+  it('restores a palette row carrying a key the palette no longer declares', async () => {
+    const allow = ['203.0.113.0/24'];
+    const saved = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/plugins/ip_restriction`,
+      payload: { enabled: true, config: { allow } },
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
+    const row = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
+    assert.ok(row);
+    await harness.store.apiPlugins.upsert({
+      api_id: apiId,
+      plugin_name: 'ip_restriction',
+      enabled: true,
+      config: { allow, mode: 'allow_first' },
+      trigger: row.trigger,
+      ferrum_plugin_config_id: row.ferrum_plugin_config_id,
+    });
+
+    deleteProxyOnly(originalProxyId);
+    await reconcileAndRepair();
+    const response = await restore(provider, apiId);
+    assert.equal(response.statusCode, 200, response.body);
+    const proxyId = response.json<RestoreApiGatewayResponse>().proxy_id;
+    const live = harness.edge.pluginForProxy(proxyId, 'ip_restriction', NAMESPACE);
+    assert.equal(live?.enabled, true);
+    assert.deepEqual(live?.config, { allow });
+  });
+
   it('leaves a truthful repair state when the rebuild fails, and retries cleanly', async () => {
     deleteProxyOnly(originalProxyId);
     await reconcileAndRepair();

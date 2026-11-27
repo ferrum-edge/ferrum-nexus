@@ -210,6 +210,7 @@ import {
   listenPathFor,
   roleAtLeast,
   testConsumerUsername,
+  undeclaredPaletteKeys,
   type AccessDisruptionDetails,
   type Api,
   type ApiAgents,
@@ -285,6 +286,7 @@ import {
   deploymentSpecDocument,
   deploymentTarget,
   isDeploymentSnapshot,
+  checkRetainedAuthority,
   invalidDeploymentAuthority,
 } from '../ferrum-admin/deployment.js';
 import {
@@ -1575,10 +1577,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   async function assertDeletionCustody(tx: NexusStore, api: ApiRecord): Promise<void> {
     const record = (value: unknown): value is Record<string, unknown> =>
       typeof value === 'object' && value !== null && !Array.isArray(value);
+    // Another namespace's authority belongs to another deployment; an
+    // incomplete one of this namespace is the typed invalid-authority refusal.
     const authority = (value: unknown): value is EdgeDeploymentSnapshot => {
-      if (!isDeploymentSnapshot(value) || value.namespace !== namespace) return false;
-      assertDeploymentEvidence(value, namespace);
-      return true;
+      if (!record(value) || value.namespace !== namespace) return false;
+      return checkRetainedAuthority(() => {
+        if (!isDeploymentSnapshot(value)) throw invalidDeploymentAuthority();
+        assertDeploymentEvidence(value, namespace);
+        return true;
+      });
     };
     const conversionRow = await tx.settings.get(recoveryKey(api.id));
     const recovery = await readRecoveryJournal<unknown>(tx, deps.crypto, recoveryKey(api.id));
@@ -1747,7 +1754,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // Refuse anything but complete authority here, before any comparison could
     // lead to a request or a fresh-token retry.
     if (!isDeploymentSnapshot(original)) throw invalidDeploymentAuthority();
-    const target = deploymentTarget(original, expected.proxy.id);
+    const target = checkRetainedAuthority(() => deploymentTarget(original, expected.proxy.id));
     const sorted = (plugins: EdgePluginConfig[]): EdgePluginConfig[] =>
       [...plugins].sort((left, right) => left.id.localeCompare(right.id));
     if (
@@ -1757,7 +1764,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       ) ||
       !isDeepStrictEqual(sorted(target.plugins), sorted(expected.plugins)) ||
       !isDeepStrictEqual(
-        target.spec ? deploymentSpecDocument(original, target.spec) : null,
+        target.spec
+          ? checkRetainedAuthority(() => deploymentSpecDocument(original, target.spec!))
+          : null,
         expected.document,
       )
     ) {
@@ -3626,6 +3635,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         if (nextAgents && (agentsMoved || enforcementMoved) && proxyId) {
           await assertAgentsCompose(proxyId);
         }
+        // A conversion replays the live palette configs exactly (its recovery
+        // compares them), so one carrying a key the portal does not write is
+        // refused here, before any intent is recorded or the API marked for
+        // repair, naming the plugin to save again (issue #727).
+        if (enforcementMoved && proxyId) {
+          await assertPaletteConfigsWritable(api, plugins);
+        }
         // ── Which first-class configs are the portal's to change ──────────
         //
         // By recorded id, never by plugin name — see `firstClassOwnership`.
@@ -5464,7 +5480,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 }
               }
               if (target.spec) {
-                const document = deploymentSpecDocument(original, target.spec);
+                const spec = target.spec;
+                const document = checkRetainedAuthority(() =>
+                  deploymentSpecDocument(original, spec),
+                );
                 if (
                   !attemptedSpecDocument ||
                   !isDeepStrictEqual(document, attemptedSpecDocument) ||
@@ -6356,6 +6375,42 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         plugin_config_id: deduplication.id,
       },
     );
+  }
+
+  /**
+   * Refuse a conversion while a palette config the API owns carries a key the
+   * portal does not write: one edited on the gateway by hand, or one a newer
+   * Edge retired after an earlier release wrote it. Edge accepts any key on a
+   * disabled config, so such a config can be live and serving. A conversion
+   * rebuilds the proxy from the live configs verbatim, so it would write the
+   * key back and fail part way; saving the plugin again in the portal writes
+   * exactly its declared keys.
+   */
+  async function assertPaletteConfigsWritable(
+    api: ApiRecord,
+    onProxy: EdgePluginConfig[],
+  ): Promise<void> {
+    for (const row of await store.apiPlugins.listByApi(api.id)) {
+      const live = onProxy.find((plugin) => plugin.id === row.ferrum_plugin_config_id);
+      if (!live || live.config === null) continue;
+      const written = new Set(
+        Object.keys(paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit)),
+      );
+      const undeclared = undeclaredPaletteKeys(row.plugin_name, live.config).filter(
+        (key) => !written.has(key),
+      );
+      if (undeclared.length === 0) continue;
+      throw conflict(
+        `This API's ${row.plugin_name} plugin on the gateway carries settings the portal does ` +
+          `not write (${undeclared.join(', ')}); save that plugin again, then convert`,
+        {
+          kind: 'palette_config_undeclared_keys',
+          plugin_name: row.plugin_name,
+          plugin_config_id: live.id,
+          keys: undeclared,
+        },
+      );
+    }
   }
 
   /**
