@@ -2726,8 +2726,10 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const proxy = await gatewayAdmin('POST', '/proxies', probeProxy);
     assert.equal(proxy.status, 201, messagesOf(await adminBody(proxy)));
     // Edge admits one enabled global `prometheus_metrics` and refuses a second
-    // before reading its config, so when the stack already runs one the probe
-    // is a replace of that config, which the probe key makes Edge refuse too.
+    // before reading its config. The portal creates one at startup
+    // (`ensureMetricsConfig`), so the probe is a replace of that config, which
+    // the probe key makes Edge refuse too. `PUT` and `DELETE` of a plugin
+    // config need `expected_proxy_ids`: a global config expects none.
     const listed = await gatewayAdmin('GET', `/plugins/config?limit=${EDGE_MAX_PAGE_SIZE}`);
     assert.equal(listed.status, 200);
     const configs = ((await listed.json()) as { data: EdgePluginRow[] }).data;
@@ -2739,7 +2741,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       for (const [pluginName, keys] of Object.entries(PLUGIN_CONFIG_ALLOWED_KEYS)) {
         const global = pluginName === 'prometheus_metrics';
         const replace = global && metricsOwner !== undefined;
-        const target = replace ? `/plugins/config/${encodeURIComponent(metricsOwner.id)}` : '';
+        const target = replace ? `/${encodeURIComponent(metricsOwner.id)}?expected_proxy_ids=` : '';
         const response = await gatewayAdmin(replace ? 'PUT' : 'POST', `/plugins/config${target}`, {
           plugin_name: pluginName,
           scope: global ? 'global' : 'proxy',
@@ -2756,7 +2758,11 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         if (response.status < 300 && !replace) {
           const id = (body as { id?: unknown }).id;
           if (typeof id === 'string') {
-            await gatewayAdmin('DELETE', `/plugins/config/${encodeURIComponent(id)}`);
+            const expected = global ? '' : encodeURIComponent(probeProxy.id);
+            await gatewayAdmin(
+              'DELETE',
+              `/plugins/config/${encodeURIComponent(id)}?expected_proxy_ids=${expected}`,
+            );
           }
         }
         const refused = unknownKeysNamed(messagesOf(body));
