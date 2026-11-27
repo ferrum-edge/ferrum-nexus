@@ -78,7 +78,7 @@ import {
   userLifecycleLockKey,
   userMailHandoffLockKey,
 } from '../lib/keyed-serializer.js';
-import { openOutboxRecord, sealLegacyBearerRows, type MailContent } from './sealed-outbox.js';
+import { openOutboxRecord, type MailContent } from './sealed-outbox.js';
 import {
   isDeliveredUnacknowledged,
   SMTP_SEND_BUDGET_MS,
@@ -161,8 +161,6 @@ export interface OutboxTickResult {
   lost: number;
   /** Rows whose handling threw; recovered by a later tick's stale sweep. */
   abandoned: number;
-  /** Bearer rows written before sealing existed, sealed in place by this tick. */
-  sealedLegacy: number;
   /** True when the tick delivered nothing because SMTP is not configured. */
   skipped: boolean;
 }
@@ -176,7 +174,7 @@ interface Authorized {
   authorized: Authorization;
 }
 
-const EMPTY_TICK: Omit<OutboxTickResult, 'released' | 'sealedLegacy'> = {
+const EMPTY_TICK: Omit<OutboxTickResult, 'released'> = {
   claimed: 0,
   sent: 0,
   rescheduled: 0,
@@ -246,9 +244,6 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
   // Set by `stop()` so an in-flight batch ends after the delivery it is on
   // instead of claiming the rest of its batch while shutdown waits (#334).
   let stopping = false;
-  // Cleared once a sweep finds no unsealed bearer row left, after which no
-  // tick looks again: every row written since is sealed at enqueue.
-  let legacyRowsMayRemain = true;
 
   async function deliver(
     transport: MailTransport,
@@ -412,28 +407,6 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
   }
 
   /**
-   * Seal a bounded batch of bearer rows written before sealing existed.
-   *
-   * Like the stale sweep it runs before the SMTP check, so a portal with no
-   * relay configured still stops holding readable links. A failure is logged
-   * and retried next tick; it never stops this one from delivering.
-   */
-  async function sealLegacy(result: OutboxTickResult): Promise<void> {
-    if (!legacyRowsMayRemain) return;
-    try {
-      const swept = await sealLegacyBearerRows(store, crypto);
-      result.sealedLegacy = swept.sealed;
-      legacyRowsMayRemain = swept.more;
-      if (swept.sealed > 0) log({ sealed: swept.sealed }, 'Sealed legacy outbox messages');
-    } catch (error) {
-      log(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Could not seal legacy outbox messages',
-      );
-    }
-  }
-
-  /**
    * Record a settling write that was refused because the claim moved on, or
    * (`authorize`) a claim found gone before SMTP was contacted.
    *
@@ -521,7 +494,6 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
       unacknowledged: 0,
       lost: 0,
       abandoned: 0,
-      sealedLegacy: 0,
       skipped: false,
     };
     try {
@@ -533,13 +505,12 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
         'Could not release stale outbox claims',
       );
     }
-    await sealLegacy(result);
 
     let transport: MailTransport | null = null;
     try {
       transport = await transportFactory();
       if (!transport) {
-        return { ...EMPTY_TICK, released: result.released, sealedLegacy: result.sealedLegacy };
+        return { ...EMPTY_TICK, released: result.released };
       }
 
       // Claimed one at a time rather than as a batch: the last row of a batch

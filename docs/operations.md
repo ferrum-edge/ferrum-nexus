@@ -2576,36 +2576,10 @@ bodies. The key is derived from `NEXUS_SECRET_KEY` (HKDF info
 The worker opens it immediately before handing the message to SMTP. Other mail
 (access decisions, messaging notifications, mass email) is stored as rendered.
 
-Rows queued unsealed by an earlier version are sealed in place by the worker,
-in every status, up to 200 per tick, and it stops looking once none are left.
-It logs `Sealed legacy outbox messages` with a `sealed` count while it does.
-Since `v0.6.0` a database an earlier release created is refused rather than
-upgraded ([schema and upgrades](#schema-and-upgrades)),
-so on a database created at the base schema there is nothing to seal, and
-downgrading means restoring a backup. The rest of this paragraph applies only
-to an older deployment that still runs a pre-sealing instance beside a sealing
-one. An earlier version cannot open a sealed row. If a pre-fix instance claims
-one, it emails ciphertext and burns the link. Before downgrading such a
-deployment, fail every queued sealed row so an older worker cannot claim it:
-
-```sql
-UPDATE email_outbox
-SET status = 'failed', last_error = 'sealed-unreadable: downgrade'
-WHERE subject = 'nexus:sealed:v1' AND status IN ('pending', 'sending');
-```
-
-For MongoDB, run the equivalent update on the `email_outbox` collection:
-
-```javascript
-db.email_outbox.updateMany(
-  { subject: 'nexus:sealed:v1', status: { $in: ['pending', 'sending'] } },
-  { $set: { status: 'failed', last_error: 'sealed-unreadable: downgrade' } },
-);
-```
-
-An older instance still writing during a mixed-version deployment can leave
-plaintext bearer rows; the next restart's legacy sweep seals them. Stop every
-instance before starting the replacement release to avoid both cases.
+Every release since `v0.6.0` seals these rows, and no release opens a database
+an earlier one created, so every bearer row Nexus can see is sealed. Downgrades
+are not supported: going back means restoring the pre-upgrade backup into the
+previous release ([upgrade failures and rollback](#upgrade-failures-and-rollback)).
 
 A `sending` row untouched for five minutes is assumed abandoned and returned to
 `pending`. This sweep runs at the start of every worker tick, on any instance.
@@ -2726,7 +2700,6 @@ The worker logs these at `warn`:
 - `Could not release stale outbox claims`
 - `Sealed outbox message could not be opened` (the row is failed as
   `sealed-unreadable:`)
-- `Could not seal legacy outbox messages` (retried on the next tick)
 - `Outbox tick failed`
 
 **Re-driving `failed` rows.** First exclude delivered-unacknowledged ones:

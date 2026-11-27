@@ -24,19 +24,13 @@ import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
 import {
   OUTBOX_PRIORITY,
   OUTBOX_SEALED_SUBJECT,
-  type EmailOutboxFilter,
   type EmailOutboxRecord,
   type NexusStore,
 } from '../db/store.js';
-import { createOutboxWorker, OUTBOX_SEALED_UNREADABLE } from '../email/outbox-worker.js';
-import {
-  openOutboxRecord,
-  SEALED_BODY_PREFIX,
-  sealedEnqueueInput,
-} from '../email/sealed-outbox.js';
+import { OUTBOX_SEALED_UNREADABLE } from '../email/outbox-worker.js';
+import { SEALED_BODY_PREFIX, sealedEnqueueInput } from '../email/sealed-outbox.js';
 import { createCrypto } from '../lib/crypto.js';
-import { newId } from '../lib/ids.js';
-import { buildTestApp, createTestMailbox, TEST_PASSWORD, type TestApp } from './helpers.js';
+import { buildTestApp, TEST_PASSWORD, type TestApp } from './helpers.js';
 
 const RESET_TOKEN_LINK = /\/reset-password\?token=([A-Za-z0-9_-]+)/;
 const VERIFY_TOKEN_LINK = /\/verify-email\?token=([A-Za-z0-9_-]+)/;
@@ -46,9 +40,6 @@ const NEW_PASSWORD = 'sealed-outbox-new-passphrase';
 
 /** A master key the portal is not running with — the one before a rotation. */
 const PREVIOUS_SECRET_KEY = 'a-previous-nexus-secret-key-0123456789abcdef';
-
-/** A `next_attempt_at` no tick reaches, for rows that must stay queued. */
-const NEVER = '2999-01-01T00:00:00.000Z';
 
 /** Every stored column that could carry a message's content. */
 function storedText(row: EmailOutboxRecord): string {
@@ -307,139 +298,5 @@ export function runSealedOutboxContract(
       assert.deepEqual(deliveredTo(bodyOnly.entry.to_email), [], 'no ciphertext was sent');
     });
 
-    it('seals bearer rows queued before sealing, in every status', async () => {
-      const link = `${harness.config.publicUrl}/reset-password?token=legacy-synthetic-link`;
-      const legacy = (email: string, key: string, nextAttemptAt?: string) =>
-        harness.store.emailOutbox.enqueue({
-          to_email: email,
-          subject: 'Reset your password',
-          body_html: `<p><a href="${link}">Reset</a></p>`,
-          body_text: `Reset: ${link}\n`,
-          idempotency_key: `${key}${newId()}`,
-          ...(nextAttemptAt === undefined ? {} : { next_attempt_at: nextAttemptAt }),
-        });
-
-      // Already delivered: its link can still be live, so it is sealed too.
-      const sentEmail = address('legacy-sent');
-      const sent = await legacy(sentEmail, 'verify:', '2000-01-01T00:00:00.000Z');
-      const [claim] = await harness.store.emailOutbox.claimDue(new Date().toISOString(), 1);
-      assert.ok(claim, 'the legacy row was claimed');
-      assert.equal(claim.id, sent.entry.id, 'the oldest due row is the legacy one');
-      assert.equal(await harness.store.emailOutbox.markSent(claim, new Date().toISOString()), true);
-      // Due now, and deliverable after sealing.
-      const dueEmail = address('legacy-due');
-      const due = await legacy(dueEmail, 'reset:');
-      // Not due for a long while.
-      const laterEmail = address('legacy-later');
-      const later = await legacy(laterEmail, 'reset:', NEVER);
-      // Positive control: a message without a link keeps its rendered content.
-      const plainEmail = address('legacy-plain');
-      const plain = await harness.store.emailOutbox.enqueue({
-        to_email: plainEmail,
-        subject: 'Maintenance tonight',
-        body_html: '<p>Maintenance tonight</p>',
-        body_text: 'Maintenance tonight\n',
-        idempotency_key: `mass:${newId()}`,
-      });
-
-      // A worker that has not swept yet, as after an upgrade.
-      const { mailbox, factory } = createTestMailbox();
-      const worker = createOutboxWorker({
-        store: harness.store,
-        crypto: harness.app.nexus.crypto,
-        transportFactory: factory,
-      });
-      let sealedLegacy = 0;
-      for (let round = 0; round < 50; round += 1) {
-        const tick = await worker.tick();
-        sealedLegacy += tick.sealedLegacy;
-        if (tick.claimed === 0 && tick.sealedLegacy === 0) break;
-      }
-      assert.ok(sealedLegacy >= 3, 'the legacy bearer rows were sealed');
-
-      for (const { entry } of [sent, due, later]) {
-        const row = await harness.store.emailOutbox.findById(entry.id);
-        assert.ok(row, 'the legacy row is still there');
-        assert.equal(row.subject, OUTBOX_SEALED_SUBJECT, 'the legacy row is sealed');
-        assert.ok(!storedText(row).includes('legacy-synthetic-link'), 'its link is stored nowhere');
-        assert.deepEqual(
-          openOutboxRecord(harness.app.nexus.crypto, row),
-          {
-            subject: 'Reset your password',
-            html: `<p><a href="${link}">Reset</a></p>`,
-            text: `Reset: ${link}\n`,
-          },
-          'sealing kept the message intact',
-        );
-      }
-      assert.equal((await harness.store.emailOutbox.findById(sent.entry.id))?.status, 'sent');
-      assert.equal((await harness.store.emailOutbox.findById(later.entry.id))?.status, 'pending');
-      assert.equal((await harness.store.emailOutbox.findById(due.entry.id))?.status, 'sent');
-
-      const sentTo = (email: string): number => mailbox.sent.filter((m) => m.to === email).length;
-      assert.equal(sentTo(sentEmail), 0, 'a sent row is not delivered again');
-      assert.equal(sentTo(laterEmail), 0, 'a row that is not due waits');
-      const [dueMail] = mailbox.sent.filter((mail) => mail.to === dueEmail);
-      assert.equal(dueMail?.text, `Reset: ${link}\n`, 'the due row was delivered as written');
-
-      const plainRow = await harness.store.emailOutbox.findById(plain.entry.id);
-      assert.equal(plainRow?.subject, 'Maintenance tonight', 'a linkless message is as written');
-      assert.equal(plainRow?.body_text, 'Maintenance tonight\n');
-      const [plainMail] = mailbox.sent.filter((mail) => mail.to === plainEmail);
-      assert.equal(plainMail?.subject, 'Maintenance tonight');
-    });
-
-    it('filters on key prefix and sealing, and seals a row only once', async () => {
-      const store = harness.store;
-      const email = address('store');
-      const { entry } = await store.emailOutbox.enqueue({
-        to_email: email,
-        subject: 'Plain',
-        body_html: '<p>p</p>',
-        body_text: 'p',
-        idempotency_key: `reset:${newId()}`,
-        next_attempt_at: NEVER,
-      });
-      const lookalike = await store.emailOutbox.enqueue({
-        to_email: email,
-        subject: 'Lookalike',
-        body_html: '<p>l</p>',
-        body_text: 'l',
-        idempotency_key: `pre-reset:${newId()}`,
-        next_attempt_at: NEVER,
-      });
-
-      async function ids(filter: EmailOutboxFilter): Promise<string[]> {
-        const page = await store.emailOutbox.list({ ...filter, to_email: email }, { limit: 200 });
-        return page.items.map((row) => row.id);
-      }
-
-      assert.deepEqual(await ids({ idempotency_key_prefix: 'reset:', sealed: false }), [entry.id]);
-      assert.deepEqual(await ids({ idempotency_key_prefix: 'verify:' }), []);
-      // The prefix is literal text: neither SQL wildcards nor regex syntax widen it.
-      for (const pattern of ['rese_:', 'rese%', 'r.set:', 'rese.:']) {
-        assert.deepEqual(await ids({ idempotency_key_prefix: pattern }), [], pattern);
-      }
-      assert.deepEqual(await ids({ idempotency_key_prefix: 'pre-' }), [lookalike.entry.id]);
-      assert.deepEqual(await ids({ sealed: true }), []);
-
-      const sealed = { body_html: '', body_text: 'sealed-body' };
-      assert.equal(await store.emailOutbox.sealContent(entry.id, sealed), true);
-      assert.equal(
-        await store.emailOutbox.sealContent(entry.id, { body_html: '', body_text: 'again' }),
-        false,
-        'a sealed row is not sealed twice',
-      );
-      assert.equal(await store.emailOutbox.sealContent(newId(), sealed), false, 'no such row');
-      assert.deepEqual(await store.emailOutbox.findById(entry.id), {
-        ...entry,
-        subject: OUTBOX_SEALED_SUBJECT,
-        body_html: '',
-        body_text: 'sealed-body',
-      });
-      assert.deepEqual(await ids({ sealed: true }), [entry.id]);
-      assert.deepEqual(await ids({ idempotency_key_prefix: 'reset:', sealed: false }), []);
-      assert.deepEqual(await ids({ sealed: false }), [lookalike.entry.id]);
-    });
   });
 }

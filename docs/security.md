@@ -1471,11 +1471,6 @@ second copy of a token `email_verification_tokens` stores only as an HMAC:
 - **It fails closed.** An envelope that does not open (altered, copied onto
   another row or recipient, or sealed under a previous key) is failed with
   `last_error` `sealed-unreadable: …`. It is never sent, and never retried.
-- **Rows from earlier versions are sealed in place.** The worker seals legacy
-  verification and reset rows in every status, since a `sent` row's link can
-  still be live, a bounded batch per tick until none remain. Since `v0.6.0` a
-  database an earlier release created is refused rather than upgraded, so a
-  database created at the base schema has none.
 - **Other mail is stored as rendered.** Access decisions, messaging
   notifications and mass email carry no bearer link.
 - **Rotating `NEXUS_SECRET_KEY` does not re-seal.** The rotation already
