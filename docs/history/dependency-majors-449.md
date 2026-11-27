@@ -1,5 +1,7 @@
 # Dependency major migrations for issue #449
 
+> **Historical record.** The issue #449 dependency-major migration history (released in `v0.4.0`); `package.json`, the lockfiles and [CHANGELOG.md](../../CHANGELOG.md) describe what Nexus uses now.
+
 This document preserves the first-stage and pre-approval integration history for
 [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449). PR #518 completed the
 Node 22.14-compatible first stage. PR #521 then adopted jsdom 30.1.2 / Undici 8.11.2 and the

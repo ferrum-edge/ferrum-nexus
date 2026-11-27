@@ -1,5 +1,7 @@
 # Edge v0.9.20 adoption
 
+> **Historical record.** Adoption facts for the Edge releases Nexus paired with up to `v0.6.0` (Edge v0.9.20); the current pin is in [`release/compatibility.env`](../../release/compatibility.env) and [Compatible versions](../operations.md#compatible-versions).
+
 Nexus `v0.6.0` pairs with published Edge v0.9.20 and `contracts-edge-0.9.20`.
 Nexus `v0.5.2` pairs with Edge v0.9.15 and `contracts-edge-0.9.15`, Nexus
 `v0.5.0` and `v0.5.1` paired with Edge v0.9.14 and `contracts-edge-0.9.14`,
@@ -13,7 +15,7 @@ v0.9.19 replaced them. Edge v0.9.19 was published but never paired; its changes
 are reviewed below with v0.9.20's.
 The public-only guarantee is granted to a local data plane, or to a control plane
 whose data-plane attestation proves every expected data plane public-only (see the
-[topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
+[topology decision](../operations.md#backend-egress-admission-and-the-public-only-guarantee)).
 
 ## Published identities
 
@@ -21,7 +23,7 @@ whose data-plane attestation proves every expected data plane public-only (see t
   was published on 2026-11-03 at tag source
   `e4a606a00352674daaef08636e3e359e6c48ba18`, the merge of Edge #7016. The
   default Docker Hub multi-architecture index in
-  [`release/compatibility.env`](../release/compatibility.env) is
+  [the `v0.6.0` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/release/compatibility.env) is
   `sha256:32a0b0574bb2ed105d315888fab12e33242e1cec3ae9f1ae34c1fb4d0c9a2689`; it
   resolves to
   `sha256:d3e3e7e8409d0583b23e0fa4eee4b85c7b20885a314d4ada2ca8aad66bd33e1c` on
@@ -79,7 +81,7 @@ its data-plane attestation, deployment snapshot v2 and its
 protocol revision stays `3`
 ([Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.20/docs/upgrade_guide.md#upgrading-to-0920)).
 Both refuse configuration earlier releases accepted. The full review is in
-[Upgrading to Edge v0.9.20](operations.md#upgrading-to-edge-v0920); in short:
+[Upgrading to Edge v0.9.20](../operations.md#upgrading-to-edge-v0920); in short:
 
 - **Closed plugin configs.** v0.9.20 refuses an unknown key at every depth of a
   plugin config. Every config Nexus writes was checked against the pinned
@@ -125,7 +127,7 @@ attestation, deployment snapshot v2 and its `deployment_snapshot.v2` tokens,
 and the acknowledgement shape; the ConfigSync protocol revision stays `3`
 ([Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.17/docs/upgrade_guide.md#upgrading-to-0917)).
 The full review is in
-[Upgrading to Edge v0.9.17](operations.md#upgrading-to-edge-v0917); in short:
+[Upgrading to Edge v0.9.17](../operations.md#upgrading-to-edge-v0917); in short:
 
 - **Namespace-bounded admin tokens** (Edge #6095). An admin JWT with an `ns`
   claim reaches only namespace-scoped routes and a short allowlist, and every
@@ -150,7 +152,7 @@ policy schema 2 and its data-plane attestation, deployment snapshot v2 and its
 protocol revision stays `3`
 ([Edge upgrade guide](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.15/docs/upgrade_guide.md#upgrading-to-0915)).
 The full review is in
-[Upgrading to Edge v0.9.15](operations.md#upgrading-to-edge-v0915); in short:
+[Upgrading to Edge v0.9.15](../operations.md#upgrading-to-edge-v0915); in short:
 
 - **External identity header** (Edge #6088). `X-Consumer-Username` carries only a
   mapped Consumer, and `X-Authenticated-Identity` is new and gateway-owned. Every
@@ -217,7 +219,7 @@ Edge v0.9.13 changes two response contracts incompatibly and every snapshot toke
   reading schema 1 reported. Against Edge v0.9.13 it therefore admitted no pairing
   the public profile refuses: a control plane now reports `false`, so a CP/DP
   pairing has no writes unless the operator sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`
-  (see [the compatibility notes](operations.md#backend-egress-admission-and-the-public-only-guarantee)).
+  (see [the compatibility notes](../operations.md#backend-egress-admission-and-the-public-only-guarantee)).
 - **Deployment snapshot v2.** `GET /deployment-snapshot` carries stored spec
   documents and external-reference snapshots as `{sha256, len}` in the evidence and
   in `api_specs` (sorted by id and equal to `evidence.resources[5]`), raw SQL blobs
@@ -252,7 +254,7 @@ by observation. Anything that would use the older authority (a conditional
 mutation, a stored-document comparison or deletion custody) is refused with
 `409 CONFLICT`, `details.kind` `legacy_deployment_authority`, before any request
 is sent. Settle conversions and restores before upgrading Edge; see the
-[upgrade procedure](operations.md#upgrading-to-edge-v0913).
+[upgrade procedure](../operations.md#upgrading-to-edge-v0913).
 
 ## Namespace-bounded admin tokens (shipped in Edge v0.9.17)
 
@@ -277,20 +279,20 @@ with both the v0.9.15 and v0.9.17 behavior, with no new opt-in:
   says why.
 
 See
-[Namespace-bounded admin tokens](operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0917).
+[Namespace-bounded admin tokens](../operations.md#namespace-bounded-admin-tokens-ferrum-edge-v0917).
 
 ## Release status
 
-[`release/compatibility.env`](../release/compatibility.env) pins the Edge v0.9.20 image
-above for Nexus `v0.6.0`, and the packaged acceptance suite runs against it. The record
+[The `v0.6.0` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/release/compatibility.env) pins the Edge v0.9.20 image
+above for Nexus `v0.6.0`, and the packaged acceptance suite ran against it. The record
 at the `v0.5.2` tag pins Edge v0.9.15, at the `v0.5.1` and `v0.5.0` tags Edge v0.9.14, and at the
 `v0.4.0` tag Edge v0.9.13. The
-[controlled public-only fixture](../e2e/public-only/README.md) runs a packaged Nexus
+[controlled public-only fixture](../../e2e/public-only/README.md) runs a packaged Nexus
 image against the same Edge release on demand, outside CI, and covers the local
 data-plane profile only.
 
 Nexus supports Node `^22.22.2 || ^24.15.0 || >=26.0.0` since `v0.4.0` (adopted through
 #521). From `v0.6.0` the earlier migrations are folded into one base schema, with no
 upgrade path between releases before 1.0
-([schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10)); no Edge
+([schema and upgrades before 1.0](../operations.md#schema-and-upgrades-before-10)); no Edge
 adoption changes the Nexus schema.

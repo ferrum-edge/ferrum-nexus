@@ -1,5 +1,7 @@
 # jsdom 30 / Undici 8 migration (released in v0.4.0)
 
+> **Historical record.** The jsdom 30 / Undici 8 migration notes for issue #449 (released in `v0.4.0`); `package.json`, the lockfiles and [CHANGELOG.md](../../CHANGELOG.md) describe what Nexus uses now.
+
 References [issue #449](https://github.com/ferrum-edge/ferrum-nexus/issues/449).
 Prepared from main `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf` (PR #520).
 The prior normal merge integrated main `559c350a5370335791cdc3082225dce6056cf547`
@@ -204,7 +206,7 @@ issue #446 closed at 17:42:43 UTC. Its MCP subsets, migration 011, manifest cons
 authorization, claim comparisons, leases, compensation, bounds/redaction and strict fixtures
 are preserved without source edits. The manifest contract was then still PROPOSED pending the
 canonical tracking/freeze decision; it has since been published and implemented (see
-[Service-manifest preview](service-manifest-preview.md)). That main head's implementation and
+[Service-manifest preview](../service-manifest-preview.md)). That main head's implementation and
 qualification are complete.
 
 The immutable heads share base `48ea760098d1aa858dc7cee06bf7f8fb7536cdaf`. Their only

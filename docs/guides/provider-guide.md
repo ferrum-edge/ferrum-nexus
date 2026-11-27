@@ -227,7 +227,7 @@ including the new name of a tool you renamed.
 Older requests and grants show tool IDs that no longer exist as expired.
 
 APIs published before tool subsets must be republished once before accepting subsets.
-Review the [upgrade tradeoff](../mcp-subsets-migration-draft.md) before rollout.
+Review the [upgrade tradeoff](../history/mcp-subsets-migration-draft.md) before rollout.
 
 The complete subset rules are in the
 [API reference](../api.md#optional-mcp-access-subsets); see also the
