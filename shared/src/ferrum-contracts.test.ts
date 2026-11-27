@@ -142,8 +142,8 @@ function readContract<T>(relativePath: string): T {
 describe('pinned Ferrum contracts', () => {
   it('parses PIN under the consumer-pins.md rules', () => {
     const pin = parsePin(readFileSync(join(contractsDirectory, 'PIN'), 'utf8'));
-    assert.equal(pin.tag, 'contracts-edge-0.9.20');
-    assert.equal(pin.commit, '39da322083044c2e92617209e62983c92387f0ad');
+    assert.equal(pin.tag, 'contracts-edge-0.9.21');
+    assert.equal(pin.commit, '92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f');
     assert.equal(pin.edgeVersion, null);
   });
 

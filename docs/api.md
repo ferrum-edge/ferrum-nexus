@@ -375,7 +375,10 @@ writes without changing that verdict. Egress policy schema 1 (Edge v0.9.12 and e
 `unsupported_egress_policy_schema`.
 See the
 [topology decision](operations.md#backend-egress-admission-and-the-public-only-guarantee).
-Published Edge v0.9.20 image and canonical identities are [adopted](edge-0.9.11-adoption.md).
+The published Edge v0.9.21 image and `contracts-edge-0.9.21` are pinned in
+[`release/compatibility.env`](../release/compatibility.env) and
+[`contracts/ferrum-contracts/PIN`](../contracts/ferrum-contracts/PIN); see
+[upgrading to Edge v0.9.21](operations.md#upgrading-to-edge-v0921).
 
 Whole-consumer metadata replacements pair complete server-only verification with
 the original strong row `If-Match`, using Edge's masked projection and hidden-type
@@ -2134,6 +2137,13 @@ header-name tokens of 1–128 chars) and optional `enforce_websocket_origins`
   `400 VALIDATION_FAILED`. `false` removes the gate (authentication and ACLs
   still apply); removing CORS clears it. Older APIs pick this up the next time
   their CORS policy is saved.
+- Nexus does not judge wildcard origins itself; the gateway does. With
+  `allow_credentials: true`, Edge refuses a `"*.suffix"` origin whose suffix is
+  a single label, a public suffix, or has a Public Suffix List rule beneath it
+  (`*.com`, `*.co.uk`, `*.github.io`, and from Edge v0.9.21 `*.amba.host`), so
+  such a policy fails when it is written to the gateway. Use exact origins or a
+  registrable-domain wildcard such as `"*.example.com"`, or leave credentials
+  off.
 
 **`routes` mode and the document Edge receives.** Nexus sends Edge a copy with
 root `servers` set to `/` and every nested `servers` removed (path items,
@@ -2682,7 +2692,7 @@ An unchanged original can still be reconciled read-only. An absent identity can
 be rebuilt from the retained original resources on staging; corrected `routes`
 replacement and spec-owned cutover each require their own recorded authority.
 Frozen external references and resources Nexus cannot replay require operator
-resolution. See the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
+resolution. See the [released protocol and replay limits](conversion-recovery-protocol.md).
 The encrypted journal and repair state commit before teardown and clear together
 with catalog, ownership and completion audit under the existing lease fences.
 Large journals use encrypted, authenticated chunks and a manifest committed in one
@@ -2738,7 +2748,7 @@ reported these as `deployment_acknowledgement_uncertain`, which now covers only
 Uncertain/refused results retain the attempted identity, security configs and
 encrypted journal with `withdrawn: false` and `repair_required`; no refreshed-token
 retry or unconditional fallback is performed. See the
-[released protocol and bounded replay limits](edge-conversion-recovery-blocker.md).
+[released protocol and bounded replay limits](conversion-recovery-protocol.md).
 
 ### `POST /api/apis/:id/test-consumer`
 
@@ -3087,7 +3097,7 @@ approved tool, on the identity's one consumer, so any change that would take a c
 past 500 groups (an approval, a tool request approval, a re-enable or a repair) is
 refused with `409 CONFLICT` and `details.reason: "acl_group_limit"` before the write. Ordinary spec revisions, rollbacks, agents
 edits, restores and conversions read no grantee consumer from the gateway. See the
-[migration notes](mcp-subsets-migration-draft.md).
+[migration notes](history/mcp-subsets-migration-draft.md).
 
 ---
 

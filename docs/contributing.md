@@ -26,7 +26,7 @@ every change that rewrites a lock with npm 10.9.7: for example
 install with `npm ci`, which never rewrites the lock. Where Corepack is available,
 `corepack enable npm` makes the `npm` command run the pinned version instead. Alternatively, push
 only the manifest change and apply the lock from that commit's `produce-locks` artifact (see
-[`dependency-majors-449.md`](dependency-majors-449.md) for how to verify and apply one); the job
+[`dependency-majors-449.md`](history/dependency-majors-449.md) for how to verify and apply one); the job
 publishes no artifact when it fails, so it cannot repair a lock already rewritten by npm 11 or 12.
 
 Dependabot updates a workspace dependency with `npm install <pkg>@<version> --workspace=<ws>`,

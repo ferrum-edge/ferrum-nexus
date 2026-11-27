@@ -9,7 +9,6 @@ import { buildTestApp } from './helpers.js';
 const CHECKSUM_LINE = /^([a-f0-9]{64})  (.+)$/;
 const MANIFEST_FILE = /service-manifest\/|^fixtures\/invalid-expectations\.json$/;
 
-const CLEARTEXT_REFUSED = /must use https unless its host is a loopback IP literal/;
 const RESOURCE_REFERENCE = /resource reference exceeds the limit/;
 
 const root = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
@@ -19,23 +18,9 @@ function fixture(path: string): unknown {
 
 type Manifest = Record<string, Record<string, unknown>>;
 
-/**
- * Shared valid fixtures the pinned `contracts-edge-0.9.20` publishes with a
- * cleartext `gateway.otel_endpoint` to a host that is not a loopback IP
- * literal. Ferrum Edge v0.9.19 and later drop that exporter and Alloy main
- * refuses the manifest, so this preview refuses it too: a deliberate,
- * narrower-than-the-pin divergence until ferrum-contracts#82 (which moves
- * these fixtures to `https://`) is published and re-vendored.
- */
-const CLEARTEXT_VALID_FIXTURES = new Set(['orders-api.json']);
-
-/** `valid/orders-api.json` with the `https://` exporter ferrum-contracts#82 gives it. */
+/** `valid/orders-api.json`, whose exporter is `https://` since `contracts-edge-0.9.21`. */
 function ordersApi(): Manifest {
-  const manifest = fixture('fixtures/service-manifest/valid/orders-api.json') as Manifest;
-  return {
-    ...manifest,
-    gateway: { ...manifest.gateway, otel_endpoint: 'https://otel-collector:4318/v1/traces' },
-  };
+  return fixture('fixtures/service-manifest/valid/orders-api.json') as Manifest;
 }
 
 describe('published immutable service-manifest consumer', () => {
@@ -45,8 +30,8 @@ describe('published immutable service-manifest consumer', () => {
   it('verifies the exact commit, schema, shared fixtures and invalid-expectation integrity pins', () => {
     const pin = readFileSync(new URL('PIN', root), 'utf8');
     assert.deepEqual(pin.split('\n').slice(0, 2), [
-      'tag contracts-edge-0.9.20',
-      'commit 39da322083044c2e92617209e62983c92387f0ad',
+      'tag contracts-edge-0.9.21',
+      'commit 92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f',
     ]);
     const schema = fixture('schemas/service-manifest/v1.schema.json') as {
       'x-contract': { status: string; provenance: { commit: string; availability?: string }[] };
@@ -62,9 +47,11 @@ describe('published immutable service-manifest consumer', () => {
       .map((line) => CHECKSUM_LINE.exec(line))
       .filter((match): match is RegExpExecArray => match !== null)
       .filter(([, , path]) => MANIFEST_FILE.test(path ?? ''));
-    // The schema, the shared invalid expectations, and 3 valid and 9 invalid
-    // fixtures, as the separate pin listed them before it was merged.
-    assert.equal(manifestRows.length, 14);
+    // The schema, the shared invalid expectations, and 5 valid and 26 invalid
+    // fixtures (contracts-edge-0.9.21 added `edge-limits.json`,
+    // `unicode-host.json` and 17 invalid fixtures for Edge's field limits,
+    // control characters, reserved path characters and cleartext telemetry).
+    assert.equal(manifestRows.length, 33);
     for (const [, digest, path] of manifestRows) {
       assert.ok(path);
       assert.equal(
@@ -85,18 +72,7 @@ describe('published immutable service-manifest consumer', () => {
         assert.ok(pin.includes(`  ${base}${name}\n`), 'every shared fixture must be pinned');
         const value = fixture(base + name);
         assert.equal(manifestValidator.safeParse(value).success, kind === 'valid', name);
-        if (kind === 'valid' && CLEARTEXT_VALID_FIXTURES.has(name)) {
-          assert.throws(() => validatedManifest(value), CLEARTEXT_REFUSED, name);
-          const manifest = value as Manifest;
-          const secured = {
-            ...manifest,
-            gateway: {
-              ...manifest.gateway,
-              otel_endpoint: String(manifest.gateway?.otel_endpoint).replace('http:', 'https:'),
-            },
-          };
-          assert.doesNotThrow(() => validatedManifest(secured), name);
-        } else if (kind === 'valid') assert.doesNotThrow(() => validatedManifest(value), name);
+        if (kind === 'valid') assert.doesNotThrow(() => validatedManifest(value), name);
         else {
           assert.ok(expectations[`service-manifest/invalid/${name}`], name);
           assert.throws(() => validatedManifest(value), name);
@@ -168,7 +144,11 @@ describe('published immutable service-manifest consumer', () => {
       // Not White_Space, so Edge keeps it in the written authority.
       'http://127.0.0.1\ufeff',
     ]) {
-      assert.throws(() => validatedManifest(withEndpoint(refused)), CLEARTEXT_REFUSED, refused);
+      // The pinned schema states Edge's rule since contracts-edge-0.9.21
+      // (ferrum-contracts#82), so it refuses these before the preview's own
+      // check, which stays as a second line.
+      assert.equal(manifestValidator.safeParse(withEndpoint(refused)).success, false, refused);
+      assert.throws(() => validatedManifest(withEndpoint(refused)), refused);
     }
     // The pinned schema pattern runs first: `.` stops at a line terminator, so
     // a separator after a path is refused before Edge's trim could apply.
@@ -227,7 +207,7 @@ describe('published immutable service-manifest consumer', () => {
     );
   });
 
-  it("enforces Ferrum Edge's bounds on exported fields, honouring service_base_path's 2049", () => {
+  it("enforces the pinned schema's Ferrum Edge bounds on exported fields, service_base_path's 2049 included", () => {
     const original = ordersApi();
     const patched = (section: string, field: string, value: unknown): Manifest => ({
       ...original,
@@ -331,7 +311,7 @@ describe('published immutable service-manifest consumer', () => {
       assert.equal(response.statusCode, 200, response.body);
       assert.equal(response.json().preview_only, true);
       assert.equal(response.json().contract_status, 'implemented');
-      assert.equal(response.json().contract_commit, '39da322083044c2e92617209e62983c92387f0ad');
+      assert.equal(response.json().contract_commit, '92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f');
       assert.equal(response.json().references.values, '[REDACTED]');
       for (const secret of [
         'edge-client',

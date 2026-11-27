@@ -276,10 +276,10 @@ The fleet-global reads are affected like this:
 
 Neither setting was needed against Ferrum Edge v0.9.15, where the admin JWT
 still read both metrics endpoints; each is used as soon as it is set. On Edge
-v0.9.17 and later — including the current pairing in
-[`release/compatibility.env`](../release/compatibility.env) (Edge v0.9.20 for
-Nexus `v0.6.0`) — set `FERRUM_METRICS_BEARER_TOKEN` or the Usage card reports
-its counts unavailable.
+v0.9.17 and later — including Edge v0.9.20 (Nexus `v0.6.0`) and Edge v0.9.21,
+which `main` pins in [`release/compatibility.env`](../release/compatibility.env) —
+set `FERRUM_METRICS_BEARER_TOKEN` or the Usage card reports its counts
+unavailable.
 
 Adding the portal's IP to the gateway's `FERRUM_METRICS_ALLOWED_CIDRS` does not
 restore `GET /metrics`. Nexus always presents a credential on the scrape, its
@@ -643,7 +643,7 @@ narrowed `public_only_guaranteed` alone.
 
 [`release/compatibility.env`](../release/compatibility.env) pins the Edge image and
 `contracts/ferrum-contracts/PIN` the vendored contracts. See
-[the adoption facts](edge-0.9.11-adoption.md) and the separate
+[the adoption facts](history/edge-0.9.11-adoption.md) and the separate
 [packaged public-only fixture](../e2e/public-only/README.md).
 
 **Fixing a mismatch.** Set the portal's `FERRUM_NAMESPACE` to the gateway's
@@ -704,7 +704,7 @@ Replay and cleanup use only Edge's conditional deployment API with the journal's
 complete encrypted original snapshot and its strong `deployment-v1` token: no
 fresh-token retry, unconditional cleanup or namespace replacement. The
 acknowledgement rules and replay limits are in the
-[released protocol and qualification limits](edge-conversion-recovery-blocker.md);
+[released protocol and qualification limits](conversion-recovery-protocol.md);
 resolve an unconfirmed outcome with the runbook below.
 
 ### Resolving an unconfirmed gateway deployment mutation
@@ -975,11 +975,10 @@ Historical procedure:
 3. **Upgrade Edge to v0.9.15**, the control plane and every data plane together.
 4. **Upgrade Nexus** to `v0.5.2`, which pinned Edge v0.9.15 in
    [the `v0.5.2` compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.5.2/release/compatibility.env),
-   and check `GET /api/health/edge` as an admin. To move from `v0.5.2` to the
-   current pairing recorded in
-   [`release/compatibility.env`](../release/compatibility.env) (`v0.6.0` with
-   Edge v0.9.20), follow [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920),
-   whose step 1 includes the v0.9.17 checks.
+   and check `GET /api/health/edge` as an admin. To move from `v0.5.2` to
+   `v0.6.0` (Edge v0.9.20), follow [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920),
+   whose step 1 includes the v0.9.17 checks, and then
+   [Upgrading to Edge v0.9.21](#upgrading-to-edge-v0921).
 
 Nexus `v0.5.1` read Edge v0.9.15 unchanged, and `v0.5.2` still read v0.9.14, so the
 order of steps 3 and 4 did not matter for compatibility. **Rolling back** Edge to
@@ -996,7 +995,7 @@ The current pairing is recorded in
 
 No Nexus release paired with Edge v0.9.17: Nexus `v0.6.0` shipped paired with
 Edge v0.9.20 (recorded in
-[`release/compatibility.env`](../release/compatibility.env)), which includes
+[its compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/release/compatibility.env)), which includes
 v0.9.17's fixes for the published QUIC advisories affecting v0.9.15. This
 section reviews what v0.9.17 changed for Nexus; its procedure is kept for
 historical reference. To move from Nexus `v0.5.2` to `v0.6.0`, do only its step 1
@@ -1041,9 +1040,7 @@ Historical reference procedure (do only step 1 when moving directly to v0.9.20):
    gateway issued kept verifying on v0.9.17.
 3. **Upgrade Edge to v0.9.17**, the control plane and every data plane together.
 4. **Continue with [Upgrading to Edge v0.9.20](#upgrading-to-edge-v0920).**
-   No Nexus release pinned v0.9.17; the current pairing is recorded in
-   [`release/compatibility.env`](../release/compatibility.env) (`v0.6.0` with
-   Edge v0.9.20).
+   No Nexus release pinned v0.9.17; Nexus `v0.6.0` pairs with Edge v0.9.20.
 
 Nexus `v0.5.2` already worked with Edge v0.9.17's bounded-token behavior, so a
 deployment that did stop at v0.9.17 kept working until it moved on.
@@ -1052,8 +1049,12 @@ QUIC vulnerabilities v0.9.17 fixed; it was only for restoring service.
 
 ### Upgrading to Edge v0.9.20
 
-Nexus `v0.6.0` pairs with Edge v0.9.20 (the current pairing recorded in
-[`release/compatibility.env`](../release/compatibility.env)), the only Edge
+_`main` has moved on to Edge v0.9.21; see
+[Upgrading to Edge v0.9.21](#upgrading-to-edge-v0921). This section is the
+`v0.6.0` procedure._
+
+Nexus `v0.6.0` pairs with Edge v0.9.20 (recorded in
+[its compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/release/compatibility.env)), the only Edge
 version its acceptance suite tests. v0.9.20 follows published v0.9.19, which
 follows v0.9.17: v0.9.18 was tagged but never published, so its changes ship in
 v0.9.19. Read both sections of the Edge upgrade guide,
@@ -1137,7 +1138,7 @@ Procedure:
    backup is the way back to the previous pair.
 4. **Upgrade Edge to v0.9.20**, the control plane and every data plane together.
 5. **Move Nexus** to `v0.6.0`, which pins Edge v0.9.20 in
-   [`release/compatibility.env`](../release/compatibility.env), following
+   [its compatibility record](https://github.com/ferrum-edge/ferrum-nexus/blob/v0.6.0/release/compatibility.env), following
    steps 4 to 6 of [moving to a new release](#moving-to-a-new-release), and
    check `GET /api/health/edge` as an admin.
 
@@ -1146,17 +1147,140 @@ against v0.9.20, so do not restart `v0.5.2` against v0.9.20; move to `v0.6.0`
 right after the Edge upgrade. **Rolling back** Edge to
 v0.9.17 is not qualified for Nexus `v0.6.0`.
 
-### Palette keys the next Edge release removes
+### Upgrading to Edge v0.9.21
 
-Edge after v0.9.20 refuses `ip_restriction` `mode` and the retired
+`main` pins Edge v0.9.21 and `contracts-edge-0.9.21` in
+[`release/compatibility.env`](../release/compatibility.env) and
+[`contracts/ferrum-contracts/PIN`](../contracts/ferrum-contracts/PIN), and v0.9.21
+is the only Edge release its acceptance suite tests. It is the only Edge release
+this code supports: it no longer works with Edge v0.9.20 or earlier (see
+conditional credential changes below). v0.9.21 follows published v0.9.20. Read
+[Upgrading to 0.9.21](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.21/docs/upgrade_guide.md#upgrading-to-0921)
+in the Edge upgrade guide for the gateway-wide changes: many refuse
+configuration or traffic that v0.9.20 accepted, the Edge `V001` baseline
+changes (a PostgreSQL, MySQL or SQLite Edge database is rebuilt through its
+logical backup), and the ConfigSync protocol revision is now `6`, so the
+control plane and every data plane move together. The wire shapes Nexus reads
+are unchanged: egress policy schema 2 and its data-plane attestation,
+deployment snapshot v2 and its `deployment_snapshot.v2` tokens, and the
+acknowledgement shape. What changes for Nexus:
+
+- **Conditional credential changes** (ferrum-edge#7393). Edge now evaluates
+  `If-Match` on `POST`/`DELETE /consumers/{id}/credentials/{type}` and
+  `DELETE .../{type}/{index}` against the consumer's own `ETag`, and refuses a
+  consumer that changed since the read with `412`, writing nothing. Nexus sends
+  the tag of the read it decided from on every revoke and rotation delete and
+  on rotation appends, and turns the `412` into `409 CONFLICT`. Nexus no longer
+  falls back, on an older Edge, to re-reading the consumer and writing without
+  the header: Edge v0.9.20 and earlier refuse the header with `400`, which Nexus
+  reports as `502 EDGE_ERROR` ("Nexus requires Ferrum Edge v0.9.21 or later"),
+  with nothing written and the credential left as it was, and logs once at
+  `error`. Upgrade Edge before (or together with) Nexus.
+- **Palette keys Edge removed.** v0.9.21 refuses `ip_restriction` `mode` and
+  `response_caching` `cache_key_include_query` / `cache_key_include_consumer`
+  as unknown keys. Confirm `api.plugin_keys_stripped` **while the gateway is
+  still on v0.9.20** (see [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
+- **Agent APIs.** `mcp_gateway` confines OpenAPI bridge calls to the matched
+  proxy's literal listen prefix, refuses every bridged call on exact (`=`) and
+  regex (`~`) routes, rejects an operation path that can fall inside the MCP
+  endpoint's subtree, and refuses an embedded `x-ferrum-plugins` `mcp_gateway`
+  whose `endpoint.path` differs from `x-ferrum-mcp.endpoint.path`. Nexus already
+  publishes agent APIs on literal-prefix listen paths, writes the same endpoint
+  in both places, and refuses an operation that collides with `/mcp`, so its
+  agent APIs publish and serve as before. `ai_prompt_shield` (which Nexus runs
+  on `mcp_arguments`) now refuses a tool call whose JSON body repeats an object
+  member name (`400`, `ambiguous_json`).
+- **Entity tags.** Edge omits row `ETag`s for tokens verified by
+  `FERRUM_ADMIN_JWT_VIEWER_SECRET`. Nexus decides every conditional write from
+  reads made with its admin token (`FERRUM_ADMIN_JWT_SECRET`), so it is
+  unaffected; the optional fleet-read key reads only `GET /admin/metrics`.
+- **Credentialed wildcard CORS origins.** Edge refuses a `cors` config with
+  `allow_credentials: true` and a `"*.suffix"` origin whose suffix is a single
+  label, a public suffix, or has a Public Suffix List rule beneath it. v0.9.21's
+  refreshed list (`psl` 2.1.255) adds `amba.host` to that set, so
+  `"*.amba.host"` with credentials, which v0.9.20 accepted, is now refused.
+  Nexus stores an API's CORS policy as the provider entered it and writes it
+  to Edge unchanged, so a stored policy with that pair fails Edge's validation
+  on v0.9.21: an Edge restore that carries it is refused, and Nexus's own
+  rebuilds (a gateway restore, a conversion, a CORS edit) are refused when they
+  write it. A new policy with that pair is refused by the gateway when it
+  is saved. Find stored ones with
+  `SELECT id, slug FROM apis WHERE cors_json LIKE '%amba.host%'` (SQL
+  backends; on MongoDB, the `apis` documents whose `cors_json` mentions it)
+  and, on the old pairing, change each through Nexus to exact origins or
+  `allow_credentials: false` (see [`CorsConfig`](api.md)).
+- **Clients.** Every JWT verifier (`jwt_auth` included) refuses a token whose
+  header declares a `crit` extension other than `b64`, and a request that sends
+  `Content-Type` twice or lists two media types is refused with `400`.
+- **Service-manifest preview.** `contracts-edge-0.9.21` narrows the shared v1
+  schema to Edge's field limits, control-character and reserved path-character
+  rules and loopback-only cleartext telemetry (ferrum-contracts#74 and #82),
+  which the preview already applied; it now applies them from the pinned schema
+  ([service-manifest preview](service-manifest-preview.md)).
+
+Procedure:
+
+Do steps 1 to 4 on Edge v0.9.20 with Nexus `v0.6.0` still running:
+
+1. **Stop new conversions and settle journals** as in steps 1 and 2 of the
+   v0.9.13 procedure. This comes first: the palette cleanup in step 2 leaves a
+   palette row alone while a conversion or gateway restore owns its API, and
+   records `api.plugin_keys_stripped` only when nothing was left over. An Edge
+   database rebuild also issues new deployment tokens, so no journal may span
+   the gateway upgrade.
+2. **Confirm the palette cleanup**: restart Nexus once more and check that the
+   `api.plugin_keys_stripped` audit row for your `FERRUM_NAMESPACE` exists and
+   that no row was logged as left for later since (see
+   [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
+3. **Fix what v0.9.21 refuses**: the credentialed `*.amba.host` CORS policies
+   above, through Nexus, and everything the Edge guide section lists for your
+   gateway configuration.
+4. **Prove the Edge backup restores.** Take a namespace-complete Edge
+   `GET /backup` and check its API specs. v0.9.21 restores only an `api_specs`
+   section of version `"2"` whose every item has a `resource_hash` of 64
+   lowercase hex characters, and refuses the **whole** namespace otherwise.
+   v0.9.20 also accepts an empty `resource_hash` on restore and copies a
+   stored hash, empty or not, into every later export, so a spec that once came
+   back from an old backup can still carry an empty one in a fresh export:
+
+   ```bash
+   jq -r '.api_specs.section_version,
+          (.api_specs.items[] | select(.resource_hash | test("^[0-9a-f]{64}$") | not) | .id)' \
+     ferrum-backup.json
+   ```
+
+   It must print `2` and nothing else. For each id it prints, re-submit that
+   spec on v0.9.20 so Edge records its hash (for a Nexus `routes` API,
+   publish its current document as a new spec revision through Nexus; for a
+   spec Nexus does not own, `PUT /api-specs/{id}` with the same document), then
+   export and check again. Then restore the
+   export into a scratch Edge v0.9.21 instance: a successful restore is the
+   proof.
+
+5. **Stop Nexus and take the paired Nexus and Edge backup** (step 2 of
+   [moving to a new release](#moving-to-a-new-release)), with a fresh Edge
+   `GET /backup` that passes the check in step 4.
+6. **Upgrade Edge to v0.9.21**, the control plane and every data plane
+   together, rebuilding a SQL Edge database through that backup as the Edge
+   guide's build-out procedure says.
+7. **Move Nexus** to the release that pins Edge v0.9.21, following its release
+   notes, and check `GET /api/health/edge` as an admin.
+
+Nexus `v0.6.0` is qualified against Edge v0.9.20 only. **Rolling back** Edge to
+v0.9.20 is not supported by this code: restore the paired backup into Nexus
+`v0.6.0` and Edge v0.9.20 instead.
+
+### Palette keys Edge v0.9.21 removes
+
+Edge v0.9.21 refuses `ip_restriction` `mode` and the retired
 `response_caching` `cache_key_include_query` and `cache_key_include_consumer` as
 unknown keys (Edge issue #7114). None of them changed what the gateway did, but
 earlier Nexus releases wrote `mode` on **every** `ip_restriction` saved from the
-portal. `ip_restriction` is fail-closed, so on that Edge release one such
-enabled config makes an Admin API write `400`, a reload fail, and a
-database-mode gateway refuse to start.
+portal. `ip_restriction` is fail-closed, so on v0.9.21 one such enabled config
+makes an Admin API write `400`, a reload fail, and a database-mode gateway
+refuse to start.
 
-This release stops writing them (a save that carries one is
+Nexus `v0.6.0` and later stop writing them (a save that carries one is
 `400 VALIDATION_FAILED`, and every rebuild or restore drops them from the
 gateway config and the stored row), and at every start it finds, with one store
 query, each palette row in `FERRUM_NAMESPACE` that still carries one, and
@@ -1174,12 +1298,14 @@ palette config of the API still carries a removed key; save that plugin again
 the namespace with nothing failed or left over records one
 `api.plugin_keys_stripped` row targeting it.
 
-**Before upgrading Edge past v0.9.20**, run this release (or a later one)
-against the v0.9.20 gateway until `api.plugin_keys_stripped` for your
+**Before upgrading Edge from v0.9.20 to v0.9.21**, run Nexus `v0.6.0` against
+the v0.9.20 gateway until `api.plugin_keys_stripped` for your
 `FERRUM_NAMESPACE` is in the audit log, and restart it once more afterwards if
-it logged a row left for later since. An `ip_restriction` or `response_caching`
-config an operator wrote by hand is not the portal's to change: remove those
-keys from it yourself, as the Edge upgrade guide says.
+it logged a row left for later since. Later releases run the same pass, but
+they require Edge v0.9.21 for credential changes, so do this step on `v0.6.0`.
+An `ip_restriction` or `response_caching` config an operator wrote by hand is
+not the portal's to change: remove those keys from it yourself, as the Edge
+upgrade guide says.
 
 ### Email
 
@@ -1796,7 +1922,7 @@ such a portal to this release, give the new release a new, empty database:
      does touches them. That includes its retired-key cleanup: before you
      upgrade the gateway that serves the old namespace past Edge v0.9.20, edit
      or remove its configs yourself (see
-     [palette keys the next Edge release removes](#palette-keys-the-next-edge-release-removes)).
+     [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
 6. Start the new release. It creates the schema, and the next registration
    becomes the founding `super_admin` (see
    [first run and the bootstrap token](#first-run-and-the-bootstrap-token)).
@@ -2054,7 +2180,7 @@ a digest-pinned `node:22-bookworm-slim`. The supported Node range since `v0.4.0`
 `^22.22.2 || ^24.15.0 || >=26.0.0`; releases before it supported Node 22.14 or later.
 Dependabot advances the pinned digest within that channel, so the exact Node 22
 patch release changes over time; the
-[migration notes](dependency-majors-449-higher-floor-draft.md) record the published OCI
+[migration notes](history/dependency-majors-449-higher-floor-draft.md) record the published OCI
 evidence for the digest `v0.4.0` through `v0.5.2` shipped (Node 22.23.3) and the
 rollback boundary; `v0.6.0` ships Node 22.23.5. The image sets:
 
@@ -2247,7 +2373,7 @@ individual resources and repeats egress admission. Conditional Edge backup does 
 make Nexus and Edge backups jointly atomic; keep the writer-drain and paired-backup
 procedure below. The Edge release and contracts each Nexus release pairs with are
 listed under [Compatible versions](#compatible-versions); see also
-[the adoption facts](edge-0.9.11-adoption.md).
+[the adoption facts](history/edge-0.9.11-adoption.md).
 
 ### Ordering and consistency
 
@@ -2292,12 +2418,13 @@ rotated in that window ([§12](#12-the-credential-mirror)).
 Each Nexus release is validated against one Edge release and vendors that release's
 contracts (`contracts/ferrum-contracts/PIN`):
 
-| Nexus release      | Ferrum Edge | Vendored contracts      |
-| ------------------ | ----------- | ----------------------- |
-| `v0.4.0`           | `v0.9.13`   | `contracts-edge-0.9.13` |
-| `v0.5.0`, `v0.5.1` | `v0.9.14`   | `contracts-edge-0.9.14` |
-| `v0.5.2`           | `v0.9.15`   | `contracts-edge-0.9.15` |
-| `v0.6.0`           | `v0.9.20`   | `contracts-edge-0.9.20` |
+| Nexus release       | Ferrum Edge | Vendored contracts      |
+| ------------------- | ----------- | ----------------------- |
+| `v0.4.0`            | `v0.9.13`   | `contracts-edge-0.9.13` |
+| `v0.5.0`, `v0.5.1`  | `v0.9.14`   | `contracts-edge-0.9.14` |
+| `v0.5.2`            | `v0.9.15`   | `contracts-edge-0.9.15` |
+| `v0.6.0`            | `v0.9.20`   | `contracts-edge-0.9.20` |
+| `main` (unreleased) | `v0.9.21`   | `contracts-edge-0.9.21` |
 
 ### Restoring
 
@@ -3563,15 +3690,13 @@ gone: a revoke completes without a delete (`credential.revoke` with
 `evidence: "entry_absent"`), and a rotation answers `409` ("no longer on the
 gateway") and marks the row revoked.
 
-Edge with ferrum-edge#7393 refuses a consumer that changed after the read with
-`412`, which reaches the caller as `409 CONFLICT` with nothing deleted and is
-never resent. Edge v0.9.20 (the release pinned in
-[`release/compatibility.env`](../release/compatibility.env)) refuses `If-Match` on these
-routes with a `400` (`If-Match is only supported on …`) before acting; Nexus
-then re-reads the consumer and deletes without the header only if the tag is
-unchanged, and otherwise answers the same `409`. **Remaining window on
-v0.9.20:** a change another writer makes between that re-read and the
-unconditional delete is not detected; only Edge's own precondition closes it.
+Edge v0.9.21 (ferrum-edge#7393, the release pinned in
+[`release/compatibility.env`](../release/compatibility.env)) refuses a consumer that
+changed after the read with `412`, which reaches the caller as `409 CONFLICT`
+with nothing deleted and is never resent. Edge v0.9.20 and earlier refuse
+`If-Match` on these routes with a `400` (`If-Match is only supported on …`)
+before acting; Nexus answers `502 EDGE_ERROR` naming the Edge release it
+requires, deletes nothing, and never sends the delete without the header.
 
 `basicauth` is the exception: Edge keeps only its hash, so no read can identify
 an entry. It keeps the positional rules in

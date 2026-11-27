@@ -13,9 +13,10 @@
  * This suite plays that other writer. It wraps the Admin client's consumer
  * calls and, before chosen calls of a revoke, a rotation (append-first and at
  * the cap), its retry and any take-back, changes the consumer's `keyauth`
- * array directly in the mock gateway. It does so for every step, every kind of
- * change, both gateway kinds (Edge with ferrum-edge#7393 and Edge v0.9.20),
- * and for a run of seeded changes before *every* step. Throughout, it asserts:
+ * array directly in the mock gateway, which evaluates `If-Match` on credential
+ * writes as Edge v0.9.21 does (ferrum-edge#7393). It does so for every step,
+ * every kind of change, and for a run of seeded changes before *every* step.
+ * Throughout, it asserts:
  *
  * - every entry a Nexus delete removes is the target, or a replacement Nexus
  *   itself appended during the operation (a take-back) — never another
@@ -58,8 +59,6 @@ type Change = (typeof CHANGES)[number];
 /** The operation under test, and the array it starts from. */
 const OPERATIONS = ['revoke', 'rotate-append-first', 'rotate-at-cap'] as const;
 type Operation = (typeof OPERATIONS)[number];
-
-const MODES = ['evaluate', 'unsupported'] as const;
 
 /** The portal's cap: two keys and one foreign entry fill it. */
 const PORTAL_CAP = 3;
@@ -132,7 +131,6 @@ describe('credential recovery under another writer at every step', () => {
 
   afterEach(() => {
     active = null;
-    harness.edge.setCredentialIfMatch('evaluate');
     harness.edge.clearInjections();
   });
 
@@ -418,14 +416,12 @@ describe('credential recovery under another writer at every step', () => {
    * Answers whether `first` made any change at all.
    */
   async function run(
-    mode: (typeof MODES)[number],
     operation: Operation,
     targetFirst: boolean,
     first: (step: number) => Change | null,
     retry: (step: number) => Change | null,
     label: string,
   ): Promise<boolean> {
-    harness.edge.setCredentialIfMatch(mode);
     const { scenario, targetId, initial } = await arrange(operation, targetFirst);
     active = scenario;
     const replacements: string[] = [];
@@ -491,55 +487,49 @@ describe('credential recovery under another writer at every step', () => {
     }
   }
 
-  for (const mode of MODES) {
-    const gateway = mode === 'evaluate' ? 'Edge with #7393' : 'Edge v0.9.20';
-    for (const operation of OPERATIONS) {
-      for (const kind of CHANGES) {
-        it(`${gateway}, ${operation}: ${kind} before any one step`, async () => {
-          for (let at = 0; at < MAX_STEPS; at += 1) {
-            const once = (step: number): Change | null => (step === at ? kind : null);
-            const changed = await run(
-              mode,
-              operation,
-              at % 2 === 0,
-              once,
-              once,
-              `${operation}, ${kind} before step ${at}`,
-            );
-            if (!changed) break;
-          }
-        });
-
-        it(`${gateway}, ${operation}: ${kind} before every step from one on`, async () => {
-          for (let from = 0; from < MAX_STEPS; from += 1) {
-            const onward = (step: number): Change | null => (step >= from ? kind : null);
-            const changed = await run(
-              mode,
-              operation,
-              from % 2 === 1,
-              onward,
-              (step) => (step === from ? kind : null),
-              `${operation}, ${kind} before every step from ${from}`,
-            );
-            if (!changed) break;
-          }
-        });
-      }
-
-      it(`${gateway}, ${operation}: seeded changes before every step`, async () => {
-        for (let seed = 1; seed <= CHAOS_SEEDS; seed += 1) {
-          const random = seeded(seed * 7919 + OPERATIONS.indexOf(operation));
-          const pick = (): Change => CHANGES[Math.floor(random() * CHANGES.length)] ?? 'append';
-          await run(
-            mode,
+  for (const operation of OPERATIONS) {
+    for (const kind of CHANGES) {
+      it(`${operation}: ${kind} before any one step`, async () => {
+        for (let at = 0; at < MAX_STEPS; at += 1) {
+          const once = (step: number): Change | null => (step === at ? kind : null);
+          const changed = await run(
             operation,
-            seed % 2 === 0,
-            () => pick(),
-            () => pick(),
-            `${operation}, seed ${seed}`,
+            at % 2 === 0,
+            once,
+            once,
+            `${operation}, ${kind} before step ${at}`,
           );
+          if (!changed) break;
+        }
+      });
+
+      it(`${operation}: ${kind} before every step from one on`, async () => {
+        for (let from = 0; from < MAX_STEPS; from += 1) {
+          const onward = (step: number): Change | null => (step >= from ? kind : null);
+          const changed = await run(
+            operation,
+            from % 2 === 1,
+            onward,
+            (step) => (step === from ? kind : null),
+            `${operation}, ${kind} before every step from ${from}`,
+          );
+          if (!changed) break;
         }
       });
     }
+
+    it(`${operation}: seeded changes before every step`, async () => {
+      for (let seed = 1; seed <= CHAOS_SEEDS; seed += 1) {
+        const random = seeded(seed * 7919 + OPERATIONS.indexOf(operation));
+        const pick = (): Change => CHANGES[Math.floor(random() * CHANGES.length)] ?? 'append';
+        await run(
+          operation,
+          seed % 2 === 0,
+          () => pick(),
+          () => pick(),
+          `${operation}, seed ${seed}`,
+        );
+      }
+    });
   }
 });
