@@ -376,11 +376,11 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
     await fixture(async (pool, url) => {
       const second = mysql.createPool(url);
       let fired = false;
-      let peer: Promise<unknown> | null = null;
+      const started: { peer?: Promise<unknown> } = {};
       const faulty = intercept(pool, (method, sql, _params, after) => {
         if (method === 'execute' && after && sql.startsWith('SELECT GET_LOCK(')) {
           // Started while the first owns the lock: refused at once, never queued.
-          peer = ensureMysqlSchema(second).then(
+          started.peer = ensureMysqlSchema(second).then(
             () => 'finished',
             (error: unknown) => error,
           );
@@ -397,8 +397,8 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
       });
       try {
         await assert.rejects(() => ensureMysqlSchema(faulty), INTERRUPTION);
-        assert.ok(peer, 'the peer started while the failing creator held its advisory lock');
-        const outcome = await peer;
+        assert.ok(started.peer, 'the peer started while the failing creator held its lock');
+        const outcome: unknown = await started.peer;
         assert.ok(outcome instanceof Error && BUSY.test(outcome.message), String(outcome));
         assert.ok(fired);
         await pool.query(`INSERT INTO organizations (id, name, created_at, updated_at)
