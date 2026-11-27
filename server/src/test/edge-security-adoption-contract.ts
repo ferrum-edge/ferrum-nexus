@@ -15,7 +15,6 @@ import type { EdgeDeploymentSnapshot } from '../ferrum-admin/types.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
-import { parseOpenApiSpec } from '../publishing/oas.js';
 import {
   deleteRecoveryJournal,
   readRecoveryJournal,

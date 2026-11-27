@@ -642,8 +642,9 @@ rows, so re-enabling can replay each identity's grants. Account-scoped access
 **Provisioning is lazy.** The consumer is created the first time an identity is
 approved for an API or issues a credential. `ensure` does one `GET` of the
 derived id and, on `404`, one `POST` with that id, regardless of namespace size.
-Only a refused create (`409`) falls back to a logged legacy username scan,
-which throws past 10,000 consumers (see **Consumer identity recovery** in
+A refused create (`409`) reads the derived id once more and adopts only a
+consumer of the same username (another creation won the race); anything else
+fails (see **Consumer identity recovery** in
 [`operations.md`](operations.md#consumer-identity-recovery)). A failed or
 malformed response never authorises a create. A derived id that belongs to a
 different username is refused.

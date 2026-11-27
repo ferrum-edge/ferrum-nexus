@@ -496,7 +496,6 @@ describe('Edge response contracts over HTTP sockets', () => {
   it('requires valid pages before nullable scans can conclude absence', async (t) => {
     const { client, reply } = await fixture(t);
     const scans = [
-      () => client.consumers.getByUsername('missing'),
       () => client.pluginConfigs.listByProxy('missing'),
       () => client.apiSpecs.findByProxy('missing'),
       () => client.listNamespaces(),
@@ -507,12 +506,6 @@ describe('Edge response contracts over HTTP sockets', () => {
         await assert.rejects(scan, protocolFailure);
       }
     }
-    reply.body = JSON.stringify({ data: [], pagination: { offset: 0, limit: 500, total: 1 } });
-    await assert.rejects(() => client.consumers.getByUsername('missing'), protocolFailure);
-    reply.body = JSON.stringify({ data: [], pagination: { offset: 0, limit: 500, total: 0 } });
-    assert.equal(await client.consumers.getByUsername('missing'), null);
-    reply.body = JSON.stringify({ data: [], pagination: { offset: 0, limit: 1, total: 0 } });
-    await assert.rejects(() => client.consumers.getByUsername('missing'), protocolFailure);
     reply.body = JSON.stringify({ data: [], pagination: { offset: 0, limit: 1000, total: 0 } });
     assert.deepEqual(await client.pluginConfigs.listByProxy('missing'), []);
     assert.deepEqual(await client.listNamespaces(), []);

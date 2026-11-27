@@ -17,7 +17,6 @@ import {
   type MockFerrumEdge,
 } from '../test/mock-ferrum-edge.js';
 import {
-  CONSUMER_SCAN_LIMIT,
   consumerPreconditionFailed,
   createFerrumAdminClient,
   createKeyedSerializer,
@@ -27,8 +26,6 @@ import {
 import { createAdminTokenMinter, type AdminTokenMinter } from './jwt.js';
 import type { EdgeApiSpecDocument, EdgeProxyWrite } from './types.js';
 
-const MORE_CONSUMERS = /more consumers/i;
-const RESTORE_CONSUMER_ID_MAPPING = /restore the consumer id mapping from backup/i;
 const HAS_NOT_APPLIED_YET = /has not applied it yet/;
 const ADMIN_CREDENTIALS = /admin credentials/;
 const LISTEN_PATH_ALREADY_EXISTS = /listen_path already exists/;
@@ -488,35 +485,6 @@ describe('ferrum admin client', () => {
       headers: { authorization: `Bearer ${token}`, 'x-ferrum-namespace': 'nexus' },
     });
     assert.equal(wellFormed.status, 404);
-  });
-
-  it('finds a consumer by username by scanning the list endpoint', async () => {
-    await client.consumers.create({ id: 'u-a', username: 'nexus-user-a' });
-    await client.consumers.create({ id: 'u-b', username: 'nexus-user-b' });
-    const found = await client.consumers.getByUsername('nexus-user-b');
-    assert.equal(found?.id, 'u-b');
-    assert.equal(await client.consumers.getByUsername('nexus-user-zz'), null);
-  });
-
-  it('refuses to answer "not found" for a namespace the username scan cannot finish', async () => {
-    await client.consumers.create({ id: 'u-first', username: 'nexus-user-first' });
-    for (let index = 0; index < CONSUMER_SCAN_LIMIT; index += 1) {
-      edge.seedConsumer({ username: `filler-${index}`, namespace: 'nexus' });
-    }
-    // Within the scan: found as ever.
-    assert.equal((await client.consumers.getByUsername('nexus-user-first'))?.id, 'u-first');
-    // Beyond it: the scan gave up, and says so rather than answering `null`.
-    await assert.rejects(
-      () => client.consumers.getByUsername('nexus-user-zz'),
-      (error: unknown) =>
-        isNexusError(error) &&
-        error.code === 'EDGE_ERROR' &&
-        MORE_CONSUMERS.test(error.message) &&
-        RESTORE_CONSUMER_ID_MAPPING.test(error.message),
-    );
-    // Exactly the cap is still a complete read.
-    edge.consumers.delete('nexus/u-first');
-    assert.equal(await client.consumers.getByUsername('nexus-user-zz'), null);
   });
 
   it('does not scan or create after a failed direct identity lookup', async () => {

@@ -3691,25 +3691,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // the create never landed.
       //
       // A registration that stopped before even that — claimed, nothing asked
-      // for yet — is resolved by the id the username derives to, which is the
-      // id the *first* consumer of a name always carries, and only an identity
-      // older than that derivation falls through to the capped scan. Past the
-      // cap the scan throws rather than answering "not found", so the caller
-      // keeps the registration intact instead of closing over a consumer
-      // nobody looked at.
-      //
-      // No registration at all is still worth one derived-id read: it is what
-      // an identity stranded before #139 was fixed looks like, and one `GET`
-      // is what it takes to collect it rather than leave it on the gateway for
-      // good. Never the scan in that case — there is nothing to say a consumer
-      // was ever created, so a namespace-wide read would be paid on every
-      // deletion of an API that simply never had a test consumer.
-      const live = !current
-        ? await edge.consumers.get(edge.consumers.derivedId(username), CONFIRMED_ABSENCE)
-        : current.ferrum_consumer_id !== null
-          ? await edge.consumers.get(current.ferrum_consumer_id, CONFIRMED_ABSENCE)
-          : ((await edge.consumers.get(edge.consumers.derivedId(username), CONFIRMED_ABSENCE)) ??
-            (await edge.consumers.getByUsername(username)));
+      // for yet — and no registration at all are both resolved by the id the
+      // username derives to, which is the id the *first* consumer of a name
+      // always carries ({@link FerrumAdminClient.consumers} `ensure` creates
+      // under it). One `GET`, on a gateway of any size.
+      const live = await edge.consumers.get(
+        current?.ferrum_consumer_id ?? edge.consumers.derivedId(username),
+        CONFIRMED_ABSENCE,
+      );
       let revoked = 0;
       if (live) {
         // Name, then id — the order creation takes the two keys in. A test

@@ -17,9 +17,8 @@
  * timed. What is asserted is the property the issue names: when the disable
  * reports completion, nothing of the account is live on the gateway.
  *
- * The second suite runs the same teardown on a gateway whose namespace has
- * outgrown the username scan, where a registration is the only thing that
- * can lead to its consumer.
+ * The second suite runs the same teardown on a large namespace, where the
+ * registration leads straight to its consumer.
  */
 
 import assert from 'node:assert/strict';
@@ -34,12 +33,11 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
-import { CONSUMER_SCAN_LIMIT, derivedConsumerId } from '../ferrum-admin/client.js';
+import { derivedConsumerId } from '../ferrum-admin/client.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 const DISABLED = /disabled/i;
 const NO_LONGER_DISABLED = /no longer disabled/i;
-const MORE_CONSUMERS = /more consumers/i;
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -574,17 +572,18 @@ describe('first gateway identity versus disable', () => {
   });
 });
 
-/* ── Past the username-scan cap ──────────────────────────────────────────── */
+/* ── On a large namespace ─────────────────────────────────────────────── */
+
+/** Consumers in the namespace: enough that a namespace-wide read would be costly. */
+const LARGE_NAMESPACE = 10_000;
 
 /**
- * The Edge client finds a consumer by username by walking `GET /consumers`,
- * and stops after `CONSUMER_SCAN_LIMIT` of them. A registration bound to its
- * consumer's id must lead the teardown there directly, on a gateway of any
- * size; and a registration that never got as far as the id must not be
- * consumed on the strength of a scan that never reached its consumer.
+ * Nexus never looks a consumer up by username. A registration leads the
+ * teardown to its consumer by the bound id, or the id the username derives
+ * to, so the size of the namespace does not matter.
  */
-describe('gateway identities past the username-scan cap', () => {
-  /** Consumers that are nobody's: what pushes the namespace past the cap. */
+describe('gateway identities on a large namespace', () => {
+  /** Consumers that are nobody's: what makes the namespace large. */
   const fillers: string[] = [];
 
   /** Seed anonymous consumers until the namespace holds `count`. */
@@ -605,16 +604,14 @@ describe('gateway identities past the username-scan cap', () => {
   before(async () => {
     harness = await buildTestApp();
     founder = await harness.registerUser({ email: 'identity-scan-founder@example.test' });
-    // Exactly the cap: a scan still reads the whole namespace, so a test
-    // consumer can be created — and it lands just past what a scan sees.
-    fillNamespaceTo(CONSUMER_SCAN_LIMIT);
+    fillNamespaceTo(LARGE_NAMESPACE);
   });
 
   after(async () => {
     await harness.close();
   });
 
-  it('tears down a bound identity by id, not by a scan that cannot reach it', async () => {
+  it('tears down a bound identity by id', async () => {
     const provider = await freshProvider();
     const api = await publish(provider, 'identity-scan-bound');
     const username = `nexus-test-${api.id}`;
@@ -622,51 +619,10 @@ describe('gateway identities past the username-scan cap', () => {
     const created = await createTestConsumer(provider, api.id);
     assert.equal(created.statusCode, 201, created.body);
     assert.ok(harness.edge.consumerByUsername(username));
-    // The consumer is one past the cap: a username scan gives up before it,
-    // and says so rather than answering "not found".
-    await assert.rejects(
-      () => harness.edgeClient.consumers.getByUsername(username),
-      (error: Error) => MORE_CONSUMERS.test(error.message),
-    );
 
     const disabled = await disable('patch', provider);
     assert.equal(disabled.status, 200, disabled.body);
     assert.equal(disabled.teardown, 'ok', 'the registration led straight to the consumer');
-    await assertNothingLive(provider, api.id);
-  });
-
-  it('leaves an unbound identity pending rather than closing over an unread scan', async () => {
-    const provider = await freshProvider();
-    const api = await publish(provider, 'identity-scan-unbound');
-    const username = `nexus-test-${api.id}`;
-
-    // A creation that stopped before `bind`: registered, with a consumer of
-    // the registered name up on the gateway — one past the cap.
-    await harness.services.credentials.claimGatewayIdentity(provider.user.id, username);
-    fillNamespaceTo(CONSUMER_SCAN_LIMIT);
-    harness.edge.seedConsumer({
-      username,
-      namespace: 'nexus',
-      acl_groups: [aclGroupForApi(api.id)],
-    });
-
-    const disabled = await disable('patch', provider);
-    assert.equal(disabled.status, 200, disabled.body);
-    assert.equal(disabled.teardown, 'pending', 'an unread namespace is not "no consumer"');
-    assert.ok(harness.edge.consumerByUsername(username), 'the consumer is still up');
-    assert.equal(await registrations(provider.user.id), 1, 'the registration is kept');
-    assert.equal(
-      (await harness.store.gatewayTeardownJobs.findByUser(provider.user.id))?.status,
-      'pending',
-    );
-
-    // Once the namespace is back within reach, the retry finds the consumer
-    // through the registration it kept.
-    const spare = fillers.pop();
-    assert.ok(spare);
-    harness.edge.consumers.delete(`nexus/${spare}`);
-    const tick = await harness.services.teardown.tick();
-    assert.ok(tick.completed >= 1, JSON.stringify(tick));
     await assertNothingLive(provider, api.id);
   });
 });

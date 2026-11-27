@@ -3670,12 +3670,10 @@ test consumers are recorded in `gateway_identities`. Normal provisioning does
 not list the namespace. Keep these tables in every backup, and never change a
 consumer's id or username on Edge.
 
-Older identities without a portal mapping are adopted after a create conflict by
-scanning at most 20 pages of 500 consumers. An incomplete scan returns
-`EDGE_ERROR` with a recovery instruction, never "no consumer", and teardown keeps
-its job and registration.
-
-If that limit is reached:
+Nexus never looks a consumer up by username. A consumer whose id is neither
+recorded nor derived from its username is not the portal's: a create that
+conflicts with it fails with `EDGE_ERROR`, and teardown does not find it. If a
+mapping was lost (for example, after restoring Edge but not Nexus):
 
 1. Back up the portal database and pause Nexus during maintenance.
 2. Restore the affected mapping from a consistent Nexus backup: the `consumers`
@@ -3685,10 +3683,7 @@ If that limit is reached:
    the username must be exactly `nexus-user-<user_id>` for an account,
    `nexus-app-<application_id>` for one of its applications, or the registered
    `nexus-test-<api_id>`.
-4. With no backup, inventory the gateway with paginated Admin API reads and
-   rebuild the mapping after the same checks. Do not delete gateway identities
-   or credentials to shorten the scan.
-5. Resume Nexus and retry the operation or pending teardown.
+4. Resume Nexus and retry the operation or pending teardown.
 
 ### What a drifted consumer looks like
 
