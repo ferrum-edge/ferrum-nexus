@@ -613,85 +613,99 @@ describe('ferrum admin client', () => {
       assert.equal(await client.consumers.getTagged('missing'), null);
     });
 
-    for (const mode of ['evaluate', 'unsupported'] as const) {
-      const gateway = mode === 'evaluate' ? 'Edge with #7393' : 'Edge v0.9.20';
+    it('deletes the selected entry while the consumer is unchanged', async () => {
+      const etag = await twoKeys('fresh');
+      await client.consumers.deleteCredentialAt('fresh', 'keyauth', 1, undefined, etag);
+      assert.deepEqual(keysOf('fresh'), ['fresh-first']);
 
-      it(`${gateway}: deletes the selected entry while the consumer is unchanged`, async () => {
-        edge.setCredentialIfMatch(mode);
-        const etag = await twoKeys(`fresh-${mode}`);
-        await client.consumers.deleteCredentialAt(`fresh-${mode}`, 'keyauth', 1, undefined, etag);
-        assert.deepEqual(keysOf(`fresh-${mode}`), [`fresh-${mode}-first`]);
+      const sent = deletesTo('fresh');
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0]?.ifMatch, etag, 'the read’s tag rides on the delete');
+    });
 
-        const sent = deletesTo(`fresh-${mode}`);
-        assert.equal(sent[0]?.ifMatch, etag, 'the read’s tag rides on the delete');
-        if (mode === 'evaluate') {
-          assert.equal(sent.length, 1);
-        } else {
-          // Refused for its header, then re-read and sent without it.
-          assert.equal(sent.length, 2);
-          assert.equal(sent[1]?.ifMatch, undefined);
-          assert.equal(edge.callsTo('GET', `/consumers/fresh-${mode}`).length, 2);
-        }
-      });
+    it('refuses a stale index without deleting or resending', async () => {
+      const id = 'stale';
+      const etag = await twoKeys(id);
+      prependForeignKey(id);
 
-      it(`${gateway}: refuses a stale index without deleting or resending`, async () => {
-        edge.setCredentialIfMatch(mode);
-        const id = `stale-${mode}`;
-        const etag = await twoKeys(id);
-        prependForeignKey(id);
-
-        await assert.rejects(
-          () => client.consumers.deleteCredentialAt(id, 'keyauth', 1, undefined, etag),
-          (error: unknown) => {
-            assert.ok(isNexusError(error));
-            assert.equal(error.code, 'CONFLICT');
-            assert.ok(consumerPreconditionFailed(error));
-            return true;
-          },
-        );
-        assert.deepEqual(
-          keysOf(id),
-          ['foreign-key', `${id}-first`, `${id}-second`],
-          'nothing was deleted, least of all the key that moved into index 1',
-        );
-        assert.equal(deletesTo(id).length, 1, 'the refused delete is never resent');
-      });
-
-      it(`${gateway}: conditions appends and whole-type deletes the same way`, async () => {
-        edge.setCredentialIfMatch(mode);
-        const id = `type-${mode}`;
-        const etag = await twoKeys(id);
-        prependForeignKey(id);
-
-        const refused = (error: unknown): boolean => consumerPreconditionFailed(error);
-        const entry = { secret: 'jwt-secret' };
-        await assert.rejects(
-          () => client.consumers.addCredential(id, 'jwt', entry, undefined, etag),
-          refused,
-        );
-        await assert.rejects(
-          () => client.consumers.deleteCredentialType(id, 'keyauth', undefined, etag),
-          refused,
-        );
-        assert.equal(keysOf(id).length, 3);
-        assert.equal(edge.consumers.get(`nexus/${id}`)?.credentials.jwt, undefined);
-
-        const fresh = await client.consumers.getTagged(id);
-        assert.ok(fresh);
-        await client.consumers.deleteCredentialType(id, 'keyauth', undefined, fresh.etag);
-        assert.deepEqual(keysOf(id), []);
-      });
-    }
-
-    it('Edge v0.9.20: refuses when the consumer is gone by the re-read', async () => {
-      edge.setCredentialIfMatch('unsupported');
-      const etag = await twoKeys('vanished');
-      edge.consumers.delete('nexus/vanished');
       await assert.rejects(
-        () => client.consumers.deleteCredentialAt('vanished', 'keyauth', 1, undefined, etag),
-        (error: unknown) => consumerPreconditionFailed(error),
+        () => client.consumers.deleteCredentialAt(id, 'keyauth', 1, undefined, etag),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'CONFLICT');
+          assert.ok(consumerPreconditionFailed(error));
+          return true;
+        },
       );
-      assert.equal(deletesTo('vanished').length, 1);
+      assert.deepEqual(
+        keysOf(id),
+        ['foreign-key', `${id}-first`, `${id}-second`],
+        'nothing was deleted, least of all the key that moved into index 1',
+      );
+      assert.equal(deletesTo(id).length, 1, 'the refused delete is never resent');
+    });
+
+    it('conditions appends and whole-type deletes the same way', async () => {
+      const id = 'type';
+      const etag = await twoKeys(id);
+      prependForeignKey(id);
+
+      const refused = (error: unknown): boolean => consumerPreconditionFailed(error);
+      const entry = { secret: 'jwt-secret' };
+      await assert.rejects(
+        () => client.consumers.addCredential(id, 'jwt', entry, undefined, etag),
+        refused,
+      );
+      await assert.rejects(
+        () => client.consumers.deleteCredentialType(id, 'keyauth', undefined, etag),
+        refused,
+      );
+      assert.equal(keysOf(id).length, 3);
+      assert.equal(edge.consumers.get(`nexus/${id}`)?.credentials.jwt, undefined);
+
+      const fresh = await client.consumers.getTagged(id);
+      assert.ok(fresh);
+      await client.consumers.deleteCredentialType(id, 'keyauth', undefined, fresh.etag);
+      assert.deepEqual(keysOf(id), []);
+    });
+
+    it('refuses an Edge older than v0.9.21 as a definite non-write, never resent without the tag', async () => {
+      // Edge v0.9.20 and earlier refuse `If-Match` on credential routes from
+      // their router, before acting.
+      edge.setCredentialIfMatch('unsupported');
+      const id = 'too-old';
+      const etag = await twoKeys(id);
+      const tooOld = (error: unknown): boolean => {
+        assert.ok(isNexusError(error));
+        assert.equal(error.code, 'EDGE_ERROR');
+        assert.match(error.message, /requires Ferrum Edge v0\.9\.21 or later/);
+        assert.deepEqual(error.details, { status: 400, kind: 'if_match_unsupported' });
+        assert.equal(consumerPreconditionFailed(error), false);
+        assert.ok(credentialWriteNotApplied(error), 'nothing was written');
+        return true;
+      };
+      await assert.rejects(
+        () => client.consumers.deleteCredentialAt(id, 'keyauth', 1, undefined, etag),
+        tooOld,
+      );
+      const entry = { secret: 'jwt-secret' };
+      await assert.rejects(
+        () => client.consumers.addCredential(id, 'jwt', entry, undefined, etag),
+        tooOld,
+      );
+      await assert.rejects(
+        () => client.consumers.deleteCredentialType(id, 'keyauth', undefined, etag),
+        tooOld,
+      );
+      const writes = edge.requests.filter(
+        (request) =>
+          request.method !== 'GET' && request.path.includes(`/consumers/${id}/credentials`),
+      );
+      assert.equal(writes.length, 3, 'one conditional attempt each');
+      assert.ok(writes.every((request) => request.ifMatch === etag), 'never sent without the tag');
+      assert.equal(edge.callsTo('GET', `/consumers/${id}`).length, 1, 'no re-read');
+      assert.equal(keysOf(id).length, 2);
+      assert.equal(edge.consumers.get(`nexus/${id}`)?.credentials.jwt, undefined);
     });
 
     it('treats any other 400 as a refusal, not a missing capability', async () => {
@@ -760,25 +774,6 @@ describe('ferrum admin client', () => {
       }
       assert.equal(edge.requests.length, offset, 'refused before dispatch');
       assert.equal(keysOf('untagged').length, 2);
-    });
-
-    it('Edge v0.9.20: a re-read that cannot verify the tag is a definite non-write', async () => {
-      edge.setCredentialIfMatch('unsupported');
-      const etag = await twoKeys('unverified');
-      // The re-read after the router's refusal comes back without a tag, so
-      // the unconditional delete is never sent (issue #737).
-      edge.setConsumerTagIssued(false);
-      await assert.rejects(
-        () => client.consumers.deleteCredentialAt('unverified', 'keyauth', 1, undefined, etag),
-        (error: unknown) => {
-          assert.ok(isNexusError(error));
-          assert.equal(consumerPreconditionFailed(error), false);
-          assert.ok(credentialWriteNotApplied(error), 'nothing was written');
-          return true;
-        },
-      );
-      assert.equal(deletesTo('unverified').length, 1, 'only the refused conditional delete');
-      assert.equal(keysOf('unverified').length, 2);
     });
 
     it('keeps a write whose acknowledgement was lost an unknown outcome', async () => {
