@@ -1520,6 +1520,19 @@ export function canonicalIndexes(indexes: readonly IndexDefinition[]): unknown[]
   }));
 }
 
+/** Create one batch of {@link IndexDefinition}s. */
+async function createIndexes(db: Db, indexes: readonly IndexDefinition[]): Promise<void> {
+  for (const index of indexes) {
+    await db.collection(index.collection).createIndex(index.key, {
+      name: index.name,
+      ...(index.unique === true ? { unique: true } : {}),
+      ...(index.partialFilterExpression
+        ? { partialFilterExpression: index.partialFilterExpression }
+        : {}),
+    });
+  }
+}
+
 /** Give a step the identity and checksum the runner records for it. */
 export function mongoMigration(step: MongoMigrationStep): MongoMigration {
   const artifact = JSON.stringify({ id: step.id, indexes: canonicalIndexes(step.indexes) });
