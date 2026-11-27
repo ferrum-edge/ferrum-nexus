@@ -1256,6 +1256,7 @@ Do steps 1 to 4 on Edge v0.9.20 with Nexus `v0.6.0` still running:
    export and check again. Then restore the
    export into a scratch Edge v0.9.21 instance: a successful restore is the
    proof.
+
 5. **Stop Nexus and take the paired Nexus and Edge backup** (step 2 of
    [moving to a new release](#moving-to-a-new-release)), with a fresh Edge
    `GET /backup` that passes the check in step 4.
