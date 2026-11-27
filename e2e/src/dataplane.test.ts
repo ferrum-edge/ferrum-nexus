@@ -21,6 +21,25 @@ import { request as httpRequest } from 'node:http';
 import { after, before, describe, it } from 'node:test';
 import { promisify } from 'node:util';
 
+import {
+  API_SPEC_NOT_FOUND,
+  CONSUMER_NOT_FOUND,
+  EDGE_MAX_PAGE_SIZE,
+  IF_MATCH_UNSUPPORTED,
+  PLUGIN_CONFIG_NOT_FOUND,
+  PROXY_NOT_FOUND,
+  SPEC_PARSE_FAILED,
+  SPEC_VALIDATION_FAILED,
+} from '../../server/src/ferrum-admin/edge-vocabulary.js';
+import {
+  CONSUMER_KEYS,
+  EDGE_MAX_ACL_GROUPS,
+  PLUGIN_CONFIG_ALLOWED_KEYS,
+  PLUGIN_CONFIG_KEYS,
+  PROXY_HTTP_METHODS,
+  PROXY_KEYS,
+} from '../../server/src/test/edge-rules.js';
+import { MAX_ACL_GROUPS_PER_CONSUMER } from '../../shared/src/constants.js';
 import { PROVIDER_PLUGINS } from '../../shared/src/plugins.js';
 
 import {
@@ -2408,6 +2427,258 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const issued = await portal<Listed>('GET', '/api/credentials', { session: kept, expect: 200 });
     assert.equal(issued.items.find((item) => item.id === keptCredential.id)?.status, 'active');
   });
+
+  /* ── Edge's own backup and restore under the portal (Ferrum 1.0) ──────── */
+
+  // Edge's documented recovery path on its own: `GET /backup`, a fresh Edge
+  // database, `POST /restore?confirm=true` of that artifact unchanged. Every
+  // Edge id the portal recorded must resolve again and a published API keep
+  // serving, with no portal repair. The Edge Main Drift workflow runs this
+  // too, so a backup section or restore check Edge adds on `main` meets the
+  // resources Nexus writes before a release ships it.
+  it('keeps every recorded Edge id resolving across an Edge backup and restore', async () => {
+    const client = await newClient();
+    const api = await publishApi(provider, {
+      name: `E2E edge restore ${RUN}`,
+      slug: `e2e-edge-restore-${RUN}`,
+      authPlugin: 'key_auth',
+      enforcement: 'routes',
+    });
+    await grantAccess(client, provider, api.id);
+    const credential = await issueCredential(client, 'keyauth');
+    const headers = authHeadersFor(credential, 'keyauth');
+    await waitFor('the approved client to be served before the backup', async () => {
+      const response = await callGateway(`${api.listen_path}/invoices`, { headers });
+      return response.status === 200;
+    });
+    const stored = await portal<{ api: { ferrum_proxy_id: string | null } }>(
+      'GET',
+      `/api/apis/${api.id}`,
+      { session: provider, expect: 200 },
+    );
+    const proxyId = stored.api.ferrum_proxy_id;
+    assert.ok(proxyId, 'the API has a gateway proxy');
+    const pluginIds = await proxyPluginIds(proxyId);
+    assert.ok(pluginIds.length > 0, 'the proxy carries the portal’s plugin configs');
+    const before = await reconcile(provider);
+
+    // Nothing writes to Edge between the export and the restore.
+    await compose('stop', 'nexus');
+    const exported = await gatewayAdmin('GET', '/backup');
+    assert.equal(exported.status, 200, 'Edge exports its configuration');
+    const backup = (await exported.json()) as Record<string, unknown>;
+
+    // A fresh Edge database.
+    await compose('stop', 'ferrum-edge');
+    await onGatewayVolume('rm -rf /data/* /data/.[!.]*');
+    await compose('start', 'ferrum-edge');
+    await waitFor('the fresh gateway’s Admin API', async () => {
+      const response = await gatewayAdmin('GET', '/proxies?limit=1');
+      await response.body?.cancel();
+      return response.status === 200;
+    });
+    const missing = await gatewayAdmin('GET', `/proxies/${encodeURIComponent(proxyId)}`);
+    await missing.body?.cancel();
+    assert.equal(missing.status, 404, 'the gateway starts from an empty database');
+
+    const restored = await gatewayAdmin('POST', '/restore?confirm=true', backup);
+    assert.equal(restored.status, 200, await restored.text());
+    await compose('start', 'nexus');
+    await waitForStack();
+
+    // Every id the portal recorded resolves again, exactly as before.
+    const proxy = await gatewayAdmin('GET', `/proxies/${encodeURIComponent(proxyId)}`);
+    await proxy.body?.cancel();
+    assert.equal(proxy.status, 200, 'the recorded proxy id resolves');
+    assert.deepEqual(await proxyPluginIds(proxyId), pluginIds);
+    const after = await reconcile(provider);
+    assert.equal(after.error, null);
+    assert.deepEqual(after.consumers, before.consumers);
+    assert.deepEqual(after.proxies, before.proxies);
+    assert.deepEqual(after.orphaned_consumers, before.orphaned_consumers);
+    assert.deepEqual(after.orphaned_proxies, before.orphaned_proxies);
+
+    // The published API keeps serving the credential issued before the backup.
+    await waitFor('the restored gateway to serve the approved client', async () => {
+      const response = await callGateway(`${api.listen_path}/invoices`, { headers });
+      return response.status === 200;
+    });
+    const served = await callGateway(`${api.listen_path}/invoices`, { headers });
+    assert.equal(served.status, 200);
+    assert.ok(reachedUpstream(served), 'the restored gateway reaches the real upstream');
+
+    // And the portal writes to the restored consumer through its recorded id.
+    const next = await issueCredential(client, 'keyauth');
+    await waitFor('a credential issued after the restore to be served', async () => {
+      const response = await callGateway(`${api.listen_path}/invoices`, {
+        headers: authHeadersFor(next, 'keyauth'),
+      });
+      return response.status === 200;
+    });
+  });
+
+  /* ── Edge rules Nexus and the mock gateway copy (Ferrum 1.0) ──────────── */
+
+  // The client (`server/src/ferrum-admin/edge-vocabulary.ts`) and the mock
+  // gateway the unit suite runs against (`server/src/test/edge-rules.ts`) copy
+  // Edge rules. These cases hold each copy to the gateway under test: the
+  // pinned release here, and Edge `main` in the Edge Main Drift workflow.
+
+  it('copied rules: the page-size cap and the messages the client matches', async () => {
+    const page = await gatewayAdmin('GET', `/proxies?limit=${EDGE_MAX_PAGE_SIZE + 1}`);
+    assert.equal(page.status, 200);
+    const listed = (await page.json()) as { pagination?: { limit?: unknown } };
+    assert.equal(listed.pagination?.limit, EDGE_MAX_PAGE_SIZE, 'Edge clamps limit to its cap');
+
+    const absent = `nexus-parity-missing-${RUN}`;
+    for (const [path, message] of [
+      [`/consumers/${absent}`, CONSUMER_NOT_FOUND],
+      [`/proxies/${absent}`, PROXY_NOT_FOUND],
+      [`/plugins/config/${absent}`, PLUGIN_CONFIG_NOT_FOUND],
+      [`/api-specs/${absent}`, API_SPEC_NOT_FOUND],
+    ] as const) {
+      const response = await gatewayAdmin('GET', path);
+      assert.equal(response.status, 404, path);
+      const body = (await adminBody(response)) as { error?: unknown };
+      assert.equal(body.error, message, path);
+    }
+
+    // `If-Match` on a route that does not evaluate it is refused before
+    // dispatch; the empty body would be refused anyway, so nothing is written.
+    const ifMatch = { 'if-match': '"nexus-parity"' };
+    const conditional = await gatewayAdmin('POST', '/proxies', {}, ifMatch);
+    assert.equal(conditional.status, 400);
+    const refusal = (await adminBody(conditional)) as { error?: unknown };
+    assert.ok(
+      typeof refusal.error === 'string' && refusal.error.startsWith(IF_MATCH_UNSUPPORTED),
+      `unexpected If-Match refusal: ${JSON.stringify(refusal)}`,
+    );
+
+    // A document without `x-ferrum-proxy` cannot be extracted.
+    const unparsed = await gatewayAdmin('POST', '/api-specs', {
+      openapi: '3.1.0',
+      info: { title: 'Nexus parity', version: '1' },
+      paths: {},
+    });
+    const unparsedBody = (await adminBody(unparsed)) as { error?: unknown };
+    assert.equal(unparsed.status, 400, JSON.stringify(unparsedBody));
+    assert.equal(unparsedBody.error, SPEC_PARSE_FAILED);
+
+    // One whose plugin config Edge refuses fails validation.
+    const invalid = await gatewayAdmin('POST', '/api-specs', {
+      openapi: '3.1.0',
+      info: { title: 'Nexus parity', version: '1' },
+      paths: {},
+      'x-ferrum-proxy': parityProxy('spec'),
+      'x-ferrum-plugins': [{ plugin_name: 'ip_restriction', config: {} }],
+    });
+    const invalidBody = (await adminBody(invalid)) as { id?: unknown; error?: unknown };
+    if (invalid.status < 300 && typeof invalidBody.id === 'string') {
+      await gatewayAdmin('DELETE', `/api-specs/${encodeURIComponent(invalidBody.id)}`);
+    }
+    assert.equal(invalid.status, 422, JSON.stringify(invalidBody));
+    assert.equal(invalidBody.error, SPEC_VALIDATION_FAILED);
+  });
+
+  it('copied rules: the closed proxy, consumer and plugin-config envelopes', async () => {
+    for (const [path, keys] of [
+      ['/proxies', PROXY_KEYS],
+      ['/consumers', CONSUMER_KEYS],
+      ['/plugins/config', PLUGIN_CONFIG_KEYS],
+    ] as const) {
+      // The envelope is closed…
+      const closed = await gatewayAdmin('POST', path, { [PARITY_PROBE_KEY]: null });
+      const closedText = messagesOf(await adminBody(closed));
+      assert.equal(closed.status, 400, `${path}: ${closedText}`);
+      assert.match(closedText, UNKNOWN_FIELD, `${path} refuses an unknown field`);
+      // …and every field the mock accepts is still one of its fields. A body
+      // of one field always lacks a required one, so nothing is created.
+      for (const field of keys) {
+        const response = await gatewayAdmin('POST', path, { [field]: null });
+        const text = messagesOf(await adminBody(response));
+        assert.ok(response.status >= 400, `${path} accepted only \`${field}\`: ${text}`);
+        assert.doesNotMatch(text, UNKNOWN_FIELD, `${path} no longer accepts \`${field}\``);
+      }
+    }
+  });
+
+  it('copied rules: proxy admission and the consumer ACL-group cap', async () => {
+    const probeProxy = parityProxy('methods');
+    try {
+      await expectRefused('/proxies', { ...parityProxy('empty'), allowed_methods: [] });
+      await expectRefused('/proxies', { ...parityProxy('brew'), allowed_methods: ['BREW'] });
+      await expectRefused('/proxies', {
+        ...parityProxy('dot'),
+        listen_path: `/nexus-parity-dot-${RUN}/../escape`,
+      });
+      await expectRefused('/proxies', {
+        ...parityProxy('semicolon'),
+        listen_path: `/nexus-parity-semicolon-${RUN};v=1`,
+      });
+      const created = await gatewayAdmin('POST', '/proxies', {
+        ...probeProxy,
+        allowed_methods: [...PROXY_HTTP_METHODS],
+      });
+      assert.equal(created.status, 201, messagesOf(await adminBody(created)));
+    } finally {
+      await gatewayAdmin('DELETE', `/proxies/${encodeURIComponent(probeProxy.id)}`);
+    }
+
+    assert.equal(EDGE_MAX_ACL_GROUPS, MAX_ACL_GROUPS_PER_CONSUMER);
+    const consumer = (count: number) => ({
+      id: `nexus-parity-${RUN}`,
+      username: `nexus-parity-${RUN}`,
+      acl_groups: Array.from({ length: count }, (_unused, index) => `nexus-parity-${index}`),
+    });
+    try {
+      await expectRefused('/consumers', consumer(EDGE_MAX_ACL_GROUPS + 1));
+      const atCap = await gatewayAdmin('POST', '/consumers', consumer(EDGE_MAX_ACL_GROUPS));
+      assert.equal(atCap.status, 201, messagesOf(await adminBody(atCap)));
+    } finally {
+      await gatewayAdmin('DELETE', `/consumers/${encodeURIComponent(`nexus-parity-${RUN}`)}`);
+    }
+  });
+
+  it('copied rules: every closed plugin key list the mock enforces', async () => {
+    // Every key the mock accepts must still be one Edge accepts on an enabled
+    // config, and the list must stay closed. Edge names each unknown key; the
+    // probe key always is one, so no config is ever created.
+    const probeProxy = parityProxy('plugins');
+    const proxy = await gatewayAdmin('POST', '/proxies', probeProxy);
+    assert.equal(proxy.status, 201, messagesOf(await adminBody(proxy)));
+    try {
+      for (const [pluginName, keys] of Object.entries(PLUGIN_CONFIG_ALLOWED_KEYS)) {
+        const global = pluginName === 'prometheus_metrics';
+        const response = await gatewayAdmin('POST', '/plugins/config', {
+          plugin_name: pluginName,
+          scope: global ? 'global' : 'proxy',
+          ...(global ? {} : { proxy_id: probeProxy.id }),
+          enabled: true,
+          // Not `null`: `cors` refuses a null value before it reaches the
+          // next key. Edge checks the keys before it reads any value.
+          config: {
+            ...Object.fromEntries(keys.map((key) => [key, 'nexus-parity'])),
+            [PARITY_PROBE_KEY]: 'nexus-parity',
+          },
+        });
+        const body = await adminBody(response);
+        if (response.status < 300) {
+          const id = (body as { id?: unknown }).id;
+          if (typeof id === 'string') {
+            await gatewayAdmin('DELETE', `/plugins/config/${encodeURIComponent(id)}`);
+          }
+        }
+        assert.equal(response.status, 400, `${pluginName}: ${messagesOf(body)}`);
+        assert.deepEqual(
+          unknownKeysNamed(messagesOf(body)),
+          [PARITY_PROBE_KEY],
+          `${pluginName}: the keys Edge refuses (${messagesOf(body)})`,
+        );
+      }
+    } finally {
+      await gatewayAdmin('DELETE', `/proxies/${encodeURIComponent(probeProxy.id)}`);
+    }
+  });
 });
 
 /**
@@ -2418,7 +2689,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
  * be asked to help break itself.
  */
 async function gatewayAdmin(
-  method: 'GET' | 'PUT' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   path: string,
   document?: unknown,
   headers: Record<string, string> = {},
@@ -2469,4 +2740,112 @@ async function deleteProxyOnGateway(proxyId: string): Promise<void> {
   if (response.status >= 400 && response.status !== 404) {
     throw new Error(`Deleting proxy ${proxyId} answered ${response.status}`);
   }
+}
+
+/** A field no Edge resource or plugin declares, sorted after every real one. */
+const PARITY_PROBE_KEY = 'zz_nexus_parity_probe';
+
+/** Edge's refusal of a field its closed deserializer does not declare. */
+const UNKNOWN_FIELD = /unknown field/i;
+
+/** A minimal HTTP proxy for the copied-rule cases, on its own listen path. */
+function parityProxy(label: string): {
+  id: string;
+  listen_path: string;
+  backend_scheme: string;
+  backend_host: string;
+  backend_port: number;
+} {
+  const upstream = new URL(UPSTREAM_URL);
+  return {
+    id: `nexus-parity-${label}-${RUN}`,
+    listen_path: `/nexus-parity-${label}-${RUN}`,
+    backend_scheme: upstream.protocol.replace(':', ''),
+    backend_host: upstream.hostname,
+    backend_port: Number(upstream.port),
+  };
+}
+
+/** An Admin API response body, parsed when it is JSON. */
+async function adminBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
+
+/** Every string in an Edge error body, so a check reads `error` and `errors` alike. */
+function messagesOf(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(messagesOf).join('\n');
+  if (value !== null && typeof value === 'object') {
+    return Object.values(value).map(messagesOf).join('\n');
+  }
+  return '';
+}
+
+/**
+ * The keys an Edge plugin refusal names as unknown, once each:
+ * `reject_unknown_keys` lists each as `"config.<key>"`, and `cors` names its
+ * first as `"<key>"`.
+ */
+function unknownKeysNamed(message: string): string[] {
+  const names = new Set<string>();
+  for (const line of message.split('\n')) {
+    const at = line.indexOf('unknown configuration key');
+    if (at === -1) continue;
+    for (const match of line.slice(at).matchAll(/"([^"]+)"/g)) {
+      const quoted = match[1] ?? '';
+      names.add(quoted.slice(quoted.lastIndexOf('.') + 1));
+    }
+  }
+  return [...names];
+}
+
+/** Assert Edge refuses `document`, removing it again if it was created after all. */
+async function expectRefused(
+  path: string,
+  document: { id: string; [field: string]: unknown },
+): Promise<void> {
+  const response = await gatewayAdmin('POST', path, document);
+  const text = messagesOf(await adminBody(response));
+  if (response.status < 300) {
+    await gatewayAdmin('DELETE', `${path}/${encodeURIComponent(document.id)}`);
+  }
+  assert.equal(response.status, 400, `${path} accepted ${JSON.stringify(document)}: ${text}`);
+}
+
+/** The ids of the plugin configs Edge holds for one proxy, sorted. */
+async function proxyPluginIds(proxyId: string): Promise<string[]> {
+  const response = await gatewayAdmin(
+    'GET',
+    `/plugins/config?proxy_id=${encodeURIComponent(proxyId)}&limit=${EDGE_MAX_PAGE_SIZE}`,
+  );
+  assert.equal(response.status, 200);
+  const page = (await response.json()) as { data: { id: string }[] };
+  return page.data.map((plugin) => plugin.id).sort();
+}
+
+/** The slice of a reconciliation report the Edge restore case compares. */
+interface ReconcileReport {
+  error: string | null;
+  consumers: unknown;
+  proxies: unknown;
+  orphaned_consumers: { ferrum_consumer_id: string }[];
+  orphaned_proxies: { ferrum_proxy_id: string }[];
+}
+
+/** Run one reconciliation pass as `session`, with its orphan lists in a stable order. */
+async function reconcile(session: Session): Promise<ReconcileReport> {
+  const report = await portal<ReconcileReport>('POST', '/api/admin/gateway/reconcile', {
+    session,
+    body: {},
+    expect: 200,
+  });
+  const consumers = report.orphaned_consumers;
+  consumers.sort((a, b) => a.ferrum_consumer_id.localeCompare(b.ferrum_consumer_id));
+  report.orphaned_proxies.sort((a, b) => a.ferrum_proxy_id.localeCompare(b.ferrum_proxy_id));
+  return report;
 }

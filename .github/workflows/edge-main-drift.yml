@@ -8,6 +8,11 @@ name: Edge Main Drift
 # same suite (`./e2e/run.sh`) against the newest signed Edge `main` image,
 # through the runner's documented FERRUM_EDGE_IMAGE override (e2e/README.md).
 #
+# The suite includes the cases that compare every Edge rule Nexus and its
+# mock gateway copy with the gateway under test, and Edge's own backup and
+# restore of the resources Nexus writes (e2e/README.md), so here they run
+# against Edge main.
+#
 # It is never a required check, and it qualifies nothing: the pin stays the
 # only Edge the portal is released against. A failure opens or updates one
 # issue labelled `edge-main-drift`, and a clean run closes it. Only the `issue`

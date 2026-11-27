@@ -55,6 +55,16 @@ import type { LeaseRepo } from '../db/store.js';
 import { conflict, edgeError, edgeUnavailable, internal, NexusError } from '../lib/errors.js';
 import { createKeyedSerializer, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import {
+  API_SPEC_NOT_FOUND,
+  CONSUMER_NOT_FOUND,
+  EDGE_MAX_PAGE_SIZE,
+  IF_MATCH_UNSUPPORTED,
+  PLUGIN_CONFIG_NOT_FOUND,
+  PROXY_NOT_FOUND,
+  SPEC_PARSE_FAILED,
+  SPEC_VALIDATION_FAILED,
+} from './edge-vocabulary.js';
+import {
   createAdminTokenMinter,
   createFleetReadTokenMinter,
   DEFAULT_ADMIN_SUBJECT,
@@ -614,12 +624,6 @@ export function derivedConsumerId(namespace: string, username: string): string {
 }
 
 /**
- * Edge's `MAX_PAGE_SIZE` (`src/admin/mod.rs`). A larger `limit` is clamped to
- * this, so asking for more only costs a wasted parameter.
- */
-const EDGE_MAX_PAGE_SIZE = 1000;
-
-/**
  * Page cap for a plugin-config scan: 50 × 1000 rows — one proxy's configs for
  * `listByProxy`, the whole namespace for the metrics-config lookup.
  */
@@ -641,14 +645,6 @@ function isStrongRowTag(value: unknown): value is string {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
-
-/**
- * The start of the `400` that Ferrum Edge releases before ferrum-edge#7393
- * (v0.9.20 and earlier) answer to `If-Match` on a consumer credential route.
- * Their router refuses the header before dispatch, so nothing was written.
- * Edge v0.9.21, the first release Nexus supports, evaluates it.
- */
-const IF_MATCH_UNSUPPORTED = 'If-Match is only supported on';
 
 /** What an Edge older than v0.9.21 is told when it refuses a conditional credential write. */
 const EDGE_TOO_OLD_FOR_CREDENTIAL_WRITES =
@@ -727,17 +723,6 @@ function isStringArray(value: unknown): boolean {
 function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
-
-/**
- * Edge's `404` `error` for each resource that does not exist in the namespace:
- * `NOT_FOUND_MESSAGE` of its `AdminResource` (`src/admin/crud.rs`), and
- * `ApiSpecError::NotFound` (`src/admin/api_specs/handlers.rs`). Edge answers an
- * unknown route with `{"error": "Not Found"}`, which none of these match.
- */
-const CONSUMER_NOT_FOUND = 'Consumer not found';
-const PROXY_NOT_FOUND = 'Proxy not found';
-const PLUGIN_CONFIG_NOT_FOUND = 'Plugin config not found';
-const API_SPEC_NOT_FOUND = 'API spec not found';
 
 /**
  * Whether a `404` body is Edge's `{"error": <expected>}` answer for a missing
@@ -1931,7 +1916,7 @@ export function createFerrumAdminClient(
       isApiSpecWrite &&
       status >= 400 &&
       status < 500 &&
-      (body.error === 'Spec parse failed' || body.error === 'Spec validation failed')
+      (body.error === SPEC_PARSE_FAILED || body.error === SPEC_VALIDATION_FAILED)
     ) {
       let gatewayMessage: string = body.error;
       if (typeof body.details === 'string' && body.details.trim() !== '') {
