@@ -198,9 +198,9 @@ export const AuditAction = {
   /**
    * The startup pass finished for a namespace with every palette config that
    * carried a key Edge has removed (`ip_restriction.mode`, issue #727)
-   * rewritten, each with its own `api.plugin_set` row naming `retired_keys`.
-   * Written by the system once per namespace, targeting it; the pass itself
-   * still runs at every start.
+   * rewritten. `v0.6.0` recorded it once per namespace; nothing writes it any
+   * more, and the action stays in the catalog so those rows remain listable
+   * and filterable.
    */
   API_PLUGIN_KEYS_STRIPPED: 'api.plugin_keys_stripped',
   /**
@@ -629,8 +629,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_PLUGIN_REMOVE]: TRANSACTIONAL,
   [AuditAction.API_PLUGIN_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.API_PLUGIN_KEYS_STRIPPED]: rowOnly(
-    'A once-per-namespace marker: each rewrite committed its own api.plugin_set row before ' +
-      'it, and a run that found nothing to rewrite still records that the namespace is clean.',
+    'Historical: v0.6.0 committed it alone once per namespace; nothing writes it any more.',
   ),
   [AuditAction.API_GATEWAY_REPAIR_REQUIRED]: postCommit(
     `${COMPENSATION_TRAIL} The reconciliation flag, which is a change of its own, records ` +

@@ -220,7 +220,6 @@ import {
   MONGO_TRANSACTION_BUDGET_MS,
   transactionContentionError,
 } from '../transaction-retry.js';
-import { carriesConfigKey } from '../config-keys.js';
 
 const REGEX_SPECIAL_CHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
@@ -2932,24 +2931,6 @@ class MongoStore implements NexusStore {
         ),
       );
       return row ? mapApiPlugin(row) : null;
-    },
-
-    listCarryingConfigKeys: async (keys) => {
-      const clauses = Object.entries(keys)
-        .filter(([, configKeys]) => configKeys.length > 0)
-        .map(([pluginName, configKeys]) => ({
-          plugin_name: pluginName,
-          $or: configKeys.map((key) => ({ [`config.${key}`]: { $exists: true } })),
-        }));
-      if (clauses.length === 0) return [];
-      return (
-        await this.col(COLLECTIONS.apiPlugins)
-          .find({ $or: clauses } as Filter<NexusDoc>, this.opts)
-          .sort({ api_id: 1, plugin_name: 1 })
-          .toArray()
-      )
-        .map((doc) => mapApiPlugin(doc as Row))
-        .filter((row) => carriesConfigKey(row, keys));
     },
 
     upsert: async (input) => {

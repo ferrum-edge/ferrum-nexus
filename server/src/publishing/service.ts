@@ -210,7 +210,6 @@ import {
   listenPathFor,
   roleAtLeast,
   testConsumerUsername,
-  withoutRetiredConfigKeys,
   type AccessDisruptionDetails,
   type Api,
   type ApiAgents,
@@ -1983,10 +1982,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         plugin.plugin_name !== row.plugin_name ||
         plugin.enabled !== row.enabled ||
         !running.has(plugin.id) ||
-        // A config written before the palette dropped a key Edge removed
-        // still matches until the startup pass rewrites it (issue #727).
         !isDeepStrictEqual(
-          plugin.config && withoutRetiredConfigKeys(row.plugin_name, plugin.config),
+          plugin.config,
           paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit),
         ) ||
         !isDeepStrictEqual(plugin.trigger ?? null, edgeTriggerFor(row.trigger) ?? null)
@@ -3632,12 +3629,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         if (nextAgents && (agentsMoved || enforcementMoved) && proxyId) {
           await assertAgentsCompose(proxyId);
         }
-        // A conversion replays the live configs exactly (its recovery depends
-        // on them), so one still carrying a key Edge removed is cleaned first.
-        if (enforcementMoved && proxyId) {
-          await assertNoRetiredPaletteKeys(api, plugins);
-        }
-
         // ── Which first-class configs are the portal's to change ──────────
         //
         // By recorded id, never by plugin name — see `firstClassOwnership`.
@@ -5380,8 +5371,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   api_id: api.id,
                   plugin_name: entry.plugin_name,
                   enabled: entry.enabled,
-                  // As written to the gateway above: without a key Edge removed.
-                  config: withoutRetiredConfigKeys(entry.plugin_name, entry.config),
+                  config: entry.config,
                   trigger: entry.trigger,
                   ferrum_plugin_config_id: configId,
                 });
@@ -6368,34 +6358,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         conflicting_plugin: 'request_deduplication',
         plugin_config_id: deduplication.id,
       },
-    );
-  }
-
-  /**
-   * Refuse a conversion while a palette config the API owns still carries a
-   * key Edge has removed (issue #727). A conversion rebuilds the proxy from
-   * the live configs verbatim, because its recovery journal compares them,
-   * so it would write the key back; saving the plugin again, or the startup
-   * pass, drops it first.
-   */
-  async function assertNoRetiredPaletteKeys(
-    api: ApiRecord,
-    onProxy: EdgePluginConfig[],
-  ): Promise<void> {
-    const owned = new Set(
-      (await store.apiPlugins.listByApi(api.id)).map((row) => row.ferrum_plugin_config_id),
-    );
-    const legacy = onProxy.find(
-      (plugin) =>
-        owned.has(plugin.id) &&
-        plugin.config !== null &&
-        withoutRetiredConfigKeys(plugin.plugin_name, plugin.config) !== plugin.config,
-    );
-    if (!legacy) return;
-    throw conflict(
-      `This API's ${legacy.plugin_name} plugin still carries a setting the gateway no longer ` +
-        'accepts; save that plugin again (or restart Nexus, which rewrites it), then convert',
-      { plugin_name: legacy.plugin_name, plugin_config_id: legacy.id },
     );
   }
 

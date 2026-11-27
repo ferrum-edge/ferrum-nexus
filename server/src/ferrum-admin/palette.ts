@@ -1,4 +1,4 @@
-import { withoutRetiredConfigKeys, type ApiPluginTrigger } from '@ferrum-nexus/shared';
+import type { ApiPluginTrigger } from '@ferrum-nexus/shared';
 
 import type { EdgeRateLimitSyncConfig } from '../config/index.js';
 import type {
@@ -124,21 +124,17 @@ export function edgeTriggerFor(trigger: ApiPluginTrigger | null): EdgePluginTrig
  * dedupe window has to be shared across replicas or two Nexus instances
  * deduplicate against two different memories, so an operator-configured Redis
  * endpoint is folded in here rather than being stored on the row. Every other
- * plugin is written as the provider configured it, less any key Edge has
- * removed: a row saved before the palette dropped one (`ip_restriction.mode`)
- * is replayed without it, so a rebuild never writes what Edge v0.9.21 refuses
- * (issue #727).
+ * plugin is written as the provider configured it.
  */
 export function paletteGatewaySettings(
   pluginName: string,
   saved: Record<string, unknown>,
   sync: EdgeRateLimitSyncConfig,
 ): EdgePluginSettings {
-  const settings = withoutRetiredConfigKeys(pluginName, saved);
-  if (pluginName !== 'request_deduplication') return settings;
-  if (sync.syncMode !== 'redis' || sync.redisUrl === undefined) return settings;
+  if (pluginName !== 'request_deduplication') return saved;
+  if (sync.syncMode !== 'redis' || sync.redisUrl === undefined) return saved;
   return {
-    ...settings,
+    ...saved,
     sync_mode: 'redis',
     redis_url: sync.redisUrl,
     redis_tls: sync.redisTls,

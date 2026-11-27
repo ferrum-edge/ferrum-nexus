@@ -143,27 +143,6 @@ export interface StringListFieldSpec {
 }
 
 /**
- * A list of whole numbers — the integer sibling of {@link StringListFieldSpec},
- * needed because `response_caching.cacheable_status_codes` is an array of
- * `uint16` and Edge rejects the string spelling.
- */
-export interface IntegerListFieldSpec {
-  kind: 'integer_list';
-  key: string;
-  label: string;
-  help?: string;
-  required?: boolean;
-  max_entries: number;
-  min_entries?: number;
-  /** Inclusive bounds on each entry. */
-  item_min: number;
-  item_max: number;
-  /** Closed set of accepted entries; renders as checkboxes. */
-  options?: readonly { value: number; label: string }[];
-  default?: readonly number[];
-}
-
-/**
  * One configurable field of a palette plugin.
  *
  * `key` is the **exact Edge config key** — nothing translates between this and
@@ -174,8 +153,7 @@ export type PluginFieldSpec =
   | IntegerFieldSpec
   | StringFieldSpec
   | EnumFieldSpec
-  | StringListFieldSpec
-  | IntegerListFieldSpec;
+  | StringListFieldSpec;
 
 /* ── Descriptors ────────────────────────────────────────────────────────── */
 
@@ -223,10 +201,8 @@ export interface ProviderPluginDescriptor {
    * Edge refuses one on a plugin that publishes contextless
    * initial-response-header policy (`security_headers`), a fixed per-proxy body
    * ceiling (`request_size_limiting`, `response_size_limiting`) or contextless
-   * response-trailer ownership (`compression`, `correlation_id`, and
-   * `response_caching` while `add_cache_status_header` is at its `true`
-   * default). See Edge `docs/plugin_execution_order.md` §"Phases outside the
-   * trigger boundary".
+   * response-trailer ownership (`compression`, `correlation_id`). See Edge
+   * `docs/plugin_execution_order.md` §"Phases outside the trigger boundary".
    */
   supports_trigger: boolean;
 }
@@ -698,9 +674,8 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
         item_pattern: IP_OR_CIDR_PATTERN,
         item_max_length: 64,
       },
-      // No `mode`: it never changed whether a request was admitted, Edge
-      // v0.9.20 deprecated it, and Edge v0.9.21 refuses it as an unknown key
-      // (issue #727). See `RETIRED_PLUGIN_CONFIG_KEYS`.
+      // No `mode`: it never changed whether a request was admitted, and Edge
+      // v0.9.21 refuses it as an unknown key (issue #727).
     ],
   },
 
@@ -948,101 +923,9 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
   },
 ];
 
-/** Retained only to validate/remove installations made before palette retirement. */
-export const RETIRED_RESPONSE_CACHING: ProviderPluginDescriptor = {
-  name: 'response_caching',
-  category: 'traffic',
-  label: 'Response caching',
-  summary: 'Retired: authenticated responses require explicit backend shared-cache opt-in.',
-  consumer_recipe:
-    'Consumers see an `X-Cache-Status` header (`HIT`/`MISS`) and an `Age` on a cached ' +
-    'response. `Cache-Control: no-cache` on their request bypasses the cache.',
-  supports_trigger: false,
-  fields: [
-    {
-      kind: 'integer',
-      key: 'ttl_seconds',
-      label: 'Default freshness',
-      help: 'Used when your backend sends no `Cache-Control` of its own; yours always wins.',
-      min: 1,
-      max: 86_400,
-      default: 300,
-      unit: 'seconds',
-    },
-    {
-      kind: 'string_list',
-      key: 'cacheable_methods',
-      label: 'Methods to cache',
-      help: 'Only bodyless reads can be cached — the gateway refuses anything else.',
-      max_entries: 2,
-      min_entries: 1,
-      options: [
-        { value: 'GET', label: 'GET' },
-        { value: 'HEAD', label: 'HEAD' },
-      ],
-      default: ['GET'],
-    },
-    {
-      kind: 'integer_list',
-      key: 'cacheable_status_codes',
-      label: 'Statuses to cache',
-      help: 'Partial (206) and validator-only (304) responses are never stored.',
-      max_entries: 8,
-      min_entries: 1,
-      item_min: 200,
-      item_max: 599,
-      options: [
-        { value: 200, label: '200 OK' },
-        { value: 203, label: '203 Non-Authoritative' },
-        { value: 301, label: '301 Moved Permanently' },
-        { value: 308, label: '308 Permanent Redirect' },
-        { value: 404, label: '404 Not Found' },
-        { value: 410, label: '410 Gone' },
-      ],
-      default: [200, 301, 404],
-    },
-    {
-      kind: 'string_list',
-      key: 'vary_by_headers',
-      label: 'Also vary by these request headers',
-      help: 'One header name per line, e.g. `accept-language`.',
-      max_entries: 16,
-      item_pattern: HTTP_FIELD_NAME_PATTERN,
-      item_max_length: 128,
-    },
-  ],
-};
-
-/**
- * Palette config keys Edge has removed, by plugin name (issue #727).
- *
- * Edge v0.9.20 accepts them but they decide nothing; Edge v0.9.21 refuses them
- * as unknown keys, and an enabled fail-closed config that carries one stops a
- * database-mode gateway from starting. The palette no
- * longer offers them, the server refuses them in a new save, every replay of
- * a stored row drops them, and a one-off startup pass rewrites the configs
- * Nexus wrote before this release (`server/src/plugins/retired-keys.ts`).
- */
-export const RETIRED_PLUGIN_CONFIG_KEYS: Readonly<Record<string, readonly string[]>> = {
-  ip_restriction: ['mode'],
-  response_caching: ['cache_key_include_query', 'cache_key_include_consumer'],
-};
-
-/** `config` without the keys {@link RETIRED_PLUGIN_CONFIG_KEYS} lists for `pluginName`. */
-export function withoutRetiredConfigKeys(
-  pluginName: string,
-  config: Record<string, unknown>,
-): Record<string, unknown> {
-  const retired = RETIRED_PLUGIN_CONFIG_KEYS[pluginName];
-  if (!retired || !retired.some((key) => Object.hasOwn(config, key))) return config;
-  return Object.fromEntries(Object.entries(config).filter(([key]) => !retired.includes(key)));
-}
-
-/** Descriptor for an offered or retired plugin, or `undefined` for an unknown name. */
+/** Descriptor for an offered plugin, or `undefined` for an unknown name. */
 export function findProviderPlugin(name: string): ProviderPluginDescriptor | undefined {
-  return name === 'response_caching'
-    ? RETIRED_RESPONSE_CACHING
-    : PROVIDER_PLUGINS.find((plugin) => plugin.name === name);
+  return PROVIDER_PLUGINS.find((plugin) => plugin.name === name);
 }
 
 /**

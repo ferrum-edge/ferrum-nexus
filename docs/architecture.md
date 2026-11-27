@@ -971,8 +971,7 @@ The configs above come from fields on the `apis` row. The **palette** is what
 a provider adds on top: a curated set of Edge plugins (`security_headers`,
 `ip_restriction`, `request_deduplication`, `request_termination` and others)
 they can switch on and off, one `api_plugins` row and one proxy-scoped config
-each. `response_caching` is retired: existing installations can be removed but
-not added or enabled.
+each. `response_caching` is not offered.
 
 **Same machinery.** A palette config is created, associated, replaced and
 deleted exactly like `rate_limiting` and `cors`. `publishing/edge-plugins.ts`

@@ -62,33 +62,31 @@ describe('draftFor', () => {
   });
 
   it('prefers the saved config over the defaults', () => {
-    const draft = draftFor(descriptor('response_caching'), {
-      ttl_seconds: 900,
-      cacheable_methods: ['GET', 'HEAD'],
-      cacheable_status_codes: [200],
+    const draft = draftFor(descriptor('compression'), {
+      algorithms: ['gzip'],
+      min_content_length: 900,
+      content_types: ['text/html'],
     });
-    expect(draft.ttl_seconds).toBe('900');
-    expect(draft.cacheable_methods).toEqual(['GET', 'HEAD']);
-    expect(draft.cacheable_status_codes).toEqual(['200']);
+    expect(draft.min_content_length).toBe('900');
+    expect(draft.algorithms).toEqual(['gzip']);
+    expect(draft.content_types).toBe('text/html');
   });
 });
 
 describe('draftToConfig', () => {
   it('sends exactly the keys the descriptor declares, with the right types', () => {
-    const spec = descriptor('response_caching');
+    const spec = descriptor('compression');
     const config = draftToConfig(spec, {
-      ttl_seconds: '60',
-      cacheable_methods: ['GET'],
-      cacheable_status_codes: ['200', '404'],
-      // Removed by Edge (issue #727): a stale draft key is never sent.
-      cache_key_include_query: true,
-      vary_by_headers: 'accept-language\naccept',
+      algorithms: ['gzip'],
+      min_content_length: '60',
+      // A key the descriptor does not declare is never sent.
+      disable_on_etag: true,
+      content_types: 'text/html\napplication/json',
     });
     expect(config).toEqual({
-      ttl_seconds: 60,
-      cacheable_methods: ['GET'],
-      cacheable_status_codes: [200, 404],
-      vary_by_headers: ['accept-language', 'accept'],
+      algorithms: ['gzip'],
+      min_content_length: 60,
+      content_types: ['text/html', 'application/json'],
     });
   });
 
@@ -132,7 +130,7 @@ describe('draftToConfig', () => {
 
 describe('validateDraft', () => {
   it('accepts each descriptor’s own defaults', () => {
-    for (const name of ['security_headers', 'compression', 'correlation_id', 'response_caching']) {
+    for (const name of ['security_headers', 'compression', 'correlation_id', 'bot_detection']) {
       const spec = descriptor(name);
       expect(validateDraft(spec, draftFor(spec, null))).toEqual({});
     }

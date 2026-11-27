@@ -27,7 +27,7 @@ import { useApiPlugins, useRemoveApiPlugin, useSetApiPlugin } from '../../hooks/
 import { useToast } from '../../stores/toast';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
-import { Card, CardBody, CardHeader } from '../ui/Card';
+import { Card, CardBody } from '../ui/Card';
 import { Icon, type IconName } from '../ui/Icon';
 import { Checkbox, Field, Input } from '../ui/Input';
 import { LoadingPanel } from '../ui/Spinner';
@@ -369,39 +369,6 @@ interface PluginCardProps {
   saved: ApiPlugin | null;
 }
 
-/** Existing caches remain removable after retirement from the offered palette. */
-function RetiredCache({ api }: { api: Api }): ReactElement {
-  const remove = useRemoveApiPlugin();
-  const toast = useToast();
-  return (
-    <Card className="border-warning/40">
-      <CardHeader
-        icon="alert"
-        title="Response caching (retired)"
-        description="Authenticated responses require explicit backend cache permission. This plugin can no longer be enabled from the portal."
-      />
-      <CardBody>
-        <Button
-          variant="danger"
-          size="sm"
-          disabled={remove.isPending}
-          onClick={() =>
-            remove.mutate(
-              { id: api.id, name: 'response_caching' },
-              {
-                onSuccess: () => toast.success('Response caching removed'),
-                onError: (error) => toast.error('Response caching was not removed', error.message),
-              },
-            )
-          }
-        >
-          Remove response caching
-        </Button>
-      </CardBody>
-    </Card>
-  );
-}
-
 /** The palette, grouped by category, for one API. */
 export function PluginsTab({ api }: { api: Api }): ReactElement {
   const query = useApiPlugins(api.id);
@@ -439,8 +406,6 @@ export function PluginsTab({ api }: { api: Api }): ReactElement {
           is, so they have their own controls there.
         </span>
       </p>
-
-      {configured.has('response_caching') ? <RetiredCache api={api} /> : null}
 
       {categories.map((category) => (
         <section key={category} className="flex flex-col gap-3">

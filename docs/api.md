@@ -2810,11 +2810,10 @@ The palette itself — which plugins exist and what each accepts — is the stat
   native WebSocket request to that API with `403` and a native gRPC request with a
   trailers-only `PERMISSION_DENIED` (gRPC status 7), both with rejection phase
   `route_protocol_admission`, instead of serving it without the check.
-- `response_caching` is **retired**: Edge only caches an authenticated
+- `response_caching` is **not offered**: Edge only caches an authenticated
   response when the backend opts in with `Cache-Control: public`,
   `must-revalidate` or `s-maxage`, which consumer settings cannot provide.
-  Existing rows are still listed and can be disabled or deleted; enabling it
-  is `400 VALIDATION_FAILED`.
+  Like any name outside the palette, it answers `404`.
 
 ### The `ApiPlugin` object
 
@@ -2852,14 +2851,12 @@ is accepted), and an `ip_restriction` prefix length that is not canonical
 decimal (`/08`).
 
 Keys Edge has removed are refused with `400 VALIDATION_FAILED` like any other
-unknown key: `ip_restriction` `mode` (it never changed whether a request was
-admitted) and the retired `response_caching` `cache_key_include_query` and
-`cache_key_include_consumer`. A row saved with one before they were removed
-is written to the gateway without it (issue #727).
+unknown key, `ip_restriction` `mode` included (it never changed whether a
+request was admitted; Edge v0.9.21 refuses it).
 
 Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
 `request_size_limiting`, `response_size_limiting`, `compression`,
-`correlation_id` (and the retired `response_caching`) — refuse a trigger with
+`correlation_id` — refuse a trigger with
 `400 VALIDATION_FAILED`.
 
 ### `GET /api/apis/:id/plugins`

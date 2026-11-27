@@ -2028,46 +2028,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
-    it('apiPlugins: lists exactly the rows carrying a listed config key (issue #727)', async () => {
-      const owner = await makeUser({ role: 'provider' });
-      const legacy = await makeApi(owner.id);
-      const clean = await makeApi(owner.id);
-      const row = (apiId: string, pluginName: string, config: Record<string, unknown>) =>
-        store.apiPlugins.upsert({
-          api_id: apiId,
-          plugin_name: pluginName,
-          enabled: true,
-          config,
-          trigger: null,
-          ferrum_plugin_config_id: null,
-        });
-      await row(legacy.id, 'ip_restriction', { allow: ['203.0.113.0/24'], mode: 'allow_first' });
-      await row(legacy.id, 'response_caching', { ttl_seconds: 60, cache_key_include_query: true });
-      // A key-like value, a near-miss key the text match widens to, and a key
-      // listed for another plugin: none of them counts.
-      await row(clean.id, 'ip_restriction', { allow: ['10.0.0.1'], note: 'mode' });
-      await row(clean.id, 'response_caching', { cache_keyXinclude_query: true });
-      await row(clean.id, 'correlation_id', { mode: 'x' });
-
-      const keys = {
-        ip_restriction: ['mode'],
-        response_caching: ['cache_key_include_query', 'cache_key_include_consumer'],
-      };
-      const found = (await store.apiPlugins.listCarryingConfigKeys(keys)).filter(
-        (entry) => entry.api_id === legacy.id || entry.api_id === clean.id,
-      );
-      assert.deepEqual(
-        found.map((entry) => [entry.api_id, entry.plugin_name]),
-        [
-          [legacy.id, 'ip_restriction'],
-          [legacy.id, 'response_caching'],
-        ],
-      );
-      assert.deepEqual(await store.apiPlugins.listCarryingConfigKeys({}), []);
-    });
-
-    /* ── api spec changes ─────────────────────────────────────────────── */
-
     it('apiSpecChanges: lists newest first, outlives its revision, and prunes', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await makeApi(owner.id);

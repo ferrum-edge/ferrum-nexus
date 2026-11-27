@@ -213,12 +213,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { approvalGroupsForIdentity } from '../access/approval-groups.js';
-import {
-  AuditAction,
-  SYSTEM_ACTOR,
-  auditRowCommitted,
-  type AuditService,
-} from '../audit/service.js';
+import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
   CreateInput,

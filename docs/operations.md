@@ -1178,8 +1178,9 @@ acknowledgement shape. What changes for Nexus:
   `error`. Upgrade Edge before (or together with) Nexus.
 - **Palette keys Edge removed.** v0.9.21 refuses `ip_restriction` `mode` and
   `response_caching` `cache_key_include_query` / `cache_key_include_consumer`
-  as unknown keys. Confirm `api.plugin_keys_stripped` **while the gateway is
-  still on v0.9.20** (see [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
+  as unknown keys. Nexus `v0.6.0` and later never write them; remove them from
+  any config written by hand (see
+  [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
 - **Agent APIs.** `mcp_gateway` confines OpenAPI bridge calls to the matched
   proxy's literal listen prefix, refuses every bridged call on exact (`=`) and
   regex (`~`) routes, rejects an operation path that can fall inside the MCP
@@ -1220,22 +1221,16 @@ acknowledgement shape. What changes for Nexus:
 
 Procedure:
 
-Do steps 1 to 4 on Edge v0.9.20 with Nexus `v0.6.0` still running:
+Do steps 1 to 3 on Edge v0.9.20 with Nexus `v0.6.0` still running:
 
 1. **Stop new conversions and settle journals** as in steps 1 and 2 of the
-   v0.9.13 procedure. This comes first: the palette cleanup in step 2 leaves a
-   palette row alone while a conversion or gateway restore owns its API, and
-   records `api.plugin_keys_stripped` only when nothing was left over. An Edge
-   database rebuild also issues new deployment tokens, so no journal may span
-   the gateway upgrade.
-2. **Confirm the palette cleanup**: restart Nexus once more and check that the
-   `api.plugin_keys_stripped` audit row for your `FERRUM_NAMESPACE` exists and
-   that no row was logged as left for later since (see
-   [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
-3. **Fix what v0.9.21 refuses**: the credentialed `*.amba.host` CORS policies
-   above, through Nexus, and everything the Edge guide section lists for your
-   gateway configuration.
-4. **Prove the Edge backup restores.** Take a namespace-complete Edge
+   v0.9.13 procedure: an Edge database rebuild issues new deployment tokens, so
+   no journal may span the gateway upgrade.
+2. **Fix what v0.9.21 refuses**: the credentialed `*.amba.host` CORS policies
+   above, through Nexus, the removed palette keys in any config written by
+   hand, and everything the Edge guide section lists for your gateway
+   configuration.
+3. **Prove the Edge backup restores.** Take a namespace-complete Edge
    `GET /backup` and check its API specs. v0.9.21 restores only an `api_specs`
    section of version `"2"` whose every item has a `resource_hash` of 64
    lowercase hex characters, and refuses the **whole** namespace otherwise.
@@ -1257,13 +1252,13 @@ Do steps 1 to 4 on Edge v0.9.20 with Nexus `v0.6.0` still running:
    export into a scratch Edge v0.9.21 instance: a successful restore is the
    proof.
 
-5. **Stop Nexus and take the paired Nexus and Edge backup** (step 2 of
+4. **Stop Nexus and take the paired Nexus and Edge backup** (step 2 of
    [moving to a new release](#moving-to-a-new-release)), with a fresh Edge
-   `GET /backup` that passes the check in step 4.
-6. **Upgrade Edge to v0.9.21**, the control plane and every data plane
+   `GET /backup` that passes the check in step 3.
+5. **Upgrade Edge to v0.9.21**, the control plane and every data plane
    together, rebuilding a SQL Edge database through that backup as the Edge
    guide's build-out procedure says.
-7. **Move Nexus** to the release that pins Edge v0.9.21, following its release
+6. **Move Nexus** to the release that pins Edge v0.9.21, following its release
    notes, and check `GET /api/health/edge` as an admin.
 
 Nexus `v0.6.0` is qualified against Edge v0.9.20 only. **Rolling back** Edge to
@@ -1272,40 +1267,19 @@ v0.9.20 is not supported by this code: restore the paired backup into Nexus
 
 ### Palette keys Edge v0.9.21 removes
 
-Edge v0.9.21 refuses `ip_restriction` `mode` and the retired
-`response_caching` `cache_key_include_query` and `cache_key_include_consumer` as
-unknown keys (Edge issue #7114). None of them changed what the gateway did, but
-earlier Nexus releases wrote `mode` on **every** `ip_restriction` saved from the
-portal. `ip_restriction` is fail-closed, so on v0.9.21 one such enabled config
-makes an Admin API write `400`, a reload fail, and a database-mode gateway
-refuse to start.
+Edge v0.9.21 refuses `ip_restriction` `mode` and the `response_caching`
+`cache_key_include_query` and `cache_key_include_consumer` as unknown keys
+(Edge issue #7114). `ip_restriction` is fail-closed, so on v0.9.21 one enabled
+config carrying `mode` makes an Admin API write `400`, a reload fail, and a
+database-mode gateway refuse to start.
 
-Nexus `v0.6.0` and later stop writing them (a save that carries one is
-`400 VALIDATION_FAILED`, and every rebuild or restore drops them from the
-gateway config and the stored row), and at every start it finds, with one store
-query, each palette row in `FERRUM_NAMESPACE` that still carries one, and
-rewrites it: the gateway config the row owns (by recorded id, keeping operator
-fields such as `priority_override`) and the row itself. Each rewrite is an
-`api.plugin_set` audit row with `retired_keys` and no actor. A row it cannot
-rewrite yet is logged at `warn` and found again at the next start: the gateway
-was unreachable or the API changed under it, or the API has an unfinished
-enforcement conversion or gateway restore, whose recovery needs the live
-configs unchanged (finish or restore it first). An API whose proxy is already
-gone is not held back: only its row is rewritten. An enforcement conversion
-replays the live configs exactly, so it is refused with `409 CONFLICT` while a
-palette config of the API still carries a removed key; save that plugin again
-(or restart Nexus) first. The first run that finishes for
-the namespace with nothing failed or left over records one
-`api.plugin_keys_stripped` row targeting it.
-
-**Before upgrading Edge from v0.9.20 to v0.9.21**, run Nexus `v0.6.0` against
-the v0.9.20 gateway until `api.plugin_keys_stripped` for your
-`FERRUM_NAMESPACE` is in the audit log, and restart it once more afterwards if
-it logged a row left for later since. Later releases run the same pass, but
-they require Edge v0.9.21 for credential changes, so do this step on `v0.6.0`.
-An `ip_restriction` or `response_caching` config an operator wrote by hand is
-not the portal's to change: remove those keys from it yourself, as the Edge
-upgrade guide says.
+Nexus never writes them: the palette does not offer them, a save that carries
+one is `400 VALIDATION_FAILED`, and Nexus does not offer `response_caching` at
+all. Every database Nexus can open was created by `v0.6.0` or later, which
+never wrote them either, so its palette configs carry none. A config an
+operator wrote by hand, or one an earlier Nexus release left in a namespace the
+current portal does not use, is not the portal's to change: remove those keys
+from it yourself before upgrading, as the Edge upgrade guide says.
 
 ### Email
 
@@ -1919,9 +1893,9 @@ such a portal to this release, give the new release a new, empty database:
      access that requires, see [Namespace routability](#namespace-routability)).
      The old proxies and credentials keep working until you remove them or
      retire the data plane that serves the old namespace; nothing the new portal
-     does touches them. That includes its retired-key cleanup: before you
-     upgrade the gateway that serves the old namespace past Edge v0.9.20, edit
-     or remove its configs yourself (see
+     does touches them. Before you upgrade the gateway that serves the old
+     namespace past Edge v0.9.20, remove the keys it refuses from its configs
+     yourself (see
      [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
 6. Start the new release. It creates the schema, and the next registration
    becomes the founding `super_admin` (see
