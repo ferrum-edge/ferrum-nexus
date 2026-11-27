@@ -786,9 +786,9 @@ remove individual chunk rows of a journal that is kept.
   and Nexus never sends the operation again. Restore the gateway's store, then
   resolve the journal as above. `durable: "unknown"` (a failed commit or commit
   acknowledgement) stays `deployment_acknowledgement_uncertain`.
-- `details.kind: "legacy_deployment_authority"` (`409`, nothing sent): the journal was
-  written before the Edge v0.9.13 upgrade and holds v0.9.12 authority that Edge now
-  refuses. Resolve it by observation as above.
+- `details.kind: "deployment_authority_invalid"` (`409`, nothing sent): the journal
+  holds authority that is not a complete `admin-deployment-snapshot` v2 body.
+  Resolve it by observation as above.
 
 ### Upgrading to Edge v0.9.13
 
@@ -832,7 +832,8 @@ stopped for that window.
 A journal missed in step 2 stayed readable. If its recorded operations were all
 acknowledged and the live deployment already matched the catalog, a restore
 completed it by observation. Anything that would act on its v0.9.12 authority
-was refused before a request was sent (`details.kind: "legacy_deployment_authority"`),
+was refused before a request was sent (in that release, `details.kind:
+"legacy_deployment_authority"`),
 and an operation that was still pending was refused locally as unconfirmed
 ("A gateway deployment mutation is unconfirmed") and never sent again; either
 was resolved with

@@ -285,8 +285,7 @@ import {
   deploymentSpecDocument,
   deploymentTarget,
   isDeploymentSnapshot,
-  isLegacyDeploymentSnapshot,
-  legacyDeploymentAuthority,
+  invalidDeploymentAuthority,
 } from '../ferrum-admin/deployment.js';
 import {
   accessDisruptionConfirmationRequired,
@@ -1577,8 +1576,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const record = (value: unknown): value is Record<string, unknown> =>
       typeof value === 'object' && value !== null && !Array.isArray(value);
     const authority = (value: unknown): value is EdgeDeploymentSnapshot => {
-      // Edge v0.9.12 authority in an older journal: readable, never usable.
-      if (isLegacyDeploymentSnapshot(value)) throw legacyDeploymentAuthority();
       if (!isDeploymentSnapshot(value) || value.namespace !== namespace) return false;
       assertDeploymentEvidence(value, namespace);
       return true;
@@ -1747,9 +1744,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     },
     message = 'The gateway deployment changed before its original authority was captured',
   ): void {
-    // Journaled Edge v0.9.12 authority fails 412 on Edge v0.9.13. Refuse it here,
-    // before any comparison could lead to a request or a fresh-token retry.
-    if (isLegacyDeploymentSnapshot(original)) throw legacyDeploymentAuthority();
+    // Refuse anything but complete authority here, before any comparison could
+    // lead to a request or a fresh-token retry.
+    if (!isDeploymentSnapshot(original)) throw invalidDeploymentAuthority();
     const target = deploymentTarget(original, expected.proxy.id);
     const sorted = (plugins: EdgePluginConfig[]): EdgePluginConfig[] =>
       [...plugins].sort((left, right) => left.id.localeCompare(right.id));

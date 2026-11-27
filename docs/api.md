@@ -2737,8 +2737,9 @@ is unconfirmed). Selected cleanup/replacement requires original deployment autho
 from Edge v0.9.13 or later and explicit committed/applied cleanup acknowledgement.
 A namespace past Edge's conditional snapshot bound answers `409 CONFLICT` with
 `details.kind` `namespace_snapshot_too_large` (Edge `507`: nothing issued or applied),
-and a journal holding Edge v0.9.12 authority answers `409 CONFLICT` with
-`details.kind` `legacy_deployment_authority` before any gateway write. An
+and authority that is not a complete `admin-deployment-snapshot` v2 body answers
+`409 CONFLICT` with `details.kind` `deployment_authority_invalid` before any
+gateway write. An
 acknowledgement whose `durable` is `not_started` or `not_committed` answers
 `502 EDGE_ERROR` with `details.kind` `deployment_not_committed` at any other HTTP
 status (Edge v0.9.14 reports a `503` store failure this way, and a `400` or `501`

@@ -984,7 +984,7 @@ describe('released deployment authority over HTTP sockets', () => {
     assert.equal(requests.filter((request) => request === 'GET /deployment-snapshot').length, 0);
   });
 
-  it('refuses Edge v0.9.12 authority before sending any request', async (t) => {
+  it('refuses authority that is not a v2 deployment snapshot before sending any request', async (t) => {
     const { client, reply, requests } = await fixture(t);
     reply.policyForDeployment = true;
     const legacy = fixtureSnapshot('v1');
@@ -995,7 +995,7 @@ describe('released deployment authority over HTTP sockets', () => {
       await assert.rejects(attempt(), (error: unknown) => {
         assert.ok(isNexusError(error));
         assert.equal(error.code, 'CONFLICT');
-        assert.deepEqual(error.details, { kind: 'legacy_deployment_authority' });
+        assert.deepEqual(error.details, { kind: 'deployment_authority_invalid' });
         return true;
       });
     }
