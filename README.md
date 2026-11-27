@@ -50,8 +50,9 @@ Releases before `v0.4.0` supported Node 22.14 or later.
 - **Upgrades.** A release upgrades the database the previous release left, in place, with
   forward-only schema migrations; downgrades are not supported. A new, empty database is
   created at first start. An existing database is never changed by startup: the migrate
-  command upgrades it, and the server refuses to start while migrations are pending. A database created by `v0.6.0` can be upgraded. One created by `v0.5.2` or
-  earlier cannot, and is refused unchanged; move such a portal to a new, empty database.
+  command upgrades it, and the server refuses to start while migrations are pending. A
+  database created by `v0.6.0` can be upgraded. One created by `v0.5.2` or earlier
+  cannot, and is refused unchanged; move such a portal to a new, empty database.
   Stop Nexus and back up Nexus and Ferrum Edge together before every upgrade: that
   backup is the way back. See
   [schema and upgrades](docs/operations.md#schema-and-upgrades-before-10),
