@@ -8,12 +8,18 @@ name: Edge Main Drift
 # same suite (`./e2e/run.sh`) against the newest signed Edge `main` image,
 # through the runner's documented FERRUM_EDGE_IMAGE override (e2e/README.md).
 #
+# The suite includes the cases that compare every Edge rule Nexus and its
+# mock gateway copy with the gateway under test, and Edge's own backup and
+# restore of the resources Nexus writes (e2e/README.md), so here they run
+# against Edge main.
+#
 # It is never a required check, and it qualifies nothing: the pin stays the
 # only Edge the portal is released against. A failure opens or updates one
 # issue labelled `edge-main-drift`, and a clean run closes it. Only the `issue`
 # job can write issues, and only with this repository's GITHUB_TOKEN; the job
 # that runs the Edge image and the e2e tree holds `contents: read`. Pull
-# requests that change this workflow run the suite without touching the issue.
+# requests that change this workflow run the suite without touching the issue,
+# and their check fails when the suite does.
 on:
   schedule:
     - cron: '47 5 * * 1'
@@ -274,6 +280,20 @@ jobs:
             echo "outcome=$outcome"
             echo "report=$(base64 -w0 "$report")"
           } >> "$GITHUB_OUTPUT"
+
+      # The suite step continues on error so the report and the scheduled
+      # issue always get an outcome. A pull request has no issue, so its
+      # check fails here instead of passing over a failed suite. Scheduled and
+      # dispatched runs keep reporting through the issue job.
+      - name: Fail a pull request's check unless the suite passed
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          OUTCOME: ${{ steps.report.outputs.outcome }}
+        run: |
+          if [ "$OUTCOME" != clean ]; then
+            echo "::error::The acceptance suite against Ferrum Edge main did not pass (outcome: ${OUTCOME:-none}); see the step summary."
+            exit 1
+          fi
 
   # Runs whenever the check job ran (so a check that could not run is filed
   # as `error`), never for pull requests or a dispatch from another branch.

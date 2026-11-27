@@ -2302,7 +2302,14 @@ nothing about accounts, approvals or audit history.
    credentials and ACL groups, plugin configs, upstreams and API specs. Back up
    Edge's database with its own tooling, or use Edge's Admin API `GET /backup`
    (restore with `POST /restore?confirm=true`; see Edge's
-   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.13/docs/admin_backup_restore.md)).
+   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.21/docs/admin_backup_restore.md)).
+   Restored into a fresh Edge database, a v0.9.21 backup brings back every
+   resource with its id, so every id Nexus recorded resolves and published APIs
+   keep serving; the acceptance suite checks this. It does not carry the
+   namespace registry row, so the namespace comes back without the
+   `Managed by Ferrum Nexus` description Nexus registered, and Nexus does not
+   register it again (the namespace already exists). Set the description with
+   Edge's `PUT /namespaces/{name}` if you rely on it.
 4. **Edge secrets**, especially `FERRUM_BASIC_AUTH_HMAC_SECRET`. Basic-auth
    credentials are stored as HMACs under it, so a different value rejects every
    basic-auth client.

@@ -105,6 +105,10 @@ The full list of architecture rules is in [CLAUDE.md](CLAUDE.md).
   `PIN` strictly, fails when a vendored file has no row or a row names no file, verifies the
   recorded digests and checks Nexus's local entries against the vendored vocabularies. Keep the vendored files out of formatting so their bytes stay
   identical to the tagged release.
+  - **Next re-pin:** the first `contracts-edge-*` tag that vendors the reserved-header vocabulary
+    (ferrum-contracts#96) must add a parity test in `shared/src/ferrum-contracts.test.ts` holding
+    `CORRELATION_ID_RESERVED_HEADERS` (`shared/src/plugins.ts`) to that vocabulary, replacing the
+    hand-copied `EDGE_V0920_RESERVED_HEADER_NAMES` list `shared/src/plugins.test.ts` uses today.
 - A new audit event must be:
   - added to the catalog in [docs/security.md](docs/security.md#10-audit-event-catalog);
   - classified in `AUDIT_COMMIT_CLASSES` (`server/src/audit/service.ts`). A `transactional` or
