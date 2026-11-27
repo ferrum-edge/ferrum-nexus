@@ -68,7 +68,8 @@ async function main(): Promise<void> {
   const store = createStore(config);
   try {
     await store.init();
-    await store.migrate();
+    // Like server startup: create an empty database, but never upgrade one.
+    await store.migrate({ mode: 'startup' });
     const summary = await rotateEncryptedSettings(
       store,
       createCrypto(previous),

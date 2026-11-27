@@ -16,3 +16,6 @@ NOTICE
 
 # Pinned external contract files must remain byte-identical to their release.
 contracts/ferrum-contracts/
+
+# Frozen v0.6.0 schema fixtures record what was deployed; their checksums are pinned.
+server/src/test/fixtures/v0.6.0-schema/

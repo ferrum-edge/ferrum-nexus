@@ -1,58 +1,45 @@
 /**
- * The base schema, and the one rule every adapter applies to it.
+ * The frozen base schema: the baseline every database starts from.
  *
- * **There are no migrations before Ferrum Nexus 1.0.** Each backend has one
- * base schema — `schema/base.sql` (SQLite), `schema/base.pg.sql`
- * (PostgreSQL), `schema/base.mysql.sql` (MySQL) and the index list in the
- * MongoDB adapter — and a new database is created directly at it. A schema
- * change edits the base schema; there is no upgrade path between pre-1.0
- * releases, and a database created by an earlier version is refused, never
- * migrated (docs/operations.md, "Schema and upgrades before 1.0").
+ * Each backend has one base schema — `schema/base.sql` (SQLite),
+ * `schema/base.pg.sql` (PostgreSQL), `schema/base.mysql.sql` (MySQL) and
+ * `BASE_INDEXES` in the MongoDB adapter. It is the Ferrum Nexus 1.0 baseline,
+ * unchanged since v0.6.0 first shipped it, and it is **frozen**: from 1.0.0
+ * onward it is never edited, and every schema change ships as a numbered
+ * forward migration (`migrate.ts`, `migrations/`). `frozen-baseline.test.ts`
+ * fails on any change to these artifacts.
  *
- * Every adapter records the schema it created in the `schema_migrations`
- * table (for MongoDB, the collection of the same name) the pre-0.6 migration
- * runner used, as one entry: {@link BASE_SCHEMA_ID}. Keeping that table is
- * what lets a database an earlier release created be recognised by its
- * migration ids, and refused instead of having tables created over it.
- *
- * On every start:
- *
- * - an empty ledger means a new database: create the base schema and record
- *   {@link BASE_SCHEMA_ID} (atomically where the driver has transactional
- *   DDL; on MySQL every statement is a replayable `CREATE TABLE IF NOT
- *   EXISTS`, recorded last, under an advisory lock);
- * - a ledger holding exactly {@link BASE_SCHEMA_ID} means the schema is
- *   current: do nothing;
- * - anything else — an earlier release's migration ids, or an earlier base
- *   schema generation — fails fast with {@link olderSchemaError}, before any
- *   service touches the data.
- *
- * Creation and concurrency otherwise behave exactly as the pre-0.6 runner did
- * for its first migration.
+ * A database records its schema in the `schema_migrations` table (for
+ * MongoDB, the collection of the same name): {@link BASE_SCHEMA_ID} for the
+ * baseline, then one entry per forward migration applied on top of it. The
+ * rules that read and extend that ledger at startup live in `migrate.ts`
+ * (docs/operations.md, "Schema and upgrades").
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
-import { NexusError, isNexusError } from '../lib/errors.js';
+import { NexusError } from '../lib/errors.js';
+
+const CRLF = /\r\n/g;
 
 /**
- * Name of the bookkeeping table/collection every adapter maintains. Shared
- * with the pre-0.6 migration ledger so an older database is recognised.
+ * Name of the bookkeeping table/collection every adapter maintains. The
+ * pre-0.6 migration runner used the same name, so a database an earlier
+ * release created is recognised by its migration ids and refused.
  */
 export const SCHEMA_LEDGER_TABLE = 'schema_migrations';
 
 /**
- * The base schema's generation: the one id the ledger records. **Bump it in
- * the same change whenever the base schema changes before 1.0** (any of the
- * three SQL files or `BASE_INDEXES`), so that a database created at an earlier
- * generation is refused rather than run against tables the code no longer
- * matches. Name it after the release that first ships it.
+ * The ledger id of the frozen baseline. v0.6.0 first recorded it, and the
+ * baseline has not changed since, so Nexus 1.0 opens a database v0.6.0
+ * created. **Never change it**: a schema change is a forward migration.
  */
 export const BASE_SCHEMA_ID = '000_base_v0_6';
 
-/** SQL dialect variant of the base schema. */
+/** SQL dialect variant of the base schema and of each migration. */
 export type SchemaDialect = 'sqlite' | 'pg' | 'mysql';
 
 /** One backend's base schema. */
@@ -65,89 +52,21 @@ export interface BaseSchema {
   sql: string;
 }
 
-/** The primitives an adapter provides to {@link ensureBaseSchema}. */
-export interface SchemaDriver {
-  /** Create the ledger table if it does not exist. Must be idempotent. */
-  ensureLedger(): Promise<void>;
-  /** Ids recorded in the ledger, in any order. */
-  listRecorded(): Promise<string[]>;
-  /**
-   * Create the base schema **and** record its id, atomically where the
-   * driver supports DDL transactions. Called only on an empty ledger.
-   */
-  createBaseSchema(schema: BaseSchema): Promise<void>;
-}
-
-/** What {@link ensureBaseSchema} did. */
-export interface SchemaResult {
-  /** `true` when this call created the schema in an empty database. */
-  created: boolean;
-}
-
 /** Where operators read the policy; named in every refusal. */
-export const SCHEMA_POLICY_DOC = 'docs/operations.md, "Schema and upgrades before 1.0"';
+export const SCHEMA_POLICY_DOC = 'docs/operations.md, "Schema and upgrades"';
 
 /**
- * Create the base schema in an empty database, accept a database already at
- * it, and refuse any other.
- *
- * Idempotent: a second call against the same database changes nothing.
+ * SHA-256 (hex) of a schema artifact's text with CRLF line endings normalised
+ * to LF, so `shasum -a 256 <file>` on an LF checkout reproduces it.
  */
-export async function ensureBaseSchema(
-  driver: SchemaDriver,
-  schema: BaseSchema,
-): Promise<SchemaResult> {
-  await driver.ensureLedger();
-  const recorded = await driver.listRecorded();
-  if (recorded.length === 1 && recorded[0] === schema.id) return { created: false };
-  if (recorded.length > 0) throw olderSchemaError(recorded, schema);
-  try {
-    await driver.createBaseSchema(schema);
-  } catch (error) {
-    throw schemaFailure(schema, error);
-  }
-  return { created: true };
-}
-
-/** How many recorded ids a refusal quotes before summarising the rest. */
-const QUOTED_IDS = 4;
-
-/**
- * The refusal for a database this build did not create: one created by an
- * earlier release (its ledger holds that release's migration ids) or from an
- * earlier version of the base schema. It says what was found, that nothing
- * was changed, and what the operator does next.
- */
-export function olderSchemaError(recorded: readonly string[], schema: BaseSchema): NexusError {
-  const sorted = [...recorded].sort();
-  const quoted = sorted.slice(0, QUOTED_IDS).join(', ');
-  const more = sorted.length > QUOTED_IDS ? ` and ${sorted.length - QUOTED_IDS} more` : '';
-  return new NexusError(
-    'INTERNAL',
-    `This database was created by a different Ferrum Nexus schema (it records ${quoted}${more}; ` +
-      `this build's schema is ${schema.id}). Ferrum Nexus has no upgrade path before 1.0: a ` +
-      `database created by an earlier version is never migrated, and its schema and data were ` +
-      `not changed. ` +
-      `Back up anything you need, then start this version against a new, empty database ` +
-      `(or drop and recreate this one). See ${SCHEMA_POLICY_DOC}.`,
-    { recorded: sorted, expected: schema.id },
-  );
-}
-
-/**
- * The error a failed schema creation surfaces as. A bare driver error does
- * not say what was running, so anything other than a `NexusError` is wrapped,
- * keeping the original as `cause` for its driver code and stack.
- */
-function schemaFailure(schema: BaseSchema, error: unknown): unknown {
-  if (isNexusError(error)) return error;
-  const message = error instanceof Error ? error.message : String(error);
-  return new Error(`Creating the base schema ${schema.id} failed: ${message}`, { cause: error });
+export function artifactChecksum(text: string): string {
+  return createHash('sha256').update(text.replace(CRLF, '\n')).digest('hex');
 }
 
 /* ── Loading the base schema ────────────────────────────────────────────── */
 
-const FILE_FOR: Record<SchemaDialect, string> = {
+/** The base schema file of each SQL dialect, inside {@link schemaDir}. */
+export const BASE_SCHEMA_FILE: Readonly<Record<SchemaDialect, string>> = {
   sqlite: 'base.sql',
   pg: 'base.pg.sql',
   mysql: 'base.mysql.sql',
@@ -160,7 +79,7 @@ export function schemaDir(): string {
 
 /** Read a dialect's base schema from {@link schemaDir}. */
 export function loadBaseSchema(dialect: SchemaDialect): BaseSchema {
-  const filename = FILE_FOR[dialect];
+  const filename = BASE_SCHEMA_FILE[dialect];
   const sql = readFileSync(join(schemaDir(), filename), 'utf8');
   const statements = splitSqlStatements(sql);
   if (statements.length === 0) {
@@ -169,10 +88,20 @@ export function loadBaseSchema(dialect: SchemaDialect): BaseSchema {
   return { id: BASE_SCHEMA_ID, source: filename, sql };
 }
 
+const BASE_TABLE = /^CREATE TABLE IF NOT EXISTS\s+([a-z][a-z0-9_]*)/i;
+
+/** The tables a SQL base schema creates, in file order. */
+export function baseTables(schema: BaseSchema): string[] {
+  return splitSqlStatements(schema.sql).flatMap((statement) => {
+    const table = BASE_TABLE.exec(statement)?.[1];
+    return table === undefined ? [] : [table];
+  });
+}
+
 /* ── SQL helpers for adapters whose driver runs one statement at a time ─── */
 
 /**
- * Split a schema file into individual statements.
+ * Split a schema or migration file into individual statements.
  *
  * Handles `--` line comments and single-quoted literals (including `''`
  * escapes). Adapters that can execute a whole script at once (better-sqlite3's

@@ -99,12 +99,18 @@ import { conflict } from '../../../lib/errors.js';
 import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
-  ensureBaseSchema,
-  loadBaseSchema,
-  SCHEMA_LEDGER_TABLE,
-  type BaseSchema,
+  checksumMismatchError,
+  ensureSchema,
+  loadShippedMigrations,
+  notEmptyError,
+  refuseTransactionControl,
+  schemaBusyError,
+  type LedgerEntry,
   type SchemaDriver,
-} from '../../schema.js';
+  type SchemaOptions,
+  type SqlMigration,
+} from '../../migrate.js';
+import { baseTables, loadBaseSchema, SCHEMA_LEDGER_TABLE, type BaseSchema } from '../../schema.js';
 import type {
   AccessRequestFilter,
   AccessRequestRecord,
@@ -818,33 +824,162 @@ export function openSqliteDatabase(path: string): Database {
   return db;
 }
 
+/** The ledger's columns (a v0.6.0 ledger has only `id` and `applied_at`). */
+function ledgerColumns(db: Database): Set<string> {
+  return new Set(
+    queryAll(db, `PRAGMA table_info(${SCHEMA_LEDGER_TABLE})`).map((row) => String(row.name)),
+  );
+}
+
+/** A ledger id as recorded; a non-text id never matches anything this build knows. */
+function ledgerId(value: unknown): string {
+  // A non-text id (a BLOB from an out-of-band import) is reported by its type,
+  // so the schema check refuses it.
+  return typeof value === 'string' ? value : `<non-text ${typeof value} id>`;
+}
+
+/** One ledger row as the runner reads it. */
+function ledgerEntry(row: Row): LedgerEntry {
+  return {
+    id: ledgerId(row.id),
+    checksum: typeof row.checksum === 'string' ? row.checksum : null,
+    inProgress: row.state === 'in_progress',
+  };
+}
+
+/** The ledger columns v0.6.0's ledger lacks, added before a migration is recorded. */
+function addLedgerColumns(db: Database): void {
+  const present = ledgerColumns(db);
+  for (const column of ['checksum', 'state']) {
+    if (!present.has(column)) {
+      db.exec(`ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN ${column} TEXT`);
+    }
+  }
+}
+
+/**
+ * Run `work` under `BEGIN IMMEDIATE` without waiting: a schema writer refuses
+ * at once (a `CONFLICT`) when another connection holds the write lock, rather
+ * than waiting out the busy timeout.
+ */
+function immediateSchemaTransaction(db: Database, work: () => void): void {
+  const busyTimeout = Number(db.pragma('busy_timeout', { simple: true }));
+  db.pragma('busy_timeout = 0');
+  try {
+    db.transaction(work).immediate();
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 'SQLITE_BUSY') throw schemaBusyError('SQLite');
+    throw error;
+  } finally {
+    db.pragma(`busy_timeout = ${Number.isInteger(busyTimeout) ? busyTimeout : 5000}`);
+  }
+}
+
+/** Whether the ledger has rows; read under the write lock. */
+function ledgerHasRows(db: Database): boolean {
+  return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE} LIMIT 1`).length > 0;
+}
+
+/** Refuse to create the schema over tables the base schema would create. */
+function refuseNonEmpty(db: Database, schema: BaseSchema): void {
+  const wanted = new Set(baseTables(schema));
+  const existing = queryAll(db, "SELECT name FROM sqlite_master WHERE type = 'table'")
+    .map((row) => String(row.name))
+    .filter((name) => wanted.has(name));
+  if (existing.length > 0) throw notEmptyError(existing);
+}
+
+/** Create the base schema and record it, inside the caller's transaction. */
+function createBase(db: Database, schema: BaseSchema): void {
+  refuseNonEmpty(db, schema);
+  db.exec(schema.sql);
+  db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
+    schema.id,
+    nowIso(),
+  );
+}
+
+/** Run one migration and record it, inside the caller's transaction. */
+function runMigration(db: Database, step: SqlMigration): void {
+  db.exec(step.sql);
+  db.prepare(
+    `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
+      "VALUES (?, ?, ?, 'applied')",
+  ).run(step.id, nowIso(), step.checksum);
+}
+
 /** The SQLite schema primitives; exported for the schema tests. */
-export function createSqliteSchemaDriver(db: Database): SchemaDriver {
+export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigration> {
   return {
     async ensureLedger(): Promise<void> {
+      // Only when missing, so an existing ledger never needs the write lock here.
+      const present = queryAll(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        [SCHEMA_LEDGER_TABLE],
+      );
+      if (present.length > 0) return;
       db.exec(
         `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
            id TEXT PRIMARY KEY,
-           applied_at TEXT NOT NULL
+           applied_at TEXT NOT NULL,
+           checksum TEXT,
+           state TEXT
          )`,
       );
     },
-    async listRecorded(): Promise<string[]> {
-      // A non-text id (a BLOB from an out-of-band import) never matches the
-      // generation: it is reported by its type, so the check refuses it.
-      return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).map((row) =>
-        typeof row.id === 'string' ? row.id : `<non-text ${typeof row.id} id>`,
+    async listRecorded(): Promise<LedgerEntry[]> {
+      const present = ledgerColumns(db);
+      const columns = ['id', 'checksum', 'state'].filter((column) => present.has(column));
+      return queryAll(db, `SELECT ${columns.join(', ')} FROM ${SCHEMA_LEDGER_TABLE}`).map(
+        ledgerEntry,
       );
     },
-    async createBaseSchema(schema: BaseSchema): Promise<void> {
-      const create = db.transaction((base: BaseSchema) => {
-        db.exec(base.sql);
-        db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
-          base.id,
-          nowIso(),
-        );
+    async createBaseSchema(schema: BaseSchema): Promise<boolean> {
+      let created = false;
+      immediateSchemaTransaction(db, () => {
+        // Re-read under the write lock: another process may have created it.
+        if (ledgerHasRows(db)) return;
+        createBase(db, schema);
+        created = true;
       });
-      create(schema);
+      return created;
+    },
+    async createFresh(schema: BaseSchema, migrations: readonly SqlMigration[]): Promise<boolean> {
+      // One transaction: another process sees an empty database or a complete one.
+      let created = false;
+      immediateSchemaTransaction(db, () => {
+        if (ledgerHasRows(db)) return;
+        createBase(db, schema);
+        // An empty ledger v0.6.0 left behind lacks the columns migrations record.
+        if (migrations.length > 0) addLedgerColumns(db);
+        for (const step of migrations) runMigration(db, step);
+        created = true;
+      });
+      return created;
+    },
+    async prepareLedger(): Promise<void> {
+      // Under the write lock, so a second process cannot add the same column
+      // between this check and the ALTER.
+      immediateSchemaTransaction(db, () => addLedgerColumns(db));
+    },
+    async applyMigration(migration: SqlMigration): Promise<void> {
+      // BEGIN IMMEDIATE takes the write lock first; the ledger is re-read under
+      // it, so a second process on the same file (unsupported, but possible)
+      // cannot apply the migration twice.
+      immediateSchemaTransaction(db, () => {
+        const existing = queryAll(
+          db,
+          `SELECT id, checksum, state FROM ${SCHEMA_LEDGER_TABLE} WHERE id = ?`,
+          [migration.id],
+        )[0];
+        if (existing !== undefined) {
+          const entry = ledgerEntry(existing);
+          if (entry.checksum === migration.checksum && entry.inProgress !== true) return;
+          throw checksumMismatchError(entry, migration);
+        }
+        runMigration(db, migration);
+      });
     },
   };
 }
@@ -951,8 +1086,12 @@ class SqliteStore implements NexusStore {
 
   private closed = false;
 
-  constructor(db: Database) {
+  /** Forward migrations `migrate()` applies; `undefined` means the shipped ones. */
+  private readonly migrations: readonly SqlMigration[] | undefined;
+
+  constructor(db: Database, migrations?: readonly SqlMigration[]) {
     this.db = db;
+    this.migrations = migrations;
     // The repository literals below run straight against the connection; the
     // process sees them only through the ownership gate. Every repository the
     // store exposes must be listed here — an unguarded one would reopen the
@@ -999,8 +1138,12 @@ class SqliteStore implements NexusStore {
     this.db.pragma('foreign_keys = ON');
   }
 
-  async migrate(): Promise<void> {
-    await ensureBaseSchema(createSqliteSchemaDriver(this.db), loadBaseSchema('sqlite'));
+  async migrate(options: SchemaOptions = {}): Promise<void> {
+    const migrations = this.migrations ?? loadShippedMigrations('sqlite');
+    for (const migration of migrations) refuseTransactionControl(migration, 'sqlite');
+    await ensureSchema(createSqliteSchemaDriver(this.db), loadBaseSchema('sqlite'), migrations, {
+      mode: options.mode ?? 'migrate',
+    });
   }
 
   async close(): Promise<void> {
@@ -4162,8 +4305,13 @@ function auditWhere(filter: AuditLogFilter): WhereBuilder {
 /**
  * Build the SQLite store. Pass `':memory:'` (the default for
  * `NEXUS_ENV=test`) for an ephemeral database; file paths get their parent
- * directory created and WAL enabled.
+ * directory created and WAL enabled. `migrations` replaces the shipped forward
+ * migrations; it is a test seam (the upgrade tests register a probe through
+ * it) and production never passes it.
  */
-export function createSqliteStore(config: NexusConfig): NexusStore {
-  return new SqliteStore(openSqliteDatabase(config.db.sqlitePath));
+export function createSqliteStore(
+  config: NexusConfig,
+  migrations?: readonly SqlMigration[],
+): NexusStore {
+  return new SqliteStore(openSqliteDatabase(config.db.sqlitePath), migrations);
 }

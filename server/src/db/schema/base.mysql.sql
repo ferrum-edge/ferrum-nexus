@@ -1,11 +1,11 @@
 -- Ferrum Nexus base schema — MySQL 8 dialect.
 --
--- Until Ferrum Nexus 1.0 this file is the whole schema: there are no
--- migrations and no upgrade path between releases. Change the schema by
--- editing this file (and its other dialect variants) directly, and bump
--- BASE_SCHEMA_ID in server/src/db/schema.ts in the same change. A database
--- created at an earlier generation is refused at startup, never migrated, and
--- must be recreated (docs/operations.md, "Schema and upgrades before 1.0").
+-- FROZEN. This is the Ferrum Nexus 1.0 baseline, unchanged since v0.6.0
+-- first shipped it (ledger id 000_base_v0_6). Never edit it: a database
+-- created from it never reads this file again, so an edit would make new and
+-- upgraded databases diverge. Every schema change is a numbered forward
+-- migration in server/src/db/migrations/ (docs/operations.md, "Schema and
+-- upgrades"). server/src/db/frozen-baseline.test.ts fails on any change here.
 --
 -- Mirrors base.sql table for table, column for column and index for
 -- index. The conventions are identical to the SQLite variant:

@@ -6084,14 +6084,15 @@ register(
 register('mysql', process.env.NEXUS_TEST_MYSQL_URL, 'NEXUS_TEST_MYSQL_URL', mysqlTarget);
 register('mongodb', process.env.NEXUS_TEST_MONGO_URL, 'NEXUS_TEST_MONGO_URL', mongoTarget);
 
-/* ── Older databases are refused, never migrated ───────────────────────── */
+/* ── Databases from before v0.6.0 are refused, never migrated ──────────── */
 
 /**
- * What the schema ledger of a database an earlier release created holds: a
- * v0.5.2 database's migration chain, and a database created from an earlier
- * version of the base schema. Before 1.0 there is no upgrade path, so the
- * current store must refuse both at `migrate()` and change nothing
- * (docs/operations.md, "Schema and upgrades before 1.0").
+ * What the schema ledger of a database created before v0.6.0 holds: a v0.5.2
+ * database's migration chain, and a database created from a pre-release base
+ * schema generation. Neither records the frozen baseline, and there is no
+ * upgrade path from them, so the current store must refuse both at
+ * `migrate()` and change nothing (docs/operations.md, "Schema and upgrades").
+ * Upgrades from v0.6.0 are `schema-upgrade.test.ts`.
  */
 const OLDER_LEDGERS: Record<string, string[]> = {
   'an earlier release': [
@@ -6111,7 +6112,7 @@ const OLDER_LEDGERS: Record<string, string[]> = {
   ],
   'an earlier base schema generation': ['000_base_v0_5_test'],
 };
-const NO_UPGRADE_PATH = /no upgrade path before 1\.0/;
+const NO_UPGRADE_PATH = /no upgrade path from releases before v0\.6\.0/;
 
 /** A throwaway database holding `ledger` and an older `users` table. */
 interface OlderDatabase {

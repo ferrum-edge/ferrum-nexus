@@ -54,10 +54,13 @@
  *   a development/evaluation mode, not a supported production configuration.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   MongoClient,
   type ClientSession,
   type Collection,
+  type CollectionOptions,
   type Db,
   type Document,
   type Filter,
@@ -108,11 +111,20 @@ import { conflict, NexusError } from '../../../lib/errors.js';
 import { newId, nowIso } from '../../../lib/ids.js';
 import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
-  ensureBaseSchema,
-  SCHEMA_LEDGER_TABLE,
-  BASE_SCHEMA_ID,
-  type BaseSchema,
+  ensureSchema,
+  schemaBusyError,
+  verifyShippedMigrations,
+  type LedgerEntry,
+  type Migration,
   type SchemaDriver,
+  type SchemaOptions,
+  type SchemaResult,
+} from '../../migrate.js';
+import {
+  artifactChecksum,
+  BASE_SCHEMA_ID,
+  SCHEMA_LEDGER_TABLE,
+  type BaseSchema,
 } from '../../schema.js';
 import type {
   AccessRequestFilter,
@@ -1086,12 +1098,11 @@ export interface IndexDefinition {
  * The MongoDB base schema: every index, translated from the SQL base schema.
  * Collections need no creation step; the first insert makes each one.
  *
- * Until 1.0 this list is edited directly, like `schema/base*.sql`; there are no
- * migration steps. Changing it changes the base schema, so bump
- * `BASE_SCHEMA_ID` (`db/schema.ts`) in the same change: a database created at
- * an earlier generation is then refused at startup rather than run with
- * indexes the code no longer expects (docs/operations.md, "Schema and upgrades
- * before 1.0").
+ * This list is the frozen Ferrum Nexus 1.0 baseline, unchanged since v0.6.0,
+ * like `schema/base*.sql`. **Never edit it**: a database created from it never
+ * re-reads it, so an edit would make new and upgraded databases diverge. A new
+ * index is a step in {@link MONGO_MIGRATIONS} (docs/operations.md, "Schema and
+ * upgrades"); `frozen-baseline.test.ts` fails on any change here.
  *
  * Partial *unique* indexes map directly onto `partialFilterExpression`. The one
  * non-unique partial index — SQLite's `ix_notifications_unread ... WHERE
@@ -1464,24 +1475,165 @@ export const BASE_INDEXES: readonly IndexDefinition[] = [
   },
 ];
 
-/** The MongoDB base schema's ledger identity: the shared generation id. */
+/** The MongoDB base schema's ledger identity: the frozen baseline's id. */
 export const MONGO_BASE_SCHEMA: BaseSchema = {
   id: BASE_SCHEMA_ID,
   source: 'BASE_INDEXES (server/src/db/adapters/mongodb/index.ts)',
   sql: '',
 };
 
-/** Create one batch of {@link IndexDefinition}s. */
-async function createIndexes(db: Db, indexes: readonly IndexDefinition[]): Promise<void> {
-  for (const index of indexes) {
-    await db.collection(index.collection).createIndex(index.key, {
-      name: index.name,
-      ...(index.unique === true ? { unique: true } : {}),
-      ...(index.partialFilterExpression
-        ? { partialFilterExpression: index.partialFilterExpression }
-        : {}),
-    });
+/**
+ * One MongoDB forward migration, declared entirely as data so its checksum
+ * covers everything it does: the indexes it creates, then the `updateMany`
+ * calls it makes. A step can be resumed after an interruption, so both must be
+ * idempotent: `createIndex` is a no-op for an identical index, and each
+ * update's filter must exclude documents it already changed.
+ */
+export interface MongoMigrationStep {
+  /** The id the SQL dialects' files share, e.g. `016_add_widget_column`. */
+  id: string;
+  /** Indexes the step creates, in order. */
+  indexes: readonly IndexDefinition[];
+  /** Document changes, run in order after the indexes. */
+  updates?: readonly MongoUpdate[];
+}
+
+/**
+ * One `updateMany` a step makes. Filter and update are plain JSON values (no
+ * dates, regular expressions or other BSON types), so their JSON text is the
+ * exact artifact the checksum covers.
+ */
+export interface MongoUpdate {
+  collection: string;
+  filter: Document;
+  /** An update document, or an aggregation pipeline. */
+  update: Document | Document[];
+}
+
+/** A {@link MongoMigrationStep} with the identity and checksum the runner records. */
+export interface MongoMigration extends Migration {
+  step: MongoMigrationStep;
+}
+
+/**
+ * The MongoDB forward migrations, in id order, one per migration id the SQL
+ * dialects ship in `db/migrations/`. Empty in the 1.0 baseline.
+ */
+export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [];
+
+/**
+ * Comparable form of a list of indexes. A key becomes an ordered list of
+ * entries because a compound index's field order is part of the index.
+ */
+export function canonicalIndexes(indexes: readonly IndexDefinition[]): unknown[] {
+  return indexes.map((index) => ({
+    collection: index.collection,
+    name: index.name,
+    key: Object.entries(index.key),
+    unique: index.unique === true,
+    partialFilterExpression: index.partialFilterExpression ?? null,
+  }));
+}
+
+/**
+ * Every schema read goes to the primary with majority read concern, and every
+ * schema write (index builds, a step's updates, the ledger and the lock) waits
+ * for a journaled majority, whatever the application's URL says. A ledger
+ * entry is marked applied only after the writes it records are majority
+ * committed, so a failover cannot keep the entry and lose the change, and a
+ * lagging secondary never hides a migration a newer release recorded.
+ */
+const SCHEMA_COLLECTION_OPTIONS: CollectionOptions = {
+  readPreference: 'primary',
+  readConcern: { level: 'majority' },
+  writeConcern: { w: 'majority', journal: true },
+};
+
+/** Create one {@link IndexDefinition}, with majority write concern. */
+async function createIndex(db: Db, index: IndexDefinition): Promise<void> {
+  await db.collection(index.collection, SCHEMA_COLLECTION_OPTIONS).createIndex(index.key, {
+    name: index.name,
+    ...(index.unique === true ? { unique: true } : {}),
+    ...(index.partialFilterExpression
+      ? { partialFilterExpression: index.partialFilterExpression }
+      : {}),
+  });
+}
+
+/**
+ * Refuse an index a migration step declares unless its key is a plain object
+ * of field names to `1`, `-1` or an index type string. Other driver forms (a
+ * `Map`, an array, a bare string) would not appear in the canonical form the
+ * checksum covers, so a changed key could keep its checksum.
+ */
+const INDEX_FIELDS = new Set(['collection', 'name', 'key', 'unique', 'partialFilterExpression']);
+
+/**
+ * Refuse an index a migration step declares unless every part of it is in the
+ * checksum's canonical form: only the fields {@link canonicalIndexes} covers,
+ * a key that is a plain object of field directions, and a partial filter made
+ * of plain JSON values (a date or other BSON value would hash like its JSON
+ * text but match differently).
+ */
+function assertCanonicalIndex(stepId: string, index: IndexDefinition): void {
+  const extra = Object.keys(index).filter((field) => !INDEX_FIELDS.has(field));
+  const filter = index.partialFilterExpression;
+  if (
+    extra.length > 0 ||
+    (filter !== undefined && !isDeepStrictEqual(JSON.parse(JSON.stringify(filter)), filter))
+  ) {
+    throw new NexusError(
+      'INTERNAL',
+      `MongoDB migration ${stepId} declares index ${index.name} with options the checksum ` +
+        'cannot cover (only collection, name, key, unique and a plain-JSON partial filter)',
+    );
   }
+  assertCanonicalKey(stepId, index);
+}
+
+function assertCanonicalKey(stepId: string, index: IndexDefinition): void {
+  const key: unknown = index.key;
+  const plain =
+    key !== null &&
+    typeof key === 'object' &&
+    Object.getPrototypeOf(key) === Object.prototype &&
+    Object.keys(key).length > 0 &&
+    Object.values(key).every((value) => value === 1 || value === -1 || typeof value === 'string');
+  if (!plain) {
+    throw new NexusError(
+      'INTERNAL',
+      `MongoDB migration ${stepId} declares index ${index.name} with a key that is not a ` +
+        'plain object of field directions',
+    );
+  }
+}
+
+/**
+ * Give a step the identity and checksum the runner records for it: the
+ * SHA-256 of its id, its indexes in order (collection, name, key fields in
+ * order, uniqueness, partial filter) and its updates. Refuses a step whose
+ * index keys or updates would not round-trip into that checksum.
+ */
+export function mongoMigration(step: MongoMigrationStep): MongoMigration {
+  for (const index of step.indexes) assertCanonicalIndex(step.id, index);
+  const updates = step.updates ?? [];
+  if (!isDeepStrictEqual(JSON.parse(JSON.stringify(updates)), updates)) {
+    throw new NexusError(
+      'INTERNAL',
+      `MongoDB migration ${step.id} declares updates that are not plain JSON values`,
+    );
+  }
+  const artifact = JSON.stringify({
+    id: step.id,
+    indexes: canonicalIndexes(step.indexes),
+    updates,
+  });
+  return {
+    id: step.id,
+    source: `MONGO_MIGRATIONS step ${step.id}`,
+    checksum: artifactChecksum(artifact),
+    step,
+  };
 }
 
 /**
@@ -1514,33 +1666,110 @@ export function latestMessagesPipeline(threadIds: readonly string[]): Document[]
   ];
 }
 
+/** MongoDB's duplicate-key error: another writer inserted the same `_id` first. */
+function isDuplicateKey(error: unknown): boolean {
+  return (error as { code?: unknown }).code === 11000;
+}
+
 /**
- * Create the base schema in an empty database, accept one already at it, and
- * refuse any other, under the same protocol as the SQL adapters. `createIndex`
- * is a no-op for an identical index, so a start interrupted before the ledger
- * write simply creates the rest and records it.
+ * The collection and document of the migration lock. Created only when there
+ * is schema work to do, so a run with nothing to apply changes nothing.
+ * Exported for the tests that hold it.
+ */
+export const SCHEMA_LOCK_COLLECTION = 'schema_migrations_lock';
+export const SCHEMA_LOCK_ID = 'schema';
+
+/**
+ * Bring the database to this build's schema (`migrate.ts`). The migration
+ * lock is a document with an owner token, inserted only when there is work
+ * and never taken over: a second migrator is refused, and a lock a crashed
+ * migrator left behind stays until the operator clears it
+ * (`options.forceUnlock`, the migrate command's `--force-unlock`). Index builds
+ * and updates cannot commit with their ledger entry, so each migration is
+ * recorded in progress first and marked applied last; an interrupted one is
+ * resumed by re-running its idempotent step. `steps` defaults to the shipped
+ * ones, checked against the compiled manifest; the upgrade tests pass their
+ * own.
  */
 export async function ensureMongoSchema(
   db: Db,
-  schema: BaseSchema = MONGO_BASE_SCHEMA,
-  indexes: readonly IndexDefinition[] = BASE_INDEXES,
-): Promise<void> {
-  const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE);
-  const driver: SchemaDriver = {
+  steps?: readonly MongoMigrationStep[],
+  options: SchemaOptions = {},
+): Promise<SchemaResult> {
+  const migrations = (steps ?? MONGO_MIGRATIONS).map(mongoMigration);
+  if (steps === undefined) verifyShippedMigrations(migrations, 'mongodb');
+  const ledger = db.collection<NexusDoc>(SCHEMA_LEDGER_TABLE, SCHEMA_COLLECTION_OPTIONS);
+  const locks = db.collection<NexusDoc>(SCHEMA_LOCK_COLLECTION, SCHEMA_COLLECTION_OPTIONS);
+  if (options.forceUnlock === true) await locks.deleteOne({ _id: SCHEMA_LOCK_ID });
+  const driver: SchemaDriver<MongoMigration> = {
     ensureLedger: async (): Promise<void> => {
-      // `_id` is the schema id, so the implicit unique index is all the
+      // `_id` is the ledger id, so the implicit unique index is all the
       // bookkeeping this needs; the collection is created on first insert.
     },
-    listRecorded: async (): Promise<string[]> => {
+    listRecorded: async (): Promise<LedgerEntry[]> => {
       const docs = await ledger.find({}).toArray();
-      return docs.map((doc) => str((doc as Row)._id));
+      return docs.map((doc) => ({
+        id: str(doc._id),
+        checksum: typeof doc.checksum === 'string' ? doc.checksum : null,
+        inProgress: doc.state === 'in_progress',
+      }));
     },
-    createBaseSchema: async (base: BaseSchema): Promise<void> => {
-      await createIndexes(db, indexes);
+    acquireLock: async (): Promise<() => Promise<void>> => {
+      const owner = newId();
+      try {
+        await locks.insertOne({ _id: SCHEMA_LOCK_ID, owner, acquired_at: nowIso() });
+      } catch (error) {
+        if (!isDuplicateKey(error)) throw error;
+        const held = await locks.findOne({ _id: SCHEMA_LOCK_ID });
+        throw schemaBusyError(
+          'MongoDB',
+          ` (taken ${str(held?.acquired_at)}). If no migrator is running (one crashed), clear ` +
+            'it with the migrate command and --force-unlock',
+        );
+      }
+      return async (): Promise<void> => {
+        await locks.deleteOne({ _id: SCHEMA_LOCK_ID, owner } as Filter<NexusDoc>);
+      };
+    },
+    lockHeld: async (): Promise<boolean> => (await locks.findOne({ _id: SCHEMA_LOCK_ID })) !== null,
+    createBaseSchema: async (base: BaseSchema): Promise<boolean> => {
+      for (const index of BASE_INDEXES) await createIndex(db, index);
       await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
+      // Always created here: the lock is held and the ledger was re-read under it.
+      return true;
+    },
+    prepareLedger: async (): Promise<void> => {
+      // Documents carry `checksum` and `state` as fields; nothing to alter.
+    },
+    beginMigration: async (migration: MongoMigration): Promise<void> => {
+      await ledger.insertOne({
+        _id: migration.id,
+        applied_at: nowIso(),
+        checksum: migration.checksum,
+        state: 'in_progress',
+      });
+    },
+    applyMigration: async (migration: MongoMigration): Promise<void> => {
+      for (const index of migration.step.indexes) await createIndex(db, index);
+      for (const change of migration.step.updates ?? []) {
+        await db
+          .collection(change.collection, SCHEMA_COLLECTION_OPTIONS)
+          .updateMany(change.filter as Filter<Document>, change.update as UpdateFilter<Document>);
+      }
+      const result = await ledger.updateOne(
+        {
+          _id: migration.id,
+          checksum: migration.checksum,
+          state: 'in_progress',
+        } as Filter<NexusDoc>,
+        { $set: { state: 'applied', applied_at: nowIso() } },
+      );
+      if (result.matchedCount !== 1) {
+        throw new Error(`MongoDB migration ${migration.id} lost its in-progress ledger entry`);
+      }
     },
   };
-  await ensureBaseSchema(driver, schema);
+  return ensureSchema(driver, MONGO_BASE_SCHEMA, migrations, { mode: options.mode ?? 'migrate' });
 }
 
 /* ── Shared connection state ────────────────────────────────────────────── */
@@ -1552,6 +1781,8 @@ interface MongoContext {
   /** Set by `init()`: false for a standalone deployment. */
   supportsTransactions: boolean;
   closed: boolean;
+  /** Forward migrations `migrate()` applies; `undefined` means the shipped ones. */
+  migrations: readonly MongoMigrationStep[] | undefined;
 }
 
 /* ── The store ──────────────────────────────────────────────────────────── */
@@ -1697,8 +1928,8 @@ class MongoStore implements NexusStore {
     }
   }
 
-  async migrate(): Promise<void> {
-    await ensureMongoSchema(this.ctx.db);
+  async migrate(options: SchemaOptions = {}): Promise<void> {
+    await ensureMongoSchema(this.ctx.db, this.ctx.migrations, options);
   }
 
   async close(): Promise<void> {
@@ -4785,9 +5016,13 @@ class MongoStore implements NexusStore {
  * The database name comes from the URL path; when it is absent the driver's
  * default (`test`) applies, so deployments should always spell it out. The
  * caller still owns `init()` — which is where the replica-set check lives — and
- * `migrate()`.
+ * `migrate()`. `migrations` replaces the shipped forward migrations; it is a
+ * test seam and production never passes it.
  */
-export function createMongoStore(config: NexusConfig): NexusStore {
+export function createMongoStore(
+  config: NexusConfig,
+  migrations?: readonly MongoMigrationStep[],
+): NexusStore {
   const client = new MongoClient(config.db.url, {
     ignoreUndefined: true,
   });
@@ -4798,6 +5033,7 @@ export function createMongoStore(config: NexusConfig): NexusStore {
     // Assume no transaction support until init() has probed the deployment.
     supportsTransactions: false,
     closed: false,
+    migrations,
   };
   return new MongoStore(ctx, null);
 }

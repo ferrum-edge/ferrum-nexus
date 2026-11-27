@@ -173,6 +173,7 @@ import {
   type SqlParam,
   type SqlTransactionRunner,
 } from './sql-common.js';
+import type { SchemaOptions } from '../migrate.js';
 import { runWithTransactionRetry } from './transaction-retry.js';
 import { carriesConfigKey, configKeyProbe } from './config-keys.js';
 
@@ -4171,7 +4172,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 /**
  * Everything a concrete SQL adapter must supply. `postgres/index.ts` and
  * `mysql/index.ts` implement exactly this and nothing else — connection setup,
- * base-schema creation, and the driver's native transaction primitive.
+ * the schema (base schema and forward migrations), and the driver's native
+ * transaction primitive.
  */
 export interface SqlStoreBackend {
   /** Reported as {@link NexusStore.driver}. */
@@ -4179,7 +4181,7 @@ export interface SqlStoreBackend {
   /** Executor bound to the connection pool, used outside transactions. */
   readonly pool: SqlExecutor;
   init(): Promise<void>;
-  migrate(): Promise<void>;
+  migrate(options?: SchemaOptions): Promise<void>;
   close(): Promise<void>;
   healthCheck(): Promise<StoreHealth>;
   /**
@@ -4318,8 +4320,8 @@ class SqlStore implements NexusStore {
     return this.backend.init();
   }
 
-  migrate(): Promise<void> {
-    return this.backend.migrate();
+  migrate(options?: SchemaOptions): Promise<void> {
+    return this.backend.migrate(options);
   }
 
   close(): Promise<void> {
