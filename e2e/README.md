@@ -108,13 +108,18 @@ weekly and on `workflow_dispatch`, and it is never a required check or a qualifi
   backup ([runbook](../docs/operations.md#5-backup-and-restore)). An approved client's pre-backup
   credential still works, and a client revoked before the backup is still refused.
 - Edge alone is exported with `GET /backup`, started on a fresh database and restored with
-  `POST /restore`: every Edge id the portal recorded resolves again, a published API keeps serving
-  the credential issued before the backup, and the portal writes to the restored consumer.
+  `POST /restore`. With the portal stopped, Edge's whole inventory (proxies, consumers, plugin
+  configs, upstreams, API specs) comes back with the same ids, including every proxy, consumer and
+  plugin-config id the portal's database records. The namespace registry description does not
+  come back from a v0.9.21 backup; the case states that and flags a backup that carries the
+  registry (ferrum-edge#7539). A published API keeps serving the credential issued before the
+  backup, and the portal writes to the restored consumer.
 - Every Edge rule the portal or the unit suite's mock gateway copies is compared with the gateway
   under test: the Admin API page-size cap and the `error` texts the client matches
   (`server/src/ferrum-admin/edge-vocabulary.ts`), and the closed proxy, consumer and plugin-config
-  envelopes, proxy admission, the consumer ACL-group cap and each closed plugin key list the mock
-  enforces (`server/src/test/edge-rules.ts`). In the Edge Main Drift workflow the same cases run
+  field sets (equal, in both directions, to the fields Edge's refusal lists), proxy admission, the
+  consumer ACL-group cap and each closed plugin key list the mock enforces
+  (`server/src/test/edge-rules.ts`). In the Edge Main Drift workflow the same cases run
   against Edge `main`.
 - MCP tool subsets, for API-key/basic accounts and JWT applications: subset list and call, approval
   that cannot broaden the request, and unapproved tools hidden and denied while REST remains

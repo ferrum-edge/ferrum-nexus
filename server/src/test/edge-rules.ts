@@ -100,14 +100,14 @@ export const PROXY_KEYS = new Set([
  * plugin would be.
  */
 export const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
+  // `schema` and `schema_ref` are in Edge's closed list too, but Edge refuses
+  // either on this plugin; see PROMETHEUS_METRICS_UNSUPPORTED_KEYS.
   prometheus_metrics: [
     'cache_invalidation_min_age_ms',
     'mesh_series_budget_per_family',
     'render_cache_ttl_seconds',
     // Edge v0.9.19 adds configurable histogram buckets.
     'request_duration_buckets_ms',
-    'schema',
-    'schema_ref',
     'session_duration_buckets_ms',
     'stale_entry_ttl_seconds',
   ],
@@ -324,15 +324,32 @@ export const PLUGIN_CONFIG_KEYS = new Set([
   'updated_at',
 ]);
 
-/** Every field Edge's `Consumer` deserializer accepts (`deny_unknown_fields`). */
+/**
+ * Every field Edge's `Consumer` deserializer accepts (`deny_unknown_fields`).
+ * `namespace`, `created_at` and `updated_at` are accepted but server-owned.
+ */
 export const CONSUMER_KEYS = new Set([
   'labels',
   'id',
   'username',
+  'namespace',
   'custom_id',
   'credentials',
   'acl_groups',
+  'created_at',
+  'updated_at',
 ]);
+
+/**
+ * Keys Edge's `prometheus_metrics` closed list names but its constructor
+ * refuses (transaction-log schema customization applies only to log-shipping
+ * plugins), with Edge v0.9.21's refusal.
+ */
+export const PROMETHEUS_METRICS_UNSUPPORTED_KEYS = ['schema', 'schema_ref'] as const;
+export const PROMETHEUS_METRICS_SCHEMA_UNSUPPORTED =
+  'prometheus_metrics: `schema` / `schema_ref` is not supported ' +
+  '(transaction-log schema customization applies only to log-shipping plugins; ' +
+  'see docs/plugins.md)';
 
 /** `Proxy.allowed_methods` entries, from the openapi enum. */
 export const PROXY_HTTP_METHODS = new Set([

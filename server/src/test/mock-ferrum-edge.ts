@@ -71,6 +71,8 @@ import {
   EDGE_MAX_ACL_GROUPS,
   PLUGIN_CONFIG_ALLOWED_KEYS,
   PLUGIN_CONFIG_KEYS,
+  PROMETHEUS_METRICS_SCHEMA_UNSUPPORTED,
+  PROMETHEUS_METRICS_UNSUPPORTED_KEYS,
   PROXY_HTTP_METHODS,
   PROXY_KEYS,
 } from './edge-rules.js';
@@ -1067,10 +1069,17 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
   if (!isRecord(config)) return `${pluginName}: config must be a JSON object`;
 
   const keys = Object.keys(config);
+  // Edge's `prometheus_metrics` closed list names the schema options, so they
+  // pass the unknown-key check and are then refused as unsupported.
+  const unsupported: readonly string[] =
+    pluginName === 'prometheus_metrics' ? PROMETHEUS_METRICS_UNSUPPORTED_KEYS : [];
   for (const field of keys) {
-    if (!allowed.includes(field)) {
+    if (!allowed.includes(field) && !unsupported.includes(field)) {
       return `${pluginName}: \`config\`: unknown configuration key(s): "config.${field}"`;
     }
+  }
+  if (keys.some((field) => unsupported.includes(field))) {
+    return PROMETHEUS_METRICS_SCHEMA_UNSUPPORTED;
   }
 
   if (pluginName === 'access_control') {

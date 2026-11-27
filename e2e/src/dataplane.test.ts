@@ -36,6 +36,8 @@ import {
   EDGE_MAX_ACL_GROUPS,
   PLUGIN_CONFIG_ALLOWED_KEYS,
   PLUGIN_CONFIG_KEYS,
+  PROMETHEUS_METRICS_SCHEMA_UNSUPPORTED,
+  PROMETHEUS_METRICS_UNSUPPORTED_KEYS,
   PROXY_HTTP_METHODS,
   PROXY_KEYS,
 } from '../../server/src/test/edge-rules.js';
@@ -125,6 +127,17 @@ async function compose(...args: string[]): Promise<void> {
     cwd: process.env.E2E_PROJECT_DIR ?? process.cwd(),
     env: process.env,
   });
+}
+
+/** `compose(...)`, returning what the command wrote to standard output. */
+async function composeOutput(...args: string[]): Promise<string> {
+  const [command, ...prefix] = COMPOSE;
+  if (!command) throw new Error('E2E_COMPOSE is empty');
+  const { stdout } = await run(command, [...prefix, ...args], {
+    cwd: process.env.E2E_PROJECT_DIR ?? process.cwd(),
+    env: process.env,
+  });
+  return stdout;
 }
 
 /** Run one command inside the PostgreSQL service, as its superuser over the local socket. */
@@ -2515,7 +2528,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
   // serving, with no portal repair. The Edge Main Drift workflow runs this
   // too, so a backup section or restore check Edge adds on `main` meets the
   // resources Nexus writes before a release ships it.
-  it('keeps every recorded Edge id resolving across an Edge backup and restore', async () => {
+  it('keeps every recorded Edge id resolving across an Edge backup and restore', async (t) => {
     const client = await newClient();
     const api = await publishApi(provider, {
       name: `E2E edge restore ${RUN}`,
@@ -2537,12 +2550,24 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     );
     const proxyId = stored.api.ferrum_proxy_id;
     assert.ok(proxyId, 'the API has a gateway proxy');
-    const pluginIds = await proxyPluginIds(proxyId);
-    assert.ok(pluginIds.length > 0, 'the proxy carries the portal’s plugin configs');
     const before = await reconcile(provider);
+    const registryBefore = await namespaceRecord();
+    assert.equal(
+      typeof registryBefore.description,
+      'string',
+      'the portal registered its namespace with a description',
+    );
 
-    // Nothing writes to Edge between the export and the restore.
+    // Nothing writes to Edge between the export and the restore. Every Edge
+    // id the portal records, and Edge's whole inventory, are read now.
     await compose('stop', 'nexus');
+    const recorded = await recordedEdgeIds();
+    const inventoryBefore = await gatewayInventory();
+    assert.ok(inventoryBefore.proxies.includes(proxyId));
+    for (const kind of RECORDED_KINDS) {
+      const live = recorded[kind].filter((id) => inventoryBefore[kind].includes(id));
+      assert.ok(live.length > 0, `the portal records live Edge ${kind}`);
+    }
     const exported = await gatewayAdmin('GET', '/backup');
     assert.equal(exported.status, 200, 'Edge exports its configuration');
     const backup = (await exported.json()) as Record<string, unknown>;
@@ -2562,14 +2587,38 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
 
     const restored = await gatewayAdmin('POST', '/restore?confirm=true', backup);
     assert.equal(restored.status, 200, await restored.text());
+
+    // Checked before Nexus starts, so nothing the portal does at startup (it
+    // creates a missing metrics config, for one) can fill a gap.
+    const inventoryAfter = await gatewayInventory();
+    for (const kind of RECORDED_KINDS) {
+      const lost = recorded[kind].filter(
+        (id) => inventoryBefore[kind].includes(id) && !inventoryAfter[kind].includes(id),
+      );
+      assert.deepEqual(lost, [], `recorded Edge ${kind} that no longer resolve`);
+    }
+    assert.deepEqual(inventoryAfter, inventoryBefore, 'Edge restores every id it exported');
+
+    // The namespace registry row is not a resource. Edge v0.9.21 backups carry
+    // no registry section, so the namespace comes back derived from its
+    // resources, without the description the portal registered, and the
+    // portal does not register it again (it finds the derived namespace).
+    // ferrum-edge#7539 adds the section; once a backup carries it, the
+    // description must come back, and this case says so.
+    const registryAfter = await namespaceRecord();
+    if (Object.hasOwn(backup, 'namespace_registry')) {
+      t.diagnostic('the Edge backup carries namespace_registry (ferrum-edge#7539)');
+      assert.equal(registryAfter.description, registryBefore.description);
+    } else {
+      assert.notEqual(
+        registryAfter.description,
+        registryBefore.description,
+        'Edge restored the namespace description without a registry section in its backup',
+      );
+    }
+
     await compose('start', 'nexus');
     await waitForStack();
-
-    // Every id the portal recorded resolves again, exactly as before.
-    const proxy = await gatewayAdmin('GET', `/proxies/${encodeURIComponent(proxyId)}`);
-    await proxy.body?.cancel();
-    assert.equal(proxy.status, 200, 'the recorded proxy id resolves');
-    assert.deepEqual(await proxyPluginIds(proxyId), pluginIds);
     const after = await reconcile(provider);
     assert.equal(after.error, null);
     assert.deepEqual(after.consumers, before.consumers);
@@ -2665,19 +2714,24 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       ['/consumers', CONSUMER_KEYS],
       ['/plugins/config', PLUGIN_CONFIG_KEYS],
     ] as const) {
-      // The envelope is closed…
+      // The envelope is closed, and Edge's refusal lists every field its
+      // deserializer declares (serde's `expected one of`), which is the
+      // inventory the mock's set must equal in both directions.
       const closed = await gatewayAdmin('POST', path, { [PARITY_PROBE_KEY]: null });
       const closedText = messagesOf(await adminBody(closed));
       assert.equal(closed.status, 400, `${path}: ${closedText}`);
       assert.match(closedText, UNKNOWN_FIELD, `${path} refuses an unknown field`);
-      // …and every field the mock accepts is still one of its fields. A body
-      // of one field always lacks a required one, so nothing is created.
-      for (const field of keys) {
-        const response = await gatewayAdmin('POST', path, { [field]: null });
-        const text = messagesOf(await adminBody(response));
-        assert.ok(response.status >= 400, `${path} accepted only \`${field}\`: ${text}`);
-        assert.doesNotMatch(text, UNKNOWN_FIELD, `${path} no longer accepts \`${field}\``);
-      }
+      const declared = declaredFields(closedText);
+      assert.deepEqual(
+        { missingFromMock: declared.filter((field) => !keys.has(field)) },
+        { missingFromMock: [] },
+        `${path}: fields Edge accepts that the mock refuses (${closedText})`,
+      );
+      assert.deepEqual(
+        { notOnEdge: [...keys].filter((field) => !declared.includes(field)).sort() },
+        { notOnEdge: [] },
+        `${path}: fields the mock accepts that Edge refuses (${closedText})`,
+      );
     }
   });
 
@@ -2736,42 +2790,54 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     const metricsOwner = configs.find(
       (row) => row.plugin_name === 'prometheus_metrics' && row.enabled && row.scope === 'global',
     );
+    // One enabled config of `pluginName` carrying `config`, refused or removed.
+    const probe = async (pluginName: string, config: Record<string, unknown>) => {
+      const global = pluginName === 'prometheus_metrics';
+      const replace = global && metricsOwner !== undefined;
+      const target = replace ? `/${encodeURIComponent(metricsOwner.id)}?expected_proxy_ids=` : '';
+      const response = await gatewayAdmin(replace ? 'PUT' : 'POST', `/plugins/config${target}`, {
+        plugin_name: pluginName,
+        scope: global ? 'global' : 'proxy',
+        ...(global ? {} : { proxy_id: probeProxy.id }),
+        enabled: true,
+        config,
+      });
+      const body = await adminBody(response);
+      const id = (body as { id?: unknown }).id;
+      if (response.status < 300 && !replace && typeof id === 'string') {
+        const expected = global ? '' : encodeURIComponent(probeProxy.id);
+        await gatewayAdmin(
+          'DELETE',
+          `/plugins/config/${encodeURIComponent(id)}?expected_proxy_ids=${expected}`,
+        );
+      }
+      return { status: response.status, text: messagesOf(body) };
+    };
     const problems: string[] = [];
     try {
       for (const [pluginName, keys] of Object.entries(PLUGIN_CONFIG_ALLOWED_KEYS)) {
-        const global = pluginName === 'prometheus_metrics';
-        const replace = global && metricsOwner !== undefined;
-        const target = replace ? `/${encodeURIComponent(metricsOwner.id)}?expected_proxy_ids=` : '';
-        const response = await gatewayAdmin(replace ? 'PUT' : 'POST', `/plugins/config${target}`, {
-          plugin_name: pluginName,
-          scope: global ? 'global' : 'proxy',
-          ...(global ? {} : { proxy_id: probeProxy.id }),
-          enabled: true,
-          // Not `null`: `cors` refuses a null value before it reaches the
-          // next key. Edge checks the keys before it reads any value.
-          config: {
-            ...Object.fromEntries(keys.map((key) => [key, 'nexus-parity'])),
-            [PARITY_PROBE_KEY]: 'nexus-parity',
-          },
+        // Not `null`: `cors` refuses a null value before it reaches the next
+        // key. Edge checks the keys before it reads any value.
+        const { status, text } = await probe(pluginName, {
+          ...Object.fromEntries(keys.map((key) => [key, 'nexus-parity'])),
+          [PARITY_PROBE_KEY]: 'nexus-parity',
         });
-        const body = await adminBody(response);
-        if (response.status < 300 && !replace) {
-          const id = (body as { id?: unknown }).id;
-          if (typeof id === 'string') {
-            const expected = global ? '' : encodeURIComponent(probeProxy.id);
-            await gatewayAdmin(
-              'DELETE',
-              `/plugins/config/${encodeURIComponent(id)}?expected_proxy_ids=${expected}`,
-            );
-          }
+        if (status !== 400 || unknownKeysNamed(text).join() !== PARITY_PROBE_KEY) {
+          problems.push(`${pluginName} (${status}): ${text}`);
         }
-        const refused = unknownKeysNamed(messagesOf(body));
-        if (response.status !== 400 || refused.join() !== PARITY_PROBE_KEY) {
-          problems.push(`${pluginName} (${response.status}): ${messagesOf(body)}`);
+      }
+      // The schema options Edge's metrics list names but refuses. `schema_ref`
+      // takes the transaction-log schema path, which answers before the
+      // plugin's own refusal, so only its status is compared.
+      for (const key of PROMETHEUS_METRICS_UNSUPPORTED_KEYS) {
+        const { status, text } = await probe('prometheus_metrics', { [key]: 'nexus-parity' });
+        const expected = key === 'schema' ? PROMETHEUS_METRICS_SCHEMA_UNSUPPORTED : '';
+        if (status !== 400 || !text.includes(expected) || unknownKeysNamed(text).length > 0) {
+          problems.push(`prometheus_metrics \`${key}\` (${status}): ${text}`);
         }
       }
       // Every plugin is checked before failing, so one run reports them all.
-      assert.deepEqual(problems, [], 'Edge refuses only the probe key of each plugin');
+      assert.deepEqual(problems, [], 'Edge refuses only what the mock refuses');
     } finally {
       await gatewayAdmin('DELETE', `/proxies/${encodeURIComponent(probeProxy.id)}`);
     }
@@ -2845,6 +2911,18 @@ const PARITY_PROBE_KEY = 'zz_nexus_parity_probe';
 /** Edge's refusal of a field its closed deserializer does not declare. */
 const UNKNOWN_FIELD = /unknown field/i;
 
+/**
+ * The fields serde's unknown-field refusal says the deserializer declares:
+ * `` unknown field `x`, expected one of `a`, `b` `` (or `` expected `a` or `b` ``).
+ * Edge keeps field names in this diagnostic (`src/util/deserialization.rs`).
+ */
+function declaredFields(message: string): string[] {
+  const line = message.split('\n').find((entry) => UNKNOWN_FIELD.test(entry)) ?? '';
+  const at = line.indexOf(', expected ');
+  if (at === -1) return [];
+  return [...line.slice(at).matchAll(/`([^`]+)`/g)].map((match) => match[1] ?? '').sort();
+}
+
 /** A minimal HTTP proxy for the copied-rule cases, on its own listen path. */
 function parityProxy(label: string): {
   id: string;
@@ -2854,12 +2932,14 @@ function parityProxy(label: string): {
   backend_port: number;
 } {
   const upstream = new URL(UPSTREAM_URL);
+  // `URL` leaves `port` empty for the scheme's default, written or not.
+  const defaultPort = upstream.protocol === 'https:' ? 443 : 80;
   return {
     id: `nexus-parity-${label}-${RUN}`,
     listen_path: `/nexus-parity-${label}-${RUN}`,
     backend_scheme: upstream.protocol.replace(':', ''),
     backend_host: upstream.hostname,
-    backend_port: Number(upstream.port),
+    backend_port: upstream.port === '' ? defaultPort : Number(upstream.port),
   };
 }
 
@@ -2914,15 +2994,101 @@ async function expectRefused(
   assert.equal(response.status, 400, `${path} accepted ${JSON.stringify(document)}: ${text}`);
 }
 
-/** The ids of the plugin configs Edge holds for one proxy, sorted. */
-async function proxyPluginIds(proxyId: string): Promise<string[]> {
-  const response = await gatewayAdmin(
-    'GET',
-    `/plugins/config?proxy_id=${encodeURIComponent(proxyId)}&limit=${EDGE_MAX_PAGE_SIZE}`,
+/** Edge's list routes for each resource kind, with each route's page cap. */
+const INVENTORY_ROUTES = {
+  proxies: ['/proxies', EDGE_MAX_PAGE_SIZE],
+  consumers: ['/consumers', EDGE_MAX_PAGE_SIZE],
+  plugin_configs: ['/plugins/config', EDGE_MAX_PAGE_SIZE],
+  upstreams: ['/upstreams', EDGE_MAX_PAGE_SIZE],
+  // `GET /api-specs` pages by at most 200.
+  api_specs: ['/api-specs', 200],
+} as const;
+
+type InventoryKind = keyof typeof INVENTORY_ROUTES;
+
+/** The Edge resource kinds the portal records ids of. */
+const RECORDED_KINDS = ['proxies', 'consumers', 'plugin_configs'] as const;
+
+type RecordedKind = (typeof RECORDED_KINDS)[number];
+
+/** Every resource id Edge holds in the namespace, by kind, sorted. */
+async function gatewayInventory(): Promise<Record<InventoryKind, string[]>> {
+  const inventory: Partial<Record<InventoryKind, string[]>> = {};
+  for (const kind of Object.keys(INVENTORY_ROUTES) as InventoryKind[]) {
+    const [path, limit] = INVENTORY_ROUTES[kind];
+    const ids: string[] = [];
+    for (let offset = 0; ; offset += limit) {
+      const response = await gatewayAdmin('GET', `${path}?limit=${limit}&offset=${offset}`);
+      assert.equal(response.status, 200, `${path} answered ${response.status}`);
+      const page = (await response.json()) as { data?: { id: string }[]; items?: { id: string }[] };
+      const rows = page.data ?? page.items ?? [];
+      ids.push(...rows.map((row) => row.id));
+      if (rows.length < limit) break;
+    }
+    inventory[kind] = ids.sort();
+  }
+  return inventory as Record<InventoryKind, string[]>;
+}
+
+/**
+ * Every Edge id the portal's database records for this namespace: API
+ * proxies, account and application consumers, and the plugin configs it owns
+ * (first-class and palette). Read from PostgreSQL directly, so the portal is
+ * not asked to vouch for itself.
+ */
+async function recordedEdgeIds(): Promise<Record<RecordedKind, string[]>> {
+  const namespace = process.env.FERRUM_NAMESPACE ?? 'nexus';
+  assert.match(namespace, /^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+  const sql = [
+    `SELECT 'proxies', ferrum_proxy_id FROM apis`,
+    `WHERE namespace = '${namespace}' AND ferrum_proxy_id IS NOT NULL`,
+    `UNION SELECT 'consumers', ferrum_consumer_id FROM consumers`,
+    `WHERE namespace = '${namespace}'`,
+    `UNION SELECT 'consumers', ferrum_consumer_id FROM gateway_identities`,
+    `WHERE namespace = '${namespace}' AND ferrum_consumer_id IS NOT NULL`,
+    `UNION SELECT 'plugin_configs', p.ferrum_plugin_config_id FROM api_plugins p`,
+    `JOIN apis a ON a.id = p.api_id`,
+    `WHERE a.namespace = '${namespace}' AND p.ferrum_plugin_config_id IS NOT NULL`,
+    `UNION SELECT 'plugin_configs', g.ferrum_plugin_config_id FROM api_gateway_plugins g`,
+    `JOIN apis a ON a.id = g.api_id`,
+    `WHERE a.namespace = '${namespace}' AND g.ferrum_plugin_config_id IS NOT NULL`,
+  ].join(' ');
+  const output = await composeOutput(
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-U',
+    'nexus',
+    '-d',
+    'nexus',
+    '-At',
+    '-F',
+    '\t',
+    '-c',
+    sql,
   );
-  assert.equal(response.status, 200);
-  const page = (await response.json()) as { data: { id: string }[] };
-  return page.data.map((plugin) => plugin.id).sort();
+  const recorded: Record<RecordedKind, string[]> = {
+    proxies: [],
+    consumers: [],
+    plugin_configs: [],
+  };
+  for (const line of output.split('\n')) {
+    const [kind, id] = line.split('\t');
+    if (id && (RECORDED_KINDS as readonly string[]).includes(kind ?? '')) {
+      recorded[kind as RecordedKind].push(id);
+    }
+  }
+  return recorded;
+}
+
+/** Edge's registry record for this namespace. */
+async function namespaceRecord(): Promise<{ description?: unknown }> {
+  const namespace = process.env.FERRUM_NAMESPACE ?? 'nexus';
+  const response = await gatewayAdmin('GET', `/namespaces/${encodeURIComponent(namespace)}`);
+  const body = await adminBody(response);
+  assert.equal(response.status, 200, messagesOf(body));
+  return body as { description?: unknown };
 }
 
 /** The fields of an Edge plugin config the copied-rule cases read. */
