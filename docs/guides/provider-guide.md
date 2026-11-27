@@ -502,11 +502,10 @@ Notes:
   on, the gateway refuses a native WebSocket request to your API with `403`, and a
   native gRPC request with a trailers-only `PERMISSION_DENIED` (gRPC status 7),
   rather than letting it skip the check (Edge v0.9.15 and later).
-- **Response caching is no longer offered.** The gateway will not cache
+- **Response caching is not offered.** The gateway will not cache
   authenticated responses unless your backend opts in (`Cache-Control: public`,
   `must-revalidate` or `s-maxage`), so the portal could not promise hits. An
-  existing caching plugin stays in place and shows **Remove response caching**.
-  An operator can configure caching directly.
+  operator can configure caching directly.
 
 ### Limiting a plugin to some requests
 

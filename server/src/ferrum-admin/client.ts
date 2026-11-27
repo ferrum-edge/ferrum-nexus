@@ -109,6 +109,7 @@ import { consumerMetadataCredentials } from './consumer-metadata.js';
 import {
   assertDeploymentApplied,
   assertDeploymentEvidence,
+  checkRetainedAuthority,
   deploymentTarget,
   isDeploymentAcknowledgement,
   isDeploymentNonCommit,
@@ -307,24 +308,12 @@ export interface FerrumAdminClient {
       subject?: string,
     ): Promise<{ consumer: EdgeVerifiedConsumer; etag: string } | null>;
     /**
-     * Find a consumer by `username` by scanning `GET /consumers` pages — Edge
-     * has no username filter. Nexus normally reads the mapping from its own
-     * `consumers` table; this is the reconciliation path.
-     *
-     * `null` means the whole namespace was read and holds no such consumer.
-     * A scan that reaches its page cap without a match **throws** rather than
-     * answering `null`: on a gateway that large "not found" would only mean
-     * "not searched", and a caller acting on it — creating a duplicate, or
-     * closing a teardown with the consumer still up — would be wrong.
-     */
-    getByUsername(username: string): Promise<EdgeConsumer | null>;
-    /**
      * The id {@link ensure} assigns to the first consumer of `username` in the
      * configured namespace, without touching the gateway. Not the id of a
      * consumer that replaces it — see {@link derivedConsumerId}.
      */
     derivedId(username: string): string;
-    /** Direct stable-id lookup/create; only a legacy identity conflict scans. */
+    /** Direct stable-id lookup/create under {@link derivedConsumerId}. */
     ensure(
       body: EdgeConsumerWrite,
       subject?: string,
@@ -566,16 +555,6 @@ export interface FerrumAdminClient {
   /** Release the undici dispatcher. */
   close(): Promise<void>;
 }
-
-const MAX_CONSUMER_SCAN_PAGES = 20;
-const CONSUMER_SCAN_PAGE_SIZE = 500;
-
-/**
- * How many consumers `consumers.getByUsername` reads before giving up. Past
- * this the lookup throws instead of answering `null`, because "not in the
- * first 10,000" is not "not there".
- */
-export const CONSUMER_SCAN_LIMIT = MAX_CONSUMER_SCAN_PAGES * CONSUMER_SCAN_PAGE_SIZE;
 
 /**
  * The consumer id Nexus assigns to the **first** consumer of `username` in
@@ -2035,7 +2014,7 @@ export function createFerrumAdminClient(
     id: string,
     original: EdgeDeploymentSnapshot,
   ): Promise<void> {
-    assertDeploymentEvidence(original, namespace);
+    checkRetainedAuthority(() => assertDeploymentEvidence(original, namespace));
     if (!isDeploymentTag(original.namespace_etag)) {
       throw edgeError('Original deployment-v1 authority is required');
     }
@@ -2579,36 +2558,6 @@ export function createFerrumAdminClient(
         return { consumer, etag };
       },
 
-      async getByUsername(username: string): Promise<EdgeConsumer | null> {
-        logger.warn({ username }, 'Scanning legacy consumer identity without a stored gateway id');
-        let found: EdgeConsumer | null = null;
-        const complete = await scanPages<EdgeConsumer>(
-          '/consumers',
-          CONSUMER_SCAN_PAGE_SIZE,
-          MAX_CONSUMER_SCAN_PAGES,
-          (items) => {
-            // access_control matches usernames byte-for-byte, so this does too.
-            const match = items.find((consumer) => consumer.username === username);
-            if (!match) return true;
-            found = match;
-            return false;
-          },
-        );
-        if (found === null && !complete) {
-          // Not "no such consumer" — the namespace holds more than the scan
-          // reads, and a `null` here would be acted on as if it were.
-          logger.warn(
-            { path: '/consumers', scanned: CONSUMER_SCAN_LIMIT, username },
-            'Consumer lookup by username gave up before the end of the namespace',
-          );
-          throw edgeError(
-            'The gateway holds more consumers than a legacy username lookup can scan; an administrator must restore the consumer id mapping from backup after verifying its namespace and username (docs/operations.md, Consumer identity recovery)',
-            { scanned: CONSUMER_SCAN_LIMIT, username },
-          );
-        }
-        return found;
-      },
-
       derivedId(username: string): string {
         return derivedConsumerId(namespace, username);
       },
@@ -2636,9 +2585,11 @@ export function createFerrumAdminClient(
           ) {
             throw error;
           }
-          const legacy = await this.getByUsername(body.username);
-          if (!legacy) throw error;
-          return { consumer: legacy, created: false };
+          // Another creation of the same derived id won the race: read it
+          // back by that id, and adopt it only when it is the same name.
+          const raced = await this.get(id);
+          if (!raced || raced.username !== body.username) throw error;
+          return { consumer: raced, created: false };
         }
       },
 

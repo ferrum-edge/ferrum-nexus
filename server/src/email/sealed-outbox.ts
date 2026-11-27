@@ -21,9 +21,6 @@
  *   SMTP. A row that does not open (tampered, copied, or sealed under a
  *   `NEXUS_SECRET_KEY` that has since been rotated, which invalidated its
  *   token anyway) is failed, never delivered and never retried.
- *
- * Rows written before sealing existed are sealed in place by
- * {@link sealLegacyBearerRows}, which the worker runs until none are left.
  */
 
 import type { EmailTemplateKey } from '@ferrum-nexus/shared';
@@ -33,7 +30,6 @@ import {
   OUTBOX_SEALED_SUBJECT,
   type EmailOutboxRecord,
   type EnqueueEmailInput,
-  type NexusStore,
 } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { newId } from '../lib/ids.js';
@@ -41,19 +37,8 @@ import { newId } from '../lib/ids.js';
 /** Templates whose rendered message carries a single-use link and is therefore sealed. */
 export const BEARER_TEMPLATE_KEYS: readonly EmailTemplateKey[] = ['verification', 'password_reset'];
 
-/**
- * Idempotency-key namespaces of the messages rendered from those templates:
- * the registration's verification (`verify:<user id>`), a re-sent verification
- * (`verify:<token id>`) and a password reset (`reset:<token id>`). The legacy
- * sweep only looks at these.
- */
-export const BEARER_IDEMPOTENCY_PREFIXES: readonly string[] = ['reset:', 'verify:'];
-
 /** Leads `body_text` of a sealed row; the envelope follows it. */
 export const SEALED_BODY_PREFIX = 'nexus-sealed-v1:';
-
-/** Rows the legacy sweep seals per call, so one tick never turns into a table rewrite. */
-export const LEGACY_SEAL_BATCH = 200;
 
 /** A message's real content: what the envelope holds and what SMTP is handed. */
 export interface MailContent {
@@ -164,43 +149,4 @@ export function openOutboxRecord(crypto: NexusCrypto, entry: EmailOutboxRecord):
     throw new SealedOutboxError('sealed message opened to something that is not mail content');
   }
   return { subject: content.subject, html: content.html, text: content.text };
-}
-
-/**
- * Seal, in place, bearer-template rows written before sealing existed.
- *
- * Every status is covered: a `sent` row's link stays redeemable until it is
- * used or expires, so leaving it readable would keep exactly the exposure this
- * module removes. Newest rows first, since those are the ones whose links can
- * still be live, and at most `limit` rows per call. Each write is a
- * compare-and-swap on "not sealed yet", so two instances sweeping at once
- * cannot seal one row twice.
- *
- * @returns the number of rows sealed, and whether rows may remain.
- */
-export async function sealLegacyBearerRows(
-  store: NexusStore,
-  crypto: NexusCrypto,
-  limit: number = LEGACY_SEAL_BATCH,
-): Promise<{ sealed: number; more: boolean }> {
-  let sealed = 0;
-  let budget = limit;
-  for (const prefix of BEARER_IDEMPOTENCY_PREFIXES) {
-    if (budget <= 0) return { sealed, more: true };
-    const page = await store.emailOutbox.list(
-      { idempotency_key_prefix: prefix, sealed: false },
-      { limit: budget },
-    );
-    budget -= page.items.length;
-    for (const entry of page.items) {
-      const next = sealMailContent(crypto, entry.id, entry.to_email, {
-        subject: entry.subject,
-        html: entry.body_html,
-        text: entry.body_text,
-      });
-      if (await store.emailOutbox.sealContent(entry.id, next)) sealed += 1;
-    }
-    if (page.total > page.items.length) return { sealed, more: true };
-  }
-  return { sealed, more: false };
 }

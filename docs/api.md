@@ -2427,10 +2427,13 @@ every plugin config across with their ids. For those few round trips
 `listen_path` answers `404`; the audit row has `proxy_rebuilt: true`. Every
 other setting, and every spec revision, is an in-place write.
 Because the rebuild carries the configs across exactly, a conversion is
-refused with `409 CONFLICT` (naming the plugin) while one of the API's palette
-configs still carries a key Edge has removed, such as `ip_restriction` `mode`;
-save that plugin again, or restart Nexus so its startup pass rewrites it, then
-convert (issue #727).
+refused with `409 CONFLICT` before any gateway write while one of the API's
+palette configs on the gateway carries a key the portal does not write, such as
+one Edge has removed (`ip_restriction` `mode`). `details` carries
+`kind: "palette_config_undeclared_keys"`, `plugin_name`, `plugin_config_id` and
+`keys`. Save that plugin again, which writes exactly the keys the palette
+declares, then convert (issue #727). Restore and repair write only declared
+keys too, so a key a later Edge release retires never stops a published API.
 
 **An API without a gateway deployment takes catalog edits only.** While
 `ferrum_proxy_id` is `null` (after a reconciliation repair or a failed
@@ -2737,8 +2740,9 @@ is unconfirmed). Selected cleanup/replacement requires original deployment autho
 from Edge v0.9.13 or later and explicit committed/applied cleanup acknowledgement.
 A namespace past Edge's conditional snapshot bound answers `409 CONFLICT` with
 `details.kind` `namespace_snapshot_too_large` (Edge `507`: nothing issued or applied),
-and a journal holding Edge v0.9.12 authority answers `409 CONFLICT` with
-`details.kind` `legacy_deployment_authority` before any gateway write. An
+and authority that is not a complete `admin-deployment-snapshot` v2 body answers
+`409 CONFLICT` with `details.kind` `deployment_authority_invalid` before any
+gateway write. An
 acknowledgement whose `durable` is `not_started` or `not_committed` answers
 `502 EDGE_ERROR` with `details.kind` `deployment_not_committed` at any other HTTP
 status (Edge v0.9.14 reports a `503` store failure this way, and a `400` or `501`
@@ -2810,11 +2814,10 @@ The palette itself — which plugins exist and what each accepts — is the stat
   native WebSocket request to that API with `403` and a native gRPC request with a
   trailers-only `PERMISSION_DENIED` (gRPC status 7), both with rejection phase
   `route_protocol_admission`, instead of serving it without the check.
-- `response_caching` is **retired**: Edge only caches an authenticated
+- `response_caching` is **not offered**: Edge only caches an authenticated
   response when the backend opts in with `Cache-Control: public`,
   `must-revalidate` or `s-maxage`, which consumer settings cannot provide.
-  Existing rows are still listed and can be disabled or deleted; enabling it
-  is `400 VALIDATION_FAILED`.
+  Like any name outside the palette, it answers `404`.
 
 ### The `ApiPlugin` object
 
@@ -2852,14 +2855,12 @@ is accepted), and an `ip_restriction` prefix length that is not canonical
 decimal (`/08`).
 
 Keys Edge has removed are refused with `400 VALIDATION_FAILED` like any other
-unknown key: `ip_restriction` `mode` (it never changed whether a request was
-admitted) and the retired `response_caching` `cache_key_include_query` and
-`cache_key_include_consumer`. A row saved with one before they were removed
-is written to the gateway without it (issue #727).
+unknown key, `ip_restriction` `mode` included (it never changed whether a
+request was admitted; Edge v0.9.21 refuses it).
 
 Plugins whose descriptor has `supports_trigger: false` — `security_headers`,
 `request_size_limiting`, `response_size_limiting`, `compression`,
-`correlation_id` (and the retired `response_caching`) — refuse a trigger with
+`correlation_id` — refuse a trigger with
 `400 VALIDATION_FAILED`.
 
 ### `GET /api/apis/:id/plugins`
@@ -3427,18 +3428,10 @@ it. So:
   `400 VALIDATION_FAILED` on a credential that is not `basicauth`, and
   `403 FORBIDDEN` for a non-admin caller when the consumer holds a live row
   attributed to another account.
-- On a database written by `v0.2.0` or earlier, a one-time start-up scan wrote
-  a `retiring` placeholder for each `basicauth` append those releases recorded
-  as not taken back that no live row accounts for, unless a later reconcile or
-  whole-type revoke cleared that consumer
-  ([`operations.md` §12](operations.md#12-the-credential-mirror)). Since
-  `v0.6.0` such a database is refused rather than upgraded, so on a database
-  created at the base schema the scan finds nothing; Edge resources kept from an
-  old portal are covered in
-  [moving to a new release](operations.md#moving-to-a-new-release).
-  This does not cover restores: after restoring only Nexus, reconcile
-  `basicauth` for every consumer before relying on revoking a single HTTP Basic
-  credential.
+- After restoring only Nexus, reconcile `basicauth` for every consumer before
+  relying on revoking a single HTTP Basic credential: the restored database can
+  be older than the gateway's HTTP Basic entries
+  ([`operations.md` §12](operations.md#12-the-credential-mirror)).
 
 ---
 

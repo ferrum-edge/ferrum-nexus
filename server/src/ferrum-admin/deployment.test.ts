@@ -8,11 +8,11 @@ import { isNexusError } from '../lib/errors.js';
 import {
   assertDeploymentApplied,
   assertDeploymentEvidence,
+  checkRetainedAuthority,
   deploymentSpecDocument,
   isDeploymentAcknowledgement,
   isDeploymentNonCommit,
   isDeploymentSnapshot,
-  isLegacyDeploymentSnapshot,
   isSnapshotTooLargeRefusal,
 } from './deployment.js';
 import type { EdgeDeploymentAcknowledgement, EdgeDeploymentSnapshot } from './types.js';
@@ -27,10 +27,10 @@ function fixture<T>(path: string): T {
   return JSON.parse(readFileSync(new URL(path, contracts), 'utf8')) as T;
 }
 
-function legacyRefusal(error: unknown): boolean {
+function invalidAuthority(error: unknown): boolean {
   assert.ok(isNexusError(error));
   assert.equal(error.code, 'CONFLICT');
-  assert.deepEqual(error.details, { kind: 'legacy_deployment_authority' });
+  assert.deepEqual(error.details, { kind: 'deployment_authority_invalid' });
   return true;
 }
 
@@ -80,21 +80,41 @@ describe('published contracts-edge-0.9.21 deployment fixtures', () => {
     }
   }
 
-  it('recognizes Edge v0.9.12 (v1) snapshots only as legacy authority', () => {
+  it('refuses a v1 (Edge v0.9.12) snapshot as authority before anything is sent', () => {
     for (const file of ['empty-sql.json', 'empty-mongodb.json']) {
-      const legacy = fixture<EdgeDeploymentSnapshot>(
+      const v1 = fixture<EdgeDeploymentSnapshot>(
         `fixtures/admin-deployment-snapshot/v1/valid/${file}`,
       );
-      assert.equal(isDeploymentSnapshot(legacy), false, file);
-      assert.equal(isLegacyDeploymentSnapshot(legacy), true, file);
-      assert.throws(() => assertDeploymentEvidence(legacy, legacy.namespace), legacyRefusal);
-      assert.throws(() => deploymentSpecDocument(legacy, {}), legacyRefusal);
+      assert.equal(isDeploymentSnapshot(v1), false, file);
+      assert.throws(() => assertDeploymentEvidence(v1, v1.namespace), invalidAuthority);
+      assert.throws(() => deploymentSpecDocument(v1, {}), invalidAuthority);
       const current = fixture<EdgeDeploymentSnapshot>(
         `fixtures/admin-deployment-snapshot/v2/valid/${file}`,
       );
-      assert.equal(isLegacyDeploymentSnapshot(current), false, file);
+      assert.equal(isDeploymentSnapshot(current), true, file);
       assertDeploymentEvidence(current, current.namespace);
     }
+  });
+
+  it('refuses incomplete retained v2 authority with the typed conflict, not a gateway error', () => {
+    const snapshot = oneSpecSnapshot({ openapi: '3.1.0', paths: {} });
+    const spec = snapshot.api_specs[0] as unknown as Record<string, unknown>;
+    snapshot.api_spec_contents = [];
+    assert.equal(isDeploymentSnapshot(snapshot), true, 'the envelope alone passes');
+    // A live response keeps its gateway error...
+    assert.throws(() => deploymentSpecDocument(snapshot, spec), CANNOT_VERIFIED);
+    // ...retained authority is the one typed refusal.
+    assert.throws(
+      () => checkRetainedAuthority(() => deploymentSpecDocument(snapshot, spec)),
+      invalidAuthority,
+    );
+    const broken = structuredClone(snapshot);
+    (broken.evidence as unknown as Record<string, unknown>).resources = 'not evidence';
+    assert.throws(() => assertDeploymentEvidence(broken, broken.namespace));
+    assert.throws(
+      () => checkRetainedAuthority(() => assertDeploymentEvidence(broken, broken.namespace)),
+      invalidAuthority,
+    );
   });
 
   it('treats only a not-committed 507 acknowledgement as a definite refusal', () => {

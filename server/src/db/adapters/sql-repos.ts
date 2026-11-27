@@ -143,7 +143,6 @@ import {
   assertAuditDetailsKey,
   assertLeaseKeyLength,
   OUTBOX_PRIORITY,
-  OUTBOX_SEALED_SUBJECT,
   SPEC_HISTORY_PRUNE_BATCH,
 } from '../store.js';
 import {
@@ -154,7 +153,6 @@ import {
   FOR_UPDATE_SKIP_LOCKED,
   insertParts,
   int,
-  intOrNull,
   json,
   mapSqlConflict,
   NexusError,
@@ -175,7 +173,6 @@ import {
 } from './sql-common.js';
 import type { SchemaOptions } from '../migrate.js';
 import { runWithTransactionRetry } from './transaction-retry.js';
-import { carriesConfigKey, configKeyProbe } from './config-keys.js';
 
 /* ── Row mappers ────────────────────────────────────────────────────────── */
 
@@ -504,7 +501,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: textOrNull(row.label),
     status: text(row.status) as CredentialStatus,
     rotated_from_id: textOrNull(row.rotated_from_id),
-    edge_ordinal: intOrNull(row.edge_ordinal),
+    edge_ordinal: int(row.edge_ordinal),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1891,17 +1888,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapApiPlugin(row) : null;
     },
 
-    listCarryingConfigKeys: async (keys) => {
-      const probe = configKeyProbe(keys);
-      if (!probe) return [];
-      const rows = await queryAll(
-        exec,
-        `SELECT * FROM api_plugins WHERE ${probe.sql} ORDER BY api_id ASC, plugin_name ASC`,
-        probe.params,
-      );
-      return rows.map(mapApiPlugin).filter((row) => carriesConfigKey(row, keys));
-    },
-
     upsert: async (input) => {
       const meta = stamps({});
       // `created_at` is not in the update list, so a replace keeps the moment
@@ -2134,15 +2120,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return { items: rows.map(mapAccessRequest), total };
     },
 
-    pageByStatus: async (status, afterId, limit) =>
-      (
-        await queryAll(
-          exec,
-          `SELECT * FROM access_requests WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-          [status, afterId ?? '', Math.max(1, Math.floor(limit))],
-        )
-      ).map(mapAccessRequest),
-
     findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new SqlWhereBuilder()
         .always('api_id = ?', apiId)
@@ -2293,15 +2270,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
       return { items: rows.map(mapGrant), total };
     },
-
-    pageByStatus: async (status, afterId, limit) =>
-      (
-        await queryAll(
-          exec,
-          `SELECT * FROM grants WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-          [status, afterId ?? '', Math.max(1, Math.floor(limit))],
-        )
-      ).map(mapGrant),
 
     findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new SqlWhereBuilder()
@@ -2475,14 +2443,11 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         .add(type, 'credential_type = ?', type ?? null)
         .addIn('status', statuses)
         .build();
-      // Unresolved rows (NULL ordinal) first, then append order. The CASE is
-      // what makes NULL placement identical on PostgreSQL (NULLs last by
-      // default) and MySQL (NULLs first).
+      // Append order.
       const rows = await queryAll(
         exec,
         `SELECT * FROM credential_metadata${where.sql}
-          ORDER BY CASE WHEN edge_ordinal IS NULL THEN 0 ELSE 1 END ASC, edge_ordinal ASC,
-                   created_at ASC, id ASC`,
+          ORDER BY edge_ordinal ASC, created_at ASC, id ASC`,
         where.params,
       );
       return rows.map(mapCredential);
@@ -3268,15 +3233,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       ),
 
     list: async (filter, options) => {
-      const prefix = filter.idempotency_key_prefix;
-      const sealed = filter.sealed;
       const where = new SqlWhereBuilder()
         .add(filter.status, 'status = ?', filter.status ?? null)
         .add(filter.to_email, 'lower(to_email) = ?', (filter.to_email ?? '').toLowerCase())
-        // `substr` rather than `LIKE`, so a prefix never needs wildcard
-        // escaping; the length is our own integer, never caller text.
-        .add(prefix, `substr(idempotency_key, 1, ${prefix?.length ?? 0}) = ?`, prefix ?? null)
-        .add(sealed, sealed ? 'subject = ?' : 'subject <> ?', OUTBOX_SEALED_SUBJECT)
         .build();
       const { limit, offset } = page(options);
       const total = await queryCount(
@@ -3291,16 +3250,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
       return { items: rows.map(mapOutbox), total };
     },
-
-    // The swap always changes `subject`, so a matching row is always a changed
-    // row and MySQL's CLIENT_FOUND_ROWS count still says whether it landed.
-    sealContent: async (id, sealed) =>
-      (await execute(
-        exec,
-        `UPDATE email_outbox SET subject = ?, body_html = ?, body_text = ?
-         WHERE id = ? AND subject <> ?`,
-        [OUTBOX_SEALED_SUBJECT, sealed.body_html, sealed.body_text, id, OUTBOX_SEALED_SUBJECT],
-      )) > 0,
   };
 
   /* ── gatewayTeardownJobs ────────────────────────────────────────────── */
@@ -3689,44 +3638,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         return mapAccessGatewayJob(row);
       }),
 
-    enqueueIfAbsent: async (input, now) =>
-      inTransaction(async (tx) => {
-        // Yield to an existing row instead of failing on it: a failed INSERT
-        // aborts a PostgreSQL transaction outright. MySQL spells the no-op
-        // `ON DUPLICATE KEY UPDATE id = id`, not `INSERT IGNORE` (which would
-        // downgrade a NOT NULL or CHECK violation to a warning), and its
-        // affected-row count cannot say which way that went, so the id of the
-        // row that now holds the subject does.
-        const id = newId();
-        const insertSql = `INSERT INTO access_gateway_jobs
-           (id, generation, kind, subject_id, api_id, user_id, application_id, requested_by,
-            status, attempts, next_attempt_at, last_error, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)`;
-        await execute(
-          tx,
-          dialect === 'pg'
-            ? `${insertSql} ON CONFLICT (subject_id) DO NOTHING`
-            : `${insertSql} ON DUPLICATE KEY UPDATE id = id`,
-          [
-            id,
-            newId(),
-            input.kind,
-            input.subject_id,
-            input.api_id,
-            input.user_id,
-            input.application_id,
-            input.requested_by,
-            now,
-            now,
-            now,
-          ],
-        );
-        const row = await queryOne(tx, 'SELECT id FROM access_gateway_jobs WHERE subject_id = ?', [
-          input.subject_id,
-        ]);
-        return row !== undefined && text(row.id) === id;
-      }),
-
     findBySubject: async (subjectId) => {
       const row = await queryOne(exec, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
         subjectId,
@@ -3852,15 +3763,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     ['value_json', 'encrypted', 'updated_at'],
   );
 
-  // "Insert unless the key is taken", spelled for each server. Both report 0
-  // affected rows when the row already existed, which is the return value.
-  const SETTINGS_INSERT_IF_ABSENT =
-    dialect === 'pg'
-      ? `INSERT INTO app_settings ("key", value_json, encrypted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?) ON CONFLICT ("key") DO NOTHING`
-      : `INSERT IGNORE INTO app_settings ("key", value_json, encrypted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)`;
-
   const settings: SettingRepo = {
     get: async (key) => {
       const row = await queryOne(exec, 'SELECT * FROM app_settings WHERE "key" = ?', [key]);
@@ -3879,28 +3781,6 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       const stored = await settings.get(key);
       if (!stored) throw new Error('settings.set: row vanished immediately after upsert');
       return stored;
-    },
-
-    insertIfAbsent: async (key, value, encrypted = false) => {
-      const at = nowIso();
-      const affected = await execute(exec, SETTINGS_INSERT_IF_ABSENT, [
-        key,
-        JSON.stringify(value ?? null),
-        encodeBool(encrypted),
-        at,
-        at,
-      ]);
-      return affected > 0;
-    },
-
-    replaceEncryptedIfMatches: async (key, expected, value) => {
-      const changed = await execute(
-        exec,
-        `UPDATE app_settings SET value_json = ?, updated_at = ?
-         WHERE "key" = ? AND encrypted = 1 AND value_json = ?`,
-        [JSON.stringify(value), nowIso(), key, JSON.stringify(expected)],
-      );
-      return changed > 0;
     },
 
     setMany: async (entries) => {

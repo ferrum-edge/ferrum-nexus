@@ -642,8 +642,9 @@ rows, so re-enabling can replay each identity's grants. Account-scoped access
 **Provisioning is lazy.** The consumer is created the first time an identity is
 approved for an API or issues a credential. `ensure` does one `GET` of the
 derived id and, on `404`, one `POST` with that id, regardless of namespace size.
-Only a refused create (`409`) falls back to a logged legacy username scan,
-which throws past 10,000 consumers (see **Consumer identity recovery** in
+A refused create (`409`) reads the derived id once more and adopts only a
+consumer of the same username (another creation won the race); anything else
+fails (see **Consumer identity recovery** in
 [`operations.md`](operations.md#consumer-identity-recovery)). A failed or
 malformed response never authorises a create. A derived id that belongs to a
 different username is refused.
@@ -971,8 +972,7 @@ The configs above come from fields on the `apis` row. The **palette** is what
 a provider adds on top: a curated set of Edge plugins (`security_headers`,
 `ip_restriction`, `request_deduplication`, `request_termination` and others)
 they can switch on and off, one `api_plugins` row and one proxy-scoped config
-each. `response_caching` is retired: existing installations can be removed but
-not added or enabled.
+each. `response_caching` is not offered.
 
 **Same machinery.** A palette config is created, associated, replaced and
 deleted exactly like `rate_limiting` and `cors`. `publishing/edge-plugins.ts`
@@ -1105,9 +1105,7 @@ positions: one `credential_metadata` row per append, each carrying
 **`edge_ordinal`**, a strictly increasing counter per `(consumer, type)`
 assigned as `MAX + 1` inside the same per-consumer lock as the Edge append, so
 the non-revoked rows ordered by ordinal mirror the array and a row's rank is its
-index. A row with `edge_ordinal = NULL` sorts first; two or more such rows make
-the target **ambiguous**, refused with `409 CONFLICT` until an admin runs
-`POST /api/admin/credentials/reconcile` (§6.3).
+index.
 
 That mirror is kept provable instead: a `basicauth` row is written as
 `retiring` before its append and activated only once Edge acknowledges it, so

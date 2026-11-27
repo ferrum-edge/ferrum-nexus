@@ -134,18 +134,6 @@ describe('<PluginsTab>', () => {
     expect(screen.queryByText('Response caching')).toBeNull();
   });
 
-  it('offers only removal for an existing retired cache', async () => {
-    stubPlugins([{ ...SAVED, plugin_name: 'response_caching', enabled: true }]);
-    renderTab();
-    const title = await screen.findByText('Response caching (retired)');
-    const card = title.closest('.fx-card');
-    expect(card).not.toBeNull();
-    expect(
-      within(card as HTMLElement).getByRole('button', { name: 'Remove response caching' }),
-    ).toBeVisible();
-    expect(within(card as HTMLElement).queryByRole('checkbox')).toBeNull();
-  });
-
   it('marks a saved-but-switched-off plugin as paused, and opens it configured', async () => {
     renderTab();
     expect(await screen.findByText('Paused')).toBeInTheDocument();

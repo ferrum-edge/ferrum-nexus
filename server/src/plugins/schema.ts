@@ -98,25 +98,6 @@ function baseSchema(field: PluginFieldSpec): z.ZodTypeAny {
         .min(field.min_entries ?? 0)
         .max(field.max_entries);
     }
-
-    case 'integer_list': {
-      const item = z
-        .number()
-        .int(`${field.key} entries must be whole numbers`)
-        .min(field.item_min)
-        .max(field.item_max);
-      const values = field.options?.map((option) => option.value);
-      const bounded =
-        values === undefined
-          ? item
-          : item.refine((value) => values.includes(value), {
-              message: `${field.key} entries must be one of: ${values.join(', ')}`,
-            });
-      return z
-        .array(bounded)
-        .min(field.min_entries ?? 0)
-        .max(field.max_entries);
-    }
   }
 }
 

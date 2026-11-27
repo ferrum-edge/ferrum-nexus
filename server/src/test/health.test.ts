@@ -138,16 +138,10 @@ describe('health endpoints', () => {
     assert.equal(body.edge.admin_writes_enabled, null, 'admin-only detail');
     assert.equal(body.edge.edge_version, null, 'Ferrum Edge exposes no version endpoint');
     assert.equal(body.edge.public_egress_guaranteed, null, 'egress posture is admin-only detail');
-    assert.equal(body.credentials.legacy_basicauth_scan, null, 'scan state is admin-only detail');
+    assert.equal('credentials' in body, false, 'no credential-maintenance block');
     assert.equal(body.version, null, 'the version is admin-only detail');
     assert.equal(body.uptime_seconds, null, 'uptime is admin-only detail');
     assert.ok(Date.parse(body.checked_at) > 0);
-  });
-
-  it('reports the legacy Basic Auth scan state to an administrator', async () => {
-    const response = await harness.authed(admin, { method: 'GET', url: '/api/health' });
-    assert.equal(response.statusCode, 200);
-    assert.equal(response.json<AppHealth>().credentials.legacy_basicauth_scan, 'completed');
   });
 
   it('shows an administrator the deployment detail it withholds (#583)', async () => {
@@ -177,44 +171,6 @@ describe('health endpoints', () => {
     assert.equal(body.namespace, null);
     assert.equal(body.namespace_routing.configured, null);
     assert.equal(body.edge_version, null);
-  });
-
-  it('builds when the legacy Basic Auth scan throws and reports the failure', async () => {
-    let failedScanSettingRead = false;
-    const failed = await buildTestApp({
-      wrapStore: (store) =>
-        new Proxy(store, {
-          get(target, property, receiver) {
-            if (property !== 'settings') return Reflect.get(target, property, receiver);
-            const settings = target.settings;
-            return new Proxy(settings, {
-              get(repo, method, _repoReceiver) {
-                if (method !== 'get') {
-                  const value: unknown = Reflect.get(repo, method, _repoReceiver);
-                  return typeof value === 'function' ? value.bind(repo) : value;
-                }
-                return async (key: Parameters<typeof settings.get>[0]) => {
-                  if (key === 'credentials.legacy_basicauth_scan_v1' && !failedScanSettingRead) {
-                    failedScanSettingRead = true;
-                    throw new Error('injected legacy scan failure');
-                  }
-                  return settings.get(key);
-                };
-              },
-            });
-          },
-        }),
-    });
-    try {
-      assert.equal(failedScanSettingRead, true);
-      assert.equal(failed.services.credentials.legacyBasicAuthScanState(), 'failed');
-      const session = await failed.registerUser();
-      const response = await failed.authed(session, { method: 'GET', url: '/api/health' });
-      assert.equal(response.statusCode, 200);
-      assert.equal(response.json<AppHealth>().credentials.legacy_basicauth_scan, 'failed');
-    } finally {
-      await failed.close();
-    }
   });
 
   it('needs no authentication', async () => {

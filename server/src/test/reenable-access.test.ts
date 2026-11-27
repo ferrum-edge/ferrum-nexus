@@ -195,7 +195,7 @@ test('re-enable does not recreate a provider test identity or provision an empty
       });
       assert.equal(response.statusCode, 200, response.body);
     }
-    assert.equal(await h.edgeClient.consumers.getByUsername(`nexus-test-${apiId}`), null);
+    assert.equal(h.edge.consumerByUsername(`nexus-test-${apiId}`), undefined);
     assert.equal(await h.services.credentials.provisioner.findConsumer(provider.user.id), null);
     assert.deepEqual(await h.store.gatewayIdentities.listByUser(provider.user.id, 'nexus'), []);
   } finally {

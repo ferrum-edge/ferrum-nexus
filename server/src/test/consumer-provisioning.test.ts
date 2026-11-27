@@ -4,7 +4,6 @@ import { it } from 'node:test';
 import { aclGroupForApi, consumerUsernameForUser } from '@ferrum-nexus/shared';
 
 import { canonicalConsumerLockKey } from '../credentials/consumers.js';
-import { CONSUMER_SCAN_LIMIT } from '../ferrum-admin/client.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp } from './helpers.js';
@@ -225,7 +224,7 @@ it('provisions credentials, approvals and test consumers beyond 10,000 consumers
     const provider = await h.registerUser();
     const client = await h.registerUser({ role: 'client' });
     const applicant = await h.registerUser({ role: 'client' });
-    for (let index = 0; index <= CONSUMER_SCAN_LIMIT; index += 1) {
+    for (let index = 0; index <= 10_000; index += 1) {
       h.edge.seedConsumer({ username: `filler-${index}`, namespace: 'nexus' });
     }
     const published = await h.authed(provider, {
@@ -278,62 +277,20 @@ it('provisions credentials, approvals and test consumers beyond 10,000 consumers
   }
 });
 
-it('adopts a legacy consumer without a portal mapping and caches its original id', async () => {
+it('refuses a create that collides with a consumer of the same name under another id', async () => {
   const h = await buildTestApp();
   try {
     const user = await h.registerUser();
-    for (let index = 0; index < 501; index += 1) {
-      h.edge.seedConsumer({ username: `legacy-filler-${index}`, namespace: 'nexus' });
-    }
-    const legacy = h.edge.seedConsumer({
+    // Not the portal's: the id is neither recorded nor derived from the name.
+    h.edge.seedConsumer({
       username: consumerUsernameForUser(user.user.id),
-      custom_id: user.user.id,
       namespace: 'nexus',
     });
-    const provisioner = h.services.credentials.provisioner;
-    const mapping = await provisioner.ensureConsumer(user.user);
-    assert.equal(mapping.ferrum_consumer_id, legacy.id);
-    const calls = h.edge.callsTo('GET', '/consumers').length;
-    assert.equal((await provisioner.ensureConsumer(user.user)).id, mapping.id);
-    assert.equal(h.edge.callsTo('GET', '/consumers').length, calls);
-    assert.equal(h.edge.consumers.size, 502, 'adoption does not create a duplicate');
-  } finally {
-    await h.close();
-  }
-});
-
-it('replaces a legacy test consumer whose registry row has no id', async () => {
-  const h = await buildTestApp();
-  try {
-    const provider = await h.registerUser();
-    const published = await h.authed(provider, {
-      method: 'POST',
-      url: '/api/apis',
-      payload: {
-        name: 'Legacy test identity',
-        slug: 'legacy-test-identity',
-        spec: SAMPLE_SPEC_YAML,
-        auth_plugin: 'key_auth',
-        requestable: true,
-        visibility: 'public',
-      },
-    });
-    assert.equal(published.statusCode, 201, published.body);
-    const apiId = published.json<{ api: { id: string } }>().api.id;
-    const username = `nexus-test-${apiId}`;
-    const identity = await h.services.credentials.claimGatewayIdentity(provider.user.id, username);
-    assert.equal(identity.ferrum_consumer_id, null);
-    const legacy = h.edge.seedConsumer({ username, namespace: 'nexus' });
-    const replaced = await h.authed(provider, {
-      method: 'POST',
-      url: `/api/apis/${apiId}/test-consumer`,
-      payload: {},
-    });
-    assert.equal(replaced.statusCode, 201, replaced.body);
-    const bound = await h.store.gatewayIdentities.findByUsername('nexus', username);
-    assert.equal(bound?.ferrum_consumer_id, h.edge.consumerByUsername(username)?.id);
-    assert.notEqual(bound?.ferrum_consumer_id, legacy.id);
-    assert.equal(h.edge.consumers.has(`nexus/${legacy.id}`), false);
+    const before = h.edge.consumers.size;
+    await assert.rejects(() => h.services.credentials.provisioner.ensureConsumer(user.user));
+    assert.equal(h.edge.consumers.size, before, 'no duplicate was created');
+    const lists = h.edge.callsTo('GET', '/consumers').filter((call) => call.path === '/consumers');
+    assert.equal(lists.length, 0, 'the namespace is never scanned by username');
   } finally {
     await h.close();
   }

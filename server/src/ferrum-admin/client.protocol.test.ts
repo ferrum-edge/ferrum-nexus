@@ -496,7 +496,6 @@ describe('Edge response contracts over HTTP sockets', () => {
   it('requires valid pages before nullable scans can conclude absence', async (t) => {
     const { client, reply } = await fixture(t);
     const scans = [
-      () => client.consumers.getByUsername('missing'),
       () => client.pluginConfigs.listByProxy('missing'),
       () => client.apiSpecs.findByProxy('missing'),
       () => client.listNamespaces(),
@@ -507,12 +506,6 @@ describe('Edge response contracts over HTTP sockets', () => {
         await assert.rejects(scan, protocolFailure);
       }
     }
-    reply.body = JSON.stringify({ data: [], pagination: { offset: 0, limit: 500, total: 1 } });
-    await assert.rejects(() => client.consumers.getByUsername('missing'), protocolFailure);
-    reply.body = JSON.stringify({ data: [], pagination: { offset: 0, limit: 500, total: 0 } });
-    assert.equal(await client.consumers.getByUsername('missing'), null);
-    reply.body = JSON.stringify({ data: [], pagination: { offset: 0, limit: 1, total: 0 } });
-    await assert.rejects(() => client.consumers.getByUsername('missing'), protocolFailure);
     reply.body = JSON.stringify({ data: [], pagination: { offset: 0, limit: 1000, total: 0 } });
     assert.deepEqual(await client.pluginConfigs.listByProxy('missing'), []);
     assert.deepEqual(await client.listNamespaces(), []);
@@ -984,18 +977,23 @@ describe('released deployment authority over HTTP sockets', () => {
     assert.equal(requests.filter((request) => request === 'GET /deployment-snapshot').length, 0);
   });
 
-  it('refuses Edge v0.9.12 authority before sending any request', async (t) => {
+  it('refuses authority that is not a v2 deployment snapshot before sending any request', async (t) => {
     const { client, reply, requests } = await fixture(t);
     reply.policyForDeployment = true;
     const legacy = fixtureSnapshot('v1');
+    // A v2 envelope whose evidence is incomplete is refused the same way.
+    const incomplete = fixtureSnapshot('v2');
+    (incomplete.evidence as unknown as Record<string, unknown>).resources = 'not evidence';
     for (const attempt of [
       () => client.deployments.prepare('remove', 'proxy-1', legacy),
       () => client.deployments.remove('proxy-1', legacy),
+      () => client.deployments.prepare('remove', 'proxy-1', incomplete),
+      () => client.deployments.remove('proxy-1', incomplete),
     ]) {
       await assert.rejects(attempt(), (error: unknown) => {
         assert.ok(isNexusError(error));
         assert.equal(error.code, 'CONFLICT');
-        assert.deepEqual(error.details, { kind: 'legacy_deployment_authority' });
+        assert.deepEqual(error.details, { kind: 'deployment_authority_invalid' });
         return true;
       });
     }

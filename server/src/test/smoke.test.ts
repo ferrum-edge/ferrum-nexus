@@ -2028,46 +2028,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
-    it('apiPlugins: lists exactly the rows carrying a listed config key (issue #727)', async () => {
-      const owner = await makeUser({ role: 'provider' });
-      const legacy = await makeApi(owner.id);
-      const clean = await makeApi(owner.id);
-      const row = (apiId: string, pluginName: string, config: Record<string, unknown>) =>
-        store.apiPlugins.upsert({
-          api_id: apiId,
-          plugin_name: pluginName,
-          enabled: true,
-          config,
-          trigger: null,
-          ferrum_plugin_config_id: null,
-        });
-      await row(legacy.id, 'ip_restriction', { allow: ['203.0.113.0/24'], mode: 'allow_first' });
-      await row(legacy.id, 'response_caching', { ttl_seconds: 60, cache_key_include_query: true });
-      // A key-like value, a near-miss key the text match widens to, and a key
-      // listed for another plugin: none of them counts.
-      await row(clean.id, 'ip_restriction', { allow: ['10.0.0.1'], note: 'mode' });
-      await row(clean.id, 'response_caching', { cache_keyXinclude_query: true });
-      await row(clean.id, 'correlation_id', { mode: 'x' });
-
-      const keys = {
-        ip_restriction: ['mode'],
-        response_caching: ['cache_key_include_query', 'cache_key_include_consumer'],
-      };
-      const found = (await store.apiPlugins.listCarryingConfigKeys(keys)).filter(
-        (entry) => entry.api_id === legacy.id || entry.api_id === clean.id,
-      );
-      assert.deepEqual(
-        found.map((entry) => [entry.api_id, entry.plugin_name]),
-        [
-          [legacy.id, 'ip_restriction'],
-          [legacy.id, 'response_caching'],
-        ],
-      );
-      assert.deepEqual(await store.apiPlugins.listCarryingConfigKeys({}), []);
-    });
-
-    /* ── api spec changes ─────────────────────────────────────────────── */
-
     it('apiSpecChanges: lists newest first, outlives its revision, and prunes', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await makeApi(owner.id);
@@ -2925,22 +2885,9 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         status: 'active',
       });
       assert.equal(jwt.edge_ordinal, 1);
-      // An explicit null records a legacy row of unknown position; it lists
-      // ahead of every row with an ordinal whatever its timestamp says.
-      const legacy = await store.credentials.create({
-        user_id: user.id,
-        ferrum_consumer_id: user.id,
-        credential_type: 'keyauth',
-        ferrum_credential_id: 'keyauth:legacy',
-        fingerprint: `fp-${newId()}`,
-        last4: 'lega',
-        status: 'active',
-        edge_ordinal: null,
-      });
-      assert.equal(legacy.edge_ordinal, null);
       assert.deepEqual(
         (await store.credentials.listByConsumer(user.id, 'keyauth')).map((entry) => entry.id),
-        [legacy.id, first.id, second.id, skewed.id],
+        [first.id, second.id, skewed.id],
       );
       // Two assigned ordinals can never collide within a consumer and type.
       await assert.rejects(
@@ -2993,7 +2940,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         (await store.credentials.update(afterSecondRevoke.id, { status: 'revoked' }))?.status,
         'revoked',
       );
-      assert.equal(await store.credentials.delete(legacy.id), true);
       assert.equal(await store.credentials.delete(skewed.id), true);
       assert.equal(await store.credentials.delete(jwt.id), true);
 
@@ -4721,120 +4667,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.accessGatewayJobs.findBySubject(subject), null);
     });
 
-    it('accessGatewayJobs: enqueueIfAbsent inserts a due pending row once and never re-owns one', async () => {
-      const grantee = await makeUser();
-      const input = {
-        kind: 'approve' as const,
-        subject_id: newId(),
-        api_id: newId(),
-        user_id: grantee.id,
-        application_id: null,
-        requested_by: null,
-      };
-      const due = nowIso();
-      assert.equal(await store.accessGatewayJobs.enqueueIfAbsent(input, due), true);
-      const queued = await store.accessGatewayJobs.findBySubject(input.subject_id);
-      assert.ok(queued);
-      assert.equal(queued.kind, 'approve');
-      assert.equal(queued.status, 'pending');
-      assert.equal(queued.attempts, 0);
-      assert.equal(queued.next_attempt_at, due);
-      assert.equal(queued.last_error, null);
-      const claimable = await store.accessGatewayJobs.claimDue(nowIso(), 50);
-      const mine = claimable.find((row) => row.subject_id === input.subject_id);
-      assert.ok(mine, 'the queued row is due at once');
-      assert.equal(await store.accessGatewayJobs.reschedule(mine, due, 'back to pending'), true);
-      const before = await store.accessGatewayJobs.findBySubject(input.subject_id);
-      assert.ok(before);
-
-      // A second call, and one for a row a live decision owns, leave it exactly as it is.
-      assert.equal(
-        await store.accessGatewayJobs.enqueueIfAbsent({ ...input, kind: 'revoke' }, nowIso()),
-        false,
-      );
-      assert.deepEqual(await store.accessGatewayJobs.findBySubject(input.subject_id), before);
-      const owned = await store.accessGatewayJobs.upsertClaimed(
-        { ...input, subject_id: newId() },
-        nowIso(),
-      );
-      assert.equal(
-        await store.accessGatewayJobs.enqueueIfAbsent(
-          { ...input, subject_id: owned.subject_id },
-          nowIso(),
-        ),
-        false,
-      );
-      const untouched = await store.accessGatewayJobs.findBySubject(owned.subject_id);
-      assert.equal(untouched?.id, owned.id);
-      assert.equal(untouched?.generation, owned.generation);
-      assert.equal(untouched?.status, 'sending');
-      await store.accessGatewayJobs.deleteBySubject(input.subject_id);
-      await store.accessGatewayJobs.deleteBySubject(owned.subject_id);
-    });
-
-    it('grants and accessRequests: pageByStatus walks one status by keyset', async () => {
-      const owner = await makeUser({ role: 'provider' });
-      const client = await makeUser();
-      const api = await makeApi(owner.id);
-      const requests = new Set<string>();
-      for (let index = 0; index < 5; index += 1) {
-        const row = await store.accessRequests.create({
-          api_id: api.id,
-          user_id: client.id,
-          justification: `keyset ${index}`,
-          status: 'denied',
-        });
-        requests.add(row.id);
-      }
-      const grants = new Set<string>();
-      for (let index = 0; index < 3; index += 1) {
-        const row = await store.grants.create({
-          api_id: api.id,
-          user_id: client.id,
-          acl_group: `nexus:api:${api.id}:approved`,
-          status: 'revoked',
-          granted_by: owner.id,
-        });
-        grants.add(row.id);
-      }
-
-      // Rows leaving the status behind the cursor cannot shift the next page,
-      // so every row is met exactly once.
-      const seenRequests: string[] = [];
-      let afterRequest: string | null = null;
-      for (;;) {
-        const page = await store.accessRequests.pageByStatus('denied', afterRequest, 2);
-        assert.ok(page.length <= 2);
-        const last = page.at(-1);
-        if (!last) break;
-        for (const row of page) {
-          assert.equal(row.status, 'denied');
-          if (requests.has(row.id)) {
-            seenRequests.push(row.id);
-            await store.accessRequests.updateIfStatus(row.id, 'denied', { status: 'cancelled' });
-          }
-        }
-        afterRequest = last.id;
-      }
-      assert.equal(seenRequests.length, requests.size);
-      assert.deepEqual(new Set(seenRequests), requests);
-
-      const seenGrants: string[] = [];
-      let afterGrant: string | null = null;
-      for (;;) {
-        const page = await store.grants.pageByStatus('revoked', afterGrant, 2);
-        const last = page.at(-1);
-        if (!last) break;
-        for (const row of page) {
-          assert.equal(row.status, 'revoked');
-          if (grants.has(row.id)) seenGrants.push(row.id);
-        }
-        afterGrant = last.id;
-      }
-      assert.equal(seenGrants.length, grants.size);
-      assert.deepEqual(new Set(seenGrants), grants);
-    });
-
     it('stores spec metadata and audit details as large as the API accepts (#604, #605)', async () => {
       // MySQL held these in VARCHAR(255), VARCHAR(64) and TEXT (65,535 bytes),
       // narrower than what the parser and the agents schema accept; strict
@@ -5131,103 +4963,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.settings.delete(plainKey), true);
       assert.equal(await store.settings.delete(plainKey), false);
       assert.equal(await store.settings.get(plainKey), null);
-    });
-
-    it('settings: exactly one concurrent insertIfAbsent wins the key', async () => {
-      const key = `bootstrap-claim-${newId().slice(0, 8)}`;
-
-      // Six callers race for the same key with nothing serialising them. The
-      // unique constraint on `app_settings.key` is the only arbiter, which is
-      // the property the super_admin election depends on — a transaction is
-      // not enough, because two of them can both observe "absent".
-      const results = await Promise.all(
-        Array.from({ length: 6 }, (_unused, index) =>
-          store.settings.insertIfAbsent(key, { winner: index }),
-        ),
-      );
-      assert.equal(
-        results.filter(Boolean).length,
-        1,
-        `expected exactly one winner, got ${results.filter(Boolean).join(', ')}`,
-      );
-
-      const stored = await store.settings.get(key);
-      const winner = results.indexOf(true);
-      assert.deepEqual(stored?.value, { winner }, 'the winner’s value is the one stored');
-      assert.equal(stored?.encrypted, false);
-
-      // A later call never overwrites, and never throws.
-      assert.equal(await store.settings.insertIfAbsent(key, { winner: 99 }), false);
-      assert.deepEqual((await store.settings.get(key))?.value, { winner });
-
-      // The encrypted flag is honoured on the insert that wins.
-      const secretKey = `claim-secret-${newId().slice(0, 8)}`;
-      assert.equal(await store.settings.insertIfAbsent(secretKey, 'v1:aa:bb:cc', true), true);
-      assert.equal((await store.settings.get(secretKey))?.encrypted, true);
-
-      // …and a key `set` created first is respected, too.
-      const takenKey = `claim-taken-${newId().slice(0, 8)}`;
-      await store.settings.set(takenKey, { from: 'set' });
-      assert.equal(await store.settings.insertIfAbsent(takenKey, { from: 'claim' }), false);
-      assert.deepEqual((await store.settings.get(takenKey))?.value, { from: 'set' });
-    });
-
-    it('settings: replaceEncryptedIfMatches swaps only the value it was given', async () => {
-      const key = `smtp.password-${newId().slice(0, 8)}`;
-      await store.settings.set(key, 'v1:old:blob:tag', true);
-      const created = await store.settings.get(key);
-
-      // A value another writer saved in between is never overwritten.
-      assert.equal(
-        await store.settings.replaceEncryptedIfMatches(key, 'v1:x:y:z', 'v2:a:b:c'),
-        false,
-      );
-      assert.equal((await store.settings.get(key))?.value, 'v1:old:blob:tag');
-
-      assert.equal(
-        await store.settings.replaceEncryptedIfMatches(key, 'v1:old:blob:tag', 'v2:a:b:c'),
-        true,
-      );
-      const replaced = await store.settings.get(key);
-      assert.equal(replaced?.value, 'v2:a:b:c');
-      assert.equal(replaced?.encrypted, true);
-      assert.equal(replaced?.created_at, created?.created_at);
-      // Already replaced: a second attempt with the old value changes nothing.
-      assert.equal(
-        await store.settings.replaceEncryptedIfMatches(key, 'v1:old:blob:tag', 'v2:d:e:f'),
-        false,
-      );
-
-      // A deleted row stays deleted, and a plaintext row is never touched.
-      await store.settings.delete(key);
-      assert.equal(
-        await store.settings.replaceEncryptedIfMatches(key, 'v2:a:b:c', 'v2:d:e:f'),
-        false,
-      );
-      assert.equal(await store.settings.get(key), null);
-      await store.settings.set(key, 'v1:old:blob:tag', false);
-      assert.equal(
-        await store.settings.replaceEncryptedIfMatches(key, 'v1:old:blob:tag', 'v2:a:b:c'),
-        false,
-      );
-      assert.equal((await store.settings.get(key))?.encrypted, false);
-      await store.settings.delete(key);
-    });
-
-    it('settings: exactly one concurrent replaceEncryptedIfMatches wins', async () => {
-      // Several writers (on pooled backends, several connections) race to
-      // replace the same legacy value: the conditional statement is the only
-      // arbiter, so exactly one replaces it and the rest leave its value.
-      const key = `captcha.secret_key-${newId().slice(0, 8)}`;
-      await store.settings.set(key, 'v1:race:blob:tag', true);
-      const results = await Promise.all(
-        Array.from({ length: 6 }, (_unused, index) =>
-          store.settings.replaceEncryptedIfMatches(key, 'v1:race:blob:tag', `v2:winner:${index}:x`),
-        ),
-      );
-      assert.equal(results.filter(Boolean).length, 1, results.join(', '));
-      assert.equal((await store.settings.get(key))?.value, `v2:winner:${results.indexOf(true)}:x`);
-      await store.settings.delete(key);
     });
 
     /* ── email templates ──────────────────────────────────────────────── */

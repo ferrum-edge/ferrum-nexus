@@ -93,22 +93,32 @@ export function isDeploymentSnapshot(value: unknown): value is EdgeDeploymentSna
 }
 
 /**
- * Authority issued by Edge v0.9.12 or earlier (`admin-deployment-snapshot` v1): spec
- * bytes inline and no `api_spec_contents`. Recovery journals written before Edge
- * v0.9.13 still hold it, and Edge v0.9.13 refuses its token with `412`. It is
- * recognized only so that it is refused before any request is sent.
+ * Authority that is not a complete `admin-deployment-snapshot` v2 body is refused
+ * before any request is sent; never re-read authority in its place, which would be
+ * a fresh-token retry.
  */
-export function isLegacyDeploymentSnapshot(value: unknown): boolean {
-  return isSnapshotEnvelope(value) && !Object.hasOwn(value, 'api_spec_contents');
+export function invalidDeploymentAuthority(): NexusError {
+  return conflict(
+    'The deployment authority is not a complete Ferrum Edge deployment snapshot; retain ' +
+      'the journal and resolve it by observation',
+    { kind: 'deployment_authority_invalid' },
+  );
 }
 
-/** Never re-read authority for a legacy journal: that would be a fresh-token retry. */
-export function legacyDeploymentAuthority(): NexusError {
-  return conflict(
-    'The recovery journal holds deployment authority issued by Ferrum Edge v0.9.12 or ' +
-      'earlier, which Edge v0.9.13 refuses; retain the journal and resolve it by observation',
-    { kind: 'legacy_deployment_authority' },
-  );
+/**
+ * Run the checks of **retained** authority (a recovery journal's, or one a
+ * caller hands back for a conditional mutation): any failure is
+ * {@link invalidDeploymentAuthority}, so an incomplete envelope, evidence or
+ * stored content is one typed refusal before anything is sent. A snapshot Edge
+ * just answered is checked without this, so a malformed live response stays a
+ * gateway protocol error.
+ */
+export function checkRetainedAuthority<T>(check: () => T): T {
+  try {
+    return check();
+  } catch {
+    throw invalidDeploymentAuthority();
+  }
 }
 
 /**
@@ -197,7 +207,7 @@ export function assertDeploymentEvidence(
   snapshot: EdgeDeploymentSnapshot,
   namespace: string,
 ): void {
-  if (isLegacyDeploymentSnapshot(snapshot)) throw legacyDeploymentAuthority();
+  if (!isDeploymentSnapshot(snapshot)) throw invalidDeploymentAuthority();
   const resources = snapshot.evidence.resources;
   const stored = snapshot.evidence.stored;
   const sqlTables = [
@@ -323,7 +333,7 @@ export function deploymentSpecDocument(
   snapshot: EdgeDeploymentSnapshot,
   spec: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (isLegacyDeploymentSnapshot(snapshot)) throw legacyDeploymentAuthority();
+  if (!isDeploymentSnapshot(snapshot)) throw invalidDeploymentAuthority();
   try {
     const entries = Array.isArray(snapshot.api_spec_contents)
       ? snapshot.api_spec_contents.filter((entry) => isSpecContents(entry) && entry.id === spec.id)

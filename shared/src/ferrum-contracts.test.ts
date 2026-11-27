@@ -26,7 +26,6 @@ import {
   isGatewayOwnedConsumerHeader,
   PLUGIN_CATEGORIES,
   PROVIDER_PLUGINS,
-  RETIRED_RESPONSE_CACHING,
 } from './plugins.js';
 
 const PIN_TAG_LINE = /^tag (contracts-edge-[0-9]+\.[0-9]+\.[0-9]+(?:-r(?:[2-9]|[1-9][0-9]+))?)$/;
@@ -217,7 +216,6 @@ describe('pinned Ferrum contracts', () => {
     ]);
     const localNames = [
       ...PROVIDER_PLUGINS.map(({ name }) => name),
-      RETIRED_RESPONSE_CACHING.name,
       ...Object.keys(FIRST_CLASS_PLUGIN_FIELDS),
     ];
     const duplicateNames = localNames.filter((name, index) => localNames.indexOf(name) !== index);

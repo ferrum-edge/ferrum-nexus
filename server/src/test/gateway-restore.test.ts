@@ -295,13 +295,16 @@ describe('restoring a missing gateway deployment', () => {
     assert.equal(live?.id, afterRow.ferrum_plugin_config_id);
   });
 
-  // Review round 2, dsf F2: a row an earlier release saved with
-  // `ip_restriction.mode` is rebuilt without it, on the gateway and in the row.
-  it('rebuilds a palette row saved with a key Edge removed without that key', async () => {
+  // Review of #767, F1: a palette row an older release saved can carry a key
+  // the adopted Edge no longer accepts on an enabled config. The restore
+  // writes exactly the keys the palette declares, so the retired key cannot
+  // fail the rebuild of a published API.
+  it('restores a palette row carrying a key the palette no longer declares', async () => {
+    const allow = ['203.0.113.0/24'];
     const saved = await harness.authed(provider, {
       method: 'PUT',
       url: `/api/apis/${apiId}/plugins/ip_restriction`,
-      payload: { enabled: true, config: { allow: ['203.0.113.0/24'] } },
+      payload: { enabled: true, config: { allow } },
     });
     assert.equal(saved.statusCode, 200, saved.body);
     const row = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
@@ -309,8 +312,8 @@ describe('restoring a missing gateway deployment', () => {
     await harness.store.apiPlugins.upsert({
       api_id: apiId,
       plugin_name: 'ip_restriction',
-      enabled: row.enabled,
-      config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+      enabled: true,
+      config: { allow, mode: 'allow_first' },
       trigger: row.trigger,
       ferrum_plugin_config_id: row.ferrum_plugin_config_id,
     });
@@ -320,12 +323,9 @@ describe('restoring a missing gateway deployment', () => {
     const response = await restore(provider, apiId);
     assert.equal(response.statusCode, 200, response.body);
     const proxyId = response.json<RestoreApiGatewayResponse>().proxy_id;
-
     const live = harness.edge.pluginForProxy(proxyId, 'ip_restriction', NAMESPACE);
-    assert.deepEqual(live?.config, { allow: ['203.0.113.0/24'] });
-    const after = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
-    assert.deepEqual(after?.config, { allow: ['203.0.113.0/24'] });
-    assert.equal(after?.ferrum_plugin_config_id, live?.id);
+    assert.equal(live?.enabled, true);
+    assert.deepEqual(live?.config, { allow });
   });
 
   it('leaves a truthful repair state when the rebuild fails, and retries cleanly', async () => {

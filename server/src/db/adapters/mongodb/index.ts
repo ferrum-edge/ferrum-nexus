@@ -211,7 +211,6 @@ import {
   assertAuditDetailsKey,
   assertLeaseKeyLength,
   OUTBOX_PRIORITY,
-  OUTBOX_SEALED_SUBJECT,
   SPEC_HISTORY_PRUNE_BATCH,
 } from '../../store.js';
 import {
@@ -221,7 +220,6 @@ import {
   MONGO_TRANSACTION_BUDGET_MS,
   transactionContentionError,
 } from '../transaction-retry.js';
-import { carriesConfigKey } from '../config-keys.js';
 
 const REGEX_SPECIAL_CHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
@@ -295,10 +293,6 @@ function flag(value: unknown): boolean {
 
 function num(value: unknown): number {
   return typeof value === 'number' ? value : Number(value ?? 0);
-}
-
-function numOrNull(value: unknown): number | null {
-  return value === null || value === undefined ? null : num(value);
 }
 
 /**
@@ -747,8 +741,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: strOrNull(row.label),
     status: str(row.status) as CredentialStatus,
     rotated_from_id: strOrNull(row.rotated_from_id),
-    // Missing positions read back exactly like an unresolved SQL NULL.
-    edge_ordinal: numOrNull(row.edge_ordinal),
+    edge_ordinal: num(row.edge_ordinal),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -2935,24 +2928,6 @@ class MongoStore implements NexusStore {
       return row ? mapApiPlugin(row) : null;
     },
 
-    listCarryingConfigKeys: async (keys) => {
-      const clauses = Object.entries(keys)
-        .filter(([, configKeys]) => configKeys.length > 0)
-        .map(([pluginName, configKeys]) => ({
-          plugin_name: pluginName,
-          $or: configKeys.map((key) => ({ [`config.${key}`]: { $exists: true } })),
-        }));
-      if (clauses.length === 0) return [];
-      return (
-        await this.col(COLLECTIONS.apiPlugins)
-          .find({ $or: clauses } as Filter<NexusDoc>, this.opts)
-          .sort({ api_id: 1, plugin_name: 1 })
-          .toArray()
-      )
-        .map((doc) => mapApiPlugin(doc as Row))
-        .filter((row) => carriesConfigKey(row, keys));
-    },
-
     upsert: async (input) => {
       const meta = stamps({});
       // One `updateOne(..., { upsert: true })` against the unique
@@ -3190,15 +3165,6 @@ class MongoStore implements NexusStore {
         mapAccessRequest,
       ),
 
-    pageByStatus: async (status, afterId, limit) => {
-      const docs = await this.col(COLLECTIONS.accessRequests)
-        .find({ status, _id: { $gt: afterId ?? '' } } as Filter<NexusDoc>, this.opts)
-        .sort({ _id: 1 })
-        .limit(Math.max(1, Math.floor(limit)))
-        .toArray();
-      return docs.map((doc) => mapAccessRequest(doc as Row));
-    },
-
     findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
       const query: Record<string, unknown> = { api_id: apiId, user_id: userId, status: 'pending' };
       scopeQuery(query, applicationId);
@@ -3313,15 +3279,6 @@ class MongoStore implements NexusStore {
 
     list: async (filter, options) =>
       this.paginate(COLLECTIONS.grants, grantFilter(filter), NEWEST_FIRST, options, mapGrant),
-
-    pageByStatus: async (status, afterId, limit) => {
-      const docs = await this.col(COLLECTIONS.grants)
-        .find({ status, _id: { $gt: afterId ?? '' } } as Filter<NexusDoc>, this.opts)
-        .sort({ _id: 1 })
-        .limit(Math.max(1, Math.floor(limit)))
-        .toArray();
-      return docs.map((doc) => mapGrant(doc as Row));
-    },
 
     findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
       const query: Record<string, unknown> = { api_id: apiId, user_id: userId, status: 'active' };
@@ -4189,13 +4146,6 @@ class MongoStore implements NexusStore {
       const query: Record<string, unknown> = {};
       if (filter.status !== undefined) query.status = filter.status;
       if (filter.to_email !== undefined) query.to_email = equalsInsensitive(filter.to_email);
-      if (filter.idempotency_key_prefix !== undefined) {
-        // Anchored and escaped, so the prefix matches as literal text.
-        query.idempotency_key = { $regex: `^${escapeRegex(filter.idempotency_key_prefix)}` };
-      }
-      if (filter.sealed !== undefined) {
-        query.subject = filter.sealed ? OUTBOX_SEALED_SUBJECT : { $ne: OUTBOX_SEALED_SUBJECT };
-      }
       return this.paginate(
         COLLECTIONS.emailOutbox,
         query as Filter<NexusDoc>,
@@ -4203,21 +4153,6 @@ class MongoStore implements NexusStore {
         options,
         mapOutbox,
       );
-    },
-
-    sealContent: async (id, sealed) => {
-      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
-        { _id: id, subject: { $ne: OUTBOX_SEALED_SUBJECT } } as Filter<NexusDoc>,
-        {
-          $set: {
-            subject: OUTBOX_SEALED_SUBJECT,
-            body_html: sealed.body_html,
-            body_text: sealed.body_text,
-          },
-        },
-        this.opts,
-      );
-      return result.modifiedCount > 0;
     },
   };
 
@@ -4565,33 +4500,6 @@ class MongoStore implements NexusStore {
       return mapAccessGatewayJob(row);
     },
 
-    enqueueIfAbsent: async (input, now) => {
-      // `$setOnInsert` only: an existing row for the subject is left untouched.
-      const result = await this.col(COLLECTIONS.accessGatewayJobs).updateOne(
-        { subject_id: input.subject_id } as Filter<NexusDoc>,
-        {
-          $setOnInsert: {
-            _id: newId(),
-            generation: newId(),
-            kind: input.kind,
-            subject_id: input.subject_id,
-            api_id: input.api_id,
-            user_id: input.user_id,
-            application_id: input.application_id,
-            requested_by: input.requested_by,
-            status: 'pending',
-            attempts: 0,
-            next_attempt_at: now,
-            last_error: null,
-            created_at: now,
-            updated_at: now,
-          },
-        } as UpdateFilter<NexusDoc>,
-        { ...this.opts, upsert: true },
-      );
-      return result.upsertedCount > 0;
-    },
-
     findBySubject: async (subjectId) => {
       const row = asRow(
         await this.col(COLLECTIONS.accessGatewayJobs).findOne({ subject_id: subjectId }, this.opts),
@@ -4712,38 +4620,6 @@ class MongoStore implements NexusStore {
       const stored = await this.settings.get(key);
       if (!stored) throw new Error('settings.set: row vanished immediately after upsert');
       return stored;
-    },
-
-    insertIfAbsent: async (key, value, encrypted = false) => {
-      const at = nowIso();
-      try {
-        // The setting key *is* `_id`, so a plain insert is the atomic claim:
-        // the server rejects the second one with a duplicate-key error even
-        // when both callers looked and saw nothing.
-        await this.col(COLLECTIONS.settings).insertOne(
-          {
-            _id: key,
-            value: normalizeJson(value ?? null),
-            encrypted,
-            created_at: at,
-            updated_at: at,
-          } as NexusDoc,
-          this.opts,
-        );
-        return true;
-      } catch (error) {
-        if ((error as { code?: unknown }).code === 11000) return false;
-        throw error;
-      }
-    },
-
-    replaceEncryptedIfMatches: async (key, expected, value) => {
-      const result = await this.col(COLLECTIONS.settings).updateOne(
-        { _id: key, encrypted: true, value: expected } as Filter<NexusDoc>,
-        { $set: { value, updated_at: nowIso() } },
-        this.opts,
-      );
-      return result.modifiedCount > 0;
     },
 
     setMany: async (entries) => {
