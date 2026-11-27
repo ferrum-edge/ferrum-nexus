@@ -47,12 +47,13 @@ Since `v0.4.0` the supported Node range is `^22.22.2 || ^24.15.0 || >=26.0.0`.
 Node 22 remains supported; older Node 22/24 patches and Node 23/25 are excluded.
 Releases before `v0.4.0` supported Node 22.14 or later.
 
-- **Upgrades.** A release opens the database the previous release left and upgrades it
-  in place with forward-only schema migrations, applied at startup or by the migrate
-  command; downgrades are not supported. A database created by `v0.6.0` is opened as it
-  is. One created by `v0.5.2` or earlier cannot be upgraded and is refused, unchanged,
-  at startup; move such a portal to a new, empty database. Stop Nexus and back up Nexus
-  and Ferrum Edge together before every upgrade: that backup is the way back. See
+- **Upgrades.** A release upgrades the database the previous release left, in place, with
+  forward-only schema migrations; downgrades are not supported. The migrate command
+  creates or upgrades the schema, and the server refuses to start while migrations are
+  pending. A database created by `v0.6.0` can be upgraded. One created by `v0.5.2` or
+  earlier cannot, and is refused unchanged; move such a portal to a new, empty database.
+  Stop Nexus and back up Nexus and Ferrum Edge together before every upgrade: that
+  backup is the way back. See
   [schema and upgrades](docs/operations.md#schema-and-upgrades-before-10),
   [moving from a release before v0.6.0](docs/operations.md#moving-to-a-new-release) and
   [backup and restore](docs/operations.md#5-backup-and-restore).
@@ -173,7 +174,7 @@ FERRUM_GATEWAY_PUBLIC_URL=http://127.0.0.1:8000
 Then create the schema and start:
 
 ```bash
-npm run migrate   # builds shared, then creates or upgrades the database schema
+npm run migrate   # builds shared, then creates or upgrades the database schema (required)
 npm run dev       # backend :8787, web :5173
 ```
 
