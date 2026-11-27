@@ -445,9 +445,9 @@ export const AuditAction = {
   ADMIN_SETTINGS_UPDATE: 'admin.settings_update',
   /**
    * The one-time startup conversion of unbound legacy (`v1`) encrypted
-   * settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). Written by the
-   * system once; its presence is what stops any later start from converting a
-   * `v1` row again, so it must not be deleted.
+   * settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). `v0.6.0`
+   * recorded it at its first start; nothing writes it any more, and the
+   * action stays in the catalog so those rows remain listable and filterable.
    */
   SETTINGS_ENCRYPTION_BOUND: 'settings.encryption_bound',
   ADMIN_TEMPLATE_UPDATE: 'admin.template_update',
@@ -695,8 +695,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   ),
   [AuditAction.ADMIN_SETTINGS_UPDATE]: TRANSACTIONAL,
   [AuditAction.SETTINGS_ENCRYPTION_BOUND]: rowOnly(
-    'Commits with the conversion it marks complete; on a portal with no legacy rows to ' +
-      'convert it is the transaction’s only write.',
+    'Historical: v0.6.0 committed it alone at its first start; nothing writes it any more.',
   ),
   [AuditAction.ADMIN_TEMPLATE_UPDATE]: TRANSACTIONAL,
   [AuditAction.ADMIN_TEMPLATE_RESET]: TRANSACTIONAL,

@@ -32,7 +32,6 @@ import {
 } from './admin/gateway-reconciliation.js';
 import { createGodService, type GodService } from './admin/god-service.js';
 import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
-import { bindLegacyEncryptedSettings } from './admin/rotate-key.js';
 import { createSettingsService, type SettingsService } from './admin/settings-service.js';
 import { createSmtpTestService, type SmtpTestService } from './admin/smtp-test-service.js';
 import { createAuditService, type AuditService } from './audit/service.js';
@@ -435,22 +434,6 @@ export async function buildServer(
   });
 
   const audit = createAuditService(deps.store);
-  // Before any service reads a setting: runtime reads refuse an unbound
-  // legacy (`v1`) encrypted setting, so the first start of this release
-  // re-binds every one to its own row, once, and records that it did
-  // (GHSA-qm46-qg94-mpg7); a legacy row this key cannot open stops the start
-  // with nothing converted. Later starts convert nothing.
-  const binding = await bindLegacyEncryptedSettings(deps.store, crypto, audit, locks);
-  if (binding.bound.length > 0) {
-    app.log.info({ keys: binding.bound }, 'Bound legacy encrypted settings to their keys');
-  }
-  if (binding.unreadable.length > 0) {
-    app.log.warn(
-      { keys: binding.unreadable },
-      'Unbound legacy encrypted settings are refused (the one-time binding already ran); ' +
-        're-enter them in the admin settings',
-    );
-  }
   const captcha = createCaptchaService({
     store: deps.store,
     crypto,
