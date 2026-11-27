@@ -466,12 +466,8 @@ export interface CredentialMetadata {
    * array position, and the position of a live entry is its rank among the
    * consumer's live entries of that type ordered by this value — not by
    * `created_at`, which equal-millisecond appends and clock steps can reorder.
-   *
-   * `null` only on a row written before the counter existed whose order could
-   * not be recovered unambiguously; such a row cannot be addressed by index and
-   * its consumer needs an administrator's reconciliation.
    */
-  edge_ordinal: number | null;
+  edge_ordinal: number;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }
@@ -852,10 +848,6 @@ export interface AppHealth {
   /** `driver` is `null` below `admin`. */
   database: DependencyHealth & { driver: DbDriver | null };
   edge: EdgeHealth;
-  /** Credential-maintenance detail, shown only to administrators. */
-  credentials: {
-    legacy_basicauth_scan: 'pending' | 'completed' | 'failed' | null;
-  };
 }
 
 /** Supported persistence backends. */

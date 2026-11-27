@@ -786,9 +786,9 @@ remove individual chunk rows of a journal that is kept.
   and Nexus never sends the operation again. Restore the gateway's store, then
   resolve the journal as above. `durable: "unknown"` (a failed commit or commit
   acknowledgement) stays `deployment_acknowledgement_uncertain`.
-- `details.kind: "legacy_deployment_authority"` (`409`, nothing sent): the journal was
-  written before the Edge v0.9.13 upgrade and holds v0.9.12 authority that Edge now
-  refuses. Resolve it by observation as above.
+- `details.kind: "deployment_authority_invalid"` (`409`, nothing sent): the journal
+  holds authority that is not a complete `admin-deployment-snapshot` v2 body.
+  Resolve it by observation as above.
 
 ### Upgrading to Edge v0.9.13
 
@@ -832,7 +832,8 @@ stopped for that window.
 A journal missed in step 2 stayed readable. If its recorded operations were all
 acknowledged and the live deployment already matched the catalog, a restore
 completed it by observation. Anything that would act on its v0.9.12 authority
-was refused before a request was sent (`details.kind: "legacy_deployment_authority"`),
+was refused before a request was sent (in that release, `details.kind:
+"legacy_deployment_authority"`),
 and an operation that was still pending was refused locally as unconfirmed
 ("A gateway deployment mutation is unconfirmed") and never sent again; either
 was resolved with
@@ -1068,7 +1069,7 @@ egress policy schema 2 and its data-plane attestation, deployment snapshot v2
 and its `deployment_snapshot.v2` tokens, and the acknowledgement shape. The
 ConfigSync protocol revision stays `3`. Edge v0.9.20 itself needs no Nexus
 journal change, but Nexus `v0.6.0`, which pairs with it, needs a new, empty
-database ([schema and upgrades before 1.0](#schema-and-upgrades-before-10)).
+database ([schema and upgrades](#schema-and-upgrades)).
 What changes for Nexus:
 
 - **Plugin configs are closed at every depth** (v0.9.20). Edge refuses an
@@ -1178,8 +1179,9 @@ acknowledgement shape. What changes for Nexus:
   `error`. Upgrade Edge before (or together with) Nexus.
 - **Palette keys Edge removed.** v0.9.21 refuses `ip_restriction` `mode` and
   `response_caching` `cache_key_include_query` / `cache_key_include_consumer`
-  as unknown keys. Confirm `api.plugin_keys_stripped` **while the gateway is
-  still on v0.9.20** (see [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
+  as unknown keys. Nexus `v0.6.0` and later never write them; remove them from
+  any config written by hand (see
+  [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
 - **Agent APIs.** `mcp_gateway` confines OpenAPI bridge calls to the matched
   proxy's literal listen prefix, refuses every bridged call on exact (`=`) and
   regex (`~`) routes, rejects an operation path that can fall inside the MCP
@@ -1220,22 +1222,16 @@ acknowledgement shape. What changes for Nexus:
 
 Procedure:
 
-Do steps 1 to 4 on Edge v0.9.20 with Nexus `v0.6.0` still running:
+Do steps 1 to 3 on Edge v0.9.20 with Nexus `v0.6.0` still running:
 
 1. **Stop new conversions and settle journals** as in steps 1 and 2 of the
-   v0.9.13 procedure. This comes first: the palette cleanup in step 2 leaves a
-   palette row alone while a conversion or gateway restore owns its API, and
-   records `api.plugin_keys_stripped` only when nothing was left over. An Edge
-   database rebuild also issues new deployment tokens, so no journal may span
-   the gateway upgrade.
-2. **Confirm the palette cleanup**: restart Nexus once more and check that the
-   `api.plugin_keys_stripped` audit row for your `FERRUM_NAMESPACE` exists and
-   that no row was logged as left for later since (see
-   [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
-3. **Fix what v0.9.21 refuses**: the credentialed `*.amba.host` CORS policies
-   above, through Nexus, and everything the Edge guide section lists for your
-   gateway configuration.
-4. **Prove the Edge backup restores.** Take a namespace-complete Edge
+   v0.9.13 procedure: an Edge database rebuild issues new deployment tokens, so
+   no journal may span the gateway upgrade.
+2. **Fix what v0.9.21 refuses**: the credentialed `*.amba.host` CORS policies
+   above, through Nexus, the removed palette keys in any config written by
+   hand, and everything the Edge guide section lists for your gateway
+   configuration.
+3. **Prove the Edge backup restores.** Take a namespace-complete Edge
    `GET /backup` and check its API specs. v0.9.21 restores only an `api_specs`
    section of version `"2"` whose every item has a `resource_hash` of 64
    lowercase hex characters, and refuses the **whole** namespace otherwise.
@@ -1257,13 +1253,13 @@ Do steps 1 to 4 on Edge v0.9.20 with Nexus `v0.6.0` still running:
    export into a scratch Edge v0.9.21 instance: a successful restore is the
    proof.
 
-5. **Stop Nexus and take the paired Nexus and Edge backup** (step 2 of
+4. **Stop Nexus and take the paired Nexus and Edge backup** (step 2 of
    [moving to a new release](#moving-to-a-new-release)), with a fresh Edge
-   `GET /backup` that passes the check in step 4.
-6. **Upgrade Edge to v0.9.21**, the control plane and every data plane
+   `GET /backup` that passes the check in step 3.
+5. **Upgrade Edge to v0.9.21**, the control plane and every data plane
    together, rebuilding a SQL Edge database through that backup as the Edge
    guide's build-out procedure says.
-7. **Move Nexus** to the release that pins Edge v0.9.21, following its release
+6. **Move Nexus** to the release that pins Edge v0.9.21, following its release
    notes, and check `GET /api/health/edge` as an admin.
 
 Nexus `v0.6.0` is qualified against Edge v0.9.20 only. **Rolling back** Edge to
@@ -1272,40 +1268,19 @@ v0.9.20 is not supported by this code: restore the paired backup into Nexus
 
 ### Palette keys Edge v0.9.21 removes
 
-Edge v0.9.21 refuses `ip_restriction` `mode` and the retired
-`response_caching` `cache_key_include_query` and `cache_key_include_consumer` as
-unknown keys (Edge issue #7114). None of them changed what the gateway did, but
-earlier Nexus releases wrote `mode` on **every** `ip_restriction` saved from the
-portal. `ip_restriction` is fail-closed, so on v0.9.21 one such enabled config
-makes an Admin API write `400`, a reload fail, and a database-mode gateway
-refuse to start.
+Edge v0.9.21 refuses `ip_restriction` `mode` and the `response_caching`
+`cache_key_include_query` and `cache_key_include_consumer` as unknown keys
+(Edge issue #7114). `ip_restriction` is fail-closed, so on v0.9.21 one enabled
+config carrying `mode` makes an Admin API write `400`, a reload fail, and a
+database-mode gateway refuse to start.
 
-Nexus `v0.6.0` and later stop writing them (a save that carries one is
-`400 VALIDATION_FAILED`, and every rebuild or restore drops them from the
-gateway config and the stored row), and at every start it finds, with one store
-query, each palette row in `FERRUM_NAMESPACE` that still carries one, and
-rewrites it: the gateway config the row owns (by recorded id, keeping operator
-fields such as `priority_override`) and the row itself. Each rewrite is an
-`api.plugin_set` audit row with `retired_keys` and no actor. A row it cannot
-rewrite yet is logged at `warn` and found again at the next start: the gateway
-was unreachable or the API changed under it, or the API has an unfinished
-enforcement conversion or gateway restore, whose recovery needs the live
-configs unchanged (finish or restore it first). An API whose proxy is already
-gone is not held back: only its row is rewritten. An enforcement conversion
-replays the live configs exactly, so it is refused with `409 CONFLICT` while a
-palette config of the API still carries a removed key; save that plugin again
-(or restart Nexus) first. The first run that finishes for
-the namespace with nothing failed or left over records one
-`api.plugin_keys_stripped` row targeting it.
-
-**Before upgrading Edge from v0.9.20 to v0.9.21**, run Nexus `v0.6.0` against
-the v0.9.20 gateway until `api.plugin_keys_stripped` for your
-`FERRUM_NAMESPACE` is in the audit log, and restart it once more afterwards if
-it logged a row left for later since. Later releases run the same pass, but
-they require Edge v0.9.21 for credential changes, so do this step on `v0.6.0`.
-An `ip_restriction` or `response_caching` config an operator wrote by hand is
-not the portal's to change: remove those keys from it yourself, as the Edge
-upgrade guide says.
+Nexus never writes them: the palette does not offer them, a save that carries
+one is `400 VALIDATION_FAILED`, and Nexus does not offer `response_caching` at
+all. Every database Nexus can open was created by `v0.6.0` or later, which
+never wrote them either, so its palette configs carry none. A config an
+operator wrote by hand, or one an earlier Nexus release left in a namespace the
+current portal does not use, is not the portal's to change: remove those keys
+from it yourself before upgrading, as the Edge upgrade guide says.
 
 ### Email
 
@@ -1919,9 +1894,9 @@ such a portal to this release, give the new release a new, empty database:
      access that requires, see [Namespace routability](#namespace-routability)).
      The old proxies and credentials keep working until you remove them or
      retire the data plane that serves the old namespace; nothing the new portal
-     does touches them. That includes its retired-key cleanup: before you
-     upgrade the gateway that serves the old namespace past Edge v0.9.20, edit
-     or remove its configs yourself (see
+     does touches them. Before you upgrade the gateway that serves the old
+     namespace past Edge v0.9.20, remove the keys it refuses from its configs
+     yourself (see
      [palette keys Edge v0.9.21 removes](#palette-keys-edge-v0921-removes)).
 6. Start the new release. It creates the schema, and the next registration
    becomes the founding `super_admin` (see
@@ -2576,36 +2551,10 @@ bodies. The key is derived from `NEXUS_SECRET_KEY` (HKDF info
 The worker opens it immediately before handing the message to SMTP. Other mail
 (access decisions, messaging notifications, mass email) is stored as rendered.
 
-Rows queued unsealed by an earlier version are sealed in place by the worker,
-in every status, up to 200 per tick, and it stops looking once none are left.
-It logs `Sealed legacy outbox messages` with a `sealed` count while it does.
-Since `v0.6.0` a database an earlier release created is refused rather than
-upgraded ([schema and upgrades](#schema-and-upgrades)),
-so on a database created at the base schema there is nothing to seal, and
-downgrading means restoring a backup. The rest of this paragraph applies only
-to an older deployment that still runs a pre-sealing instance beside a sealing
-one. An earlier version cannot open a sealed row. If a pre-fix instance claims
-one, it emails ciphertext and burns the link. Before downgrading such a
-deployment, fail every queued sealed row so an older worker cannot claim it:
-
-```sql
-UPDATE email_outbox
-SET status = 'failed', last_error = 'sealed-unreadable: downgrade'
-WHERE subject = 'nexus:sealed:v1' AND status IN ('pending', 'sending');
-```
-
-For MongoDB, run the equivalent update on the `email_outbox` collection:
-
-```javascript
-db.email_outbox.updateMany(
-  { subject: 'nexus:sealed:v1', status: { $in: ['pending', 'sending'] } },
-  { $set: { status: 'failed', last_error: 'sealed-unreadable: downgrade' } },
-);
-```
-
-An older instance still writing during a mixed-version deployment can leave
-plaintext bearer rows; the next restart's legacy sweep seals them. Stop every
-instance before starting the replacement release to avoid both cases.
+Every release since `v0.6.0` seals these rows, and no release opens a database
+an earlier one created, so every bearer row Nexus can see is sealed. Downgrades
+are not supported: going back means restoring the pre-upgrade backup into the
+previous release ([upgrade failures and rollback](#upgrade-failures-and-rollback)).
 
 A `sending` row untouched for five minutes is assumed abandoned and returned to
 `pending`. This sweep runs at the start of every worker tick, on any instance.
@@ -2726,7 +2675,6 @@ The worker logs these at `warn`:
 - `Could not release stale outbox claims`
 - `Sealed outbox message could not be opened` (the row is failed as
   `sealed-unreadable:`)
-- `Could not seal legacy outbox messages` (retried on the next tick)
 - `Outbox tick failed`
 
 **Re-driving `failed` rows.** First exclude delivered-unacknowledged ones:
@@ -3002,8 +2950,10 @@ out may still have applied, so undo steps are idempotent and scoped to the field
 their step wrote.
 
 An undo step that fails does not raise (it would hide the original error). It
-writes an audit row and logs at `error`. Nothing repairs these automatically,
-so alert on each:
+logs at `error` and writes an audit row on a best-effort basis: when the
+database is unavailable at that moment, the log line is the only record (see
+[known limitations](known-limitations.md#gateway-writes)). Nothing repairs
+these automatically, so alert on each:
 
 | Row                           | Meaning                                                                                                                                                                                                             |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -3540,75 +3490,6 @@ group. A stalled approval answers `409 CONFLICT` and is compensated by the
 worker; a stalled revocation still answers with the revoked grant, and the
 worker finishes its removal.
 
-#### Repairing decisions stranded before 015
-
-Releases before `015_access_gateway_jobs` kept no record of a decision's
-gateway half, so a database they wrote may hold a revoked grant whose ACL group
-is still on its consumer, or an approved request that no grant was ever made
-from. Since `v0.6.0` such a database is refused rather than upgraded
-([schema and upgrades](#schema-and-upgrades)), so on a
-database created at the base schema this scan finds nothing; it still runs
-once. The first start (any instance, under a lease) scans for both, a page at
-a time, and queues ordinary jobs for the worker:
-
-- one `revoke` job per identity and API that has a revoked grant, no active
-  grant and a consumer. The worker reads the consumer and takes the API's
-  groups off, so it costs one Edge read and write per such identity even where
-  the group is already gone; an identity granted again since keeps its access.
-- one `approve` job per approved request for access (`grant_id` null) that no
-  grant, in any status, names as its origin. The worker takes back any group no
-  grant covers and returns the request to `pending` (or cancels it when the
-  identity already holds a grant, or a newer request is pending).
-
-It pages through each table by id (a keyset, so rows the worker settles while
-the scan runs cannot shift unread ones out of a page), records
-`access.stranded_repair_queued` (with the counts) only after every candidate
-was considered, and later starts skip it. A start that stops part-way leaves the marker
-unwritten, and the next start resumes: a job is only inserted where its grant
-or request has none. Progress is logged as
-`Queued access gateway repairs for decisions made before 015`, failures as
-`Could not queue access gateway repairs; the next start tries again`.
-
-**Not repaired automatically: approved requests for more tools.** A tool request
-that succeeded stays `approved`, and a later prune or revocation of its grant
-makes it look exactly like one that was interrupted, so compensating these
-automatically could put an old request back in a provider's inbox. List the
-candidates and review each one:
-
-```sql
-SELECT r.id, r.api_id, r.user_id, r.application_id, r.approved_tools, g.status, g.approved_tools
-  FROM access_requests r JOIN grants g ON g.id = r.grant_id
-  WHERE r.status = 'approved' AND g.status = 'active';
-```
-
-On MongoDB the same rows live in the `access_requests` and `grants`
-collections (each keyed by `_id`); join them with `$lookup` in `mongosh`:
-
-```js
-db.access_requests.aggregate([
-  { $match: { status: 'approved', grant_id: { $ne: null } } },
-  { $lookup: { from: 'grants', localField: 'grant_id', foreignField: '_id', as: 'grant' } },
-  { $unwind: '$grant' },
-  { $match: { 'grant.status': 'active' } },
-  {
-    $project: {
-      api_id: 1,
-      user_id: 1,
-      application_id: 1,
-      approved_tools: 1,
-      grant_status: '$grant.status',
-      grant_tools: '$grant.approved_tools',
-    },
-  },
-]);
-```
-
-A row whose `r.approved_tools` are not all in `g.approved_tools`, and whose tools
-are still published, was interrupted. Its consumer may hold the extra tool
-groups. To repair it, revoke the grant (`POST /api/grants/:id/revoke`, which
-takes every group of the API off the identity's consumer) and approve a fresh
-request for the tools it should have.
-
 ### Account recovery revocations
 
 A password reset that records an account's first trusted proof of its address
@@ -3774,36 +3655,10 @@ SELECT ferrum_consumer_id, COUNT(*) AS unconfirmed
   GROUP BY ferrum_consumer_id;
 ```
 
-**Databases written by `v0.2.0` or earlier.** Since `v0.6.0` such a database
-is refused rather than upgraded
-([schema and upgrades](#schema-and-upgrades)), so on a
-database created at the base schema this scan finds nothing. On its first
-start Nexus scans the audit log for `credential.append_rollback` rows with
-`credential_type: "basicauth"` and `withdrawn: false` that no live row
-accounts for: those without `stranded_credential_id` (what earlier releases
-wrote for a lost acknowledgement or a failed row write) and those whose
-stranded row is no longer live. For each one that no later `basicauth`
-reconcile or whole-type revoke of the consumer has cleared, it writes a
-`retiring` placeholder row, audited as `credential.legacy_placeholder` with
-`source_event_id`. The placeholder holds that consumer's positions closed, as
-above, until the type is cleared. Completion is recorded in `app_settings`
-(`credentials.legacy_basicauth_scan_v1`), and later starts skip the scan.
-Affected identities may need to re-issue their Basic Auth credentials after
-the type is cleared, especially when a replacement from an earlier v0.2.0
-rotate was later revoked normally and the scan conservatively restores its
-placeholder.
-
-If the scan fails, startup continues and logs `Could not scan for HTTP Basic
-credentials left unconfirmed by an earlier release`; nothing is recorded, so
-the next start runs it again. Until it completes, reconcile `basicauth` for any
-consumer with such a rollback row.
-
-**The scan does not cover restores.** It runs once, and a backup taken after
-the upgrade carries its completion marker. A Nexus database restored on its own
-can be older than the gateway's HTTP Basic entries, which no read can reveal.
-After restoring only Nexus, reconcile `basicauth` for every consumer before
-relying on revoking a single HTTP Basic credential
-([§5](#5-backup-and-restore)).
+**Restores.** A Nexus database restored on its own can be older than the
+gateway's HTTP Basic entries, which no read can reveal. After restoring only
+Nexus, reconcile `basicauth` for every consumer before relying on revoking a
+single HTTP Basic credential ([§5](#5-backup-and-restore)).
 
 If an append is in flight while a whole-type revoke runs and the lease fence
 prevents the append holder from activating its row, the issue response fails
@@ -3817,12 +3672,10 @@ test consumers are recorded in `gateway_identities`. Normal provisioning does
 not list the namespace. Keep these tables in every backup, and never change a
 consumer's id or username on Edge.
 
-Older identities without a portal mapping are adopted after a create conflict by
-scanning at most 20 pages of 500 consumers. An incomplete scan returns
-`EDGE_ERROR` with a recovery instruction, never "no consumer", and teardown keeps
-its job and registration.
-
-If that limit is reached:
+Nexus never looks a consumer up by username. A consumer whose id is neither
+recorded nor derived from its username is not the portal's: a create that
+conflicts with it fails with `EDGE_ERROR`, and teardown does not find it. If a
+mapping was lost (for example, after restoring Edge but not Nexus):
 
 1. Back up the portal database and pause Nexus during maintenance.
 2. Restore the affected mapping from a consistent Nexus backup: the `consumers`
@@ -3832,10 +3685,7 @@ If that limit is reached:
    the username must be exactly `nexus-user-<user_id>` for an account,
    `nexus-app-<application_id>` for one of its applications, or the registered
    `nexus-test-<api_id>`.
-4. With no backup, inventory the gateway with paginated Admin API reads and
-   rebuild the mapping after the same checks. Do not delete gateway identities
-   or credentials to shorten the scan.
-5. Resume Nexus and retry the operation or pending teardown.
+4. Resume Nexus and retry the operation or pending teardown.
 
 ### What a drifted consumer looks like
 
@@ -3870,27 +3720,6 @@ SELECT ferrum_consumer_id, credential_type, COUNT(*) AS retiring
 A `retiring` `keyauth` or `jwt` row settles itself on the next operation on the
 pair. A `retiring` `basicauth` row has no array to compare against; see
 [the `basicauth` section](#basicauth-an-unconfirmed-outcome-blocks-positions).
-
-### What an unresolved credential position looks like
-
-A row with `edge_ordinal = NULL` has an unknown position. That matters only for
-`basicauth`, which is placed by position: a single such row is treated as
-index 0; two or more make rotate and revoke of those rows return
-`409 CONFLICT`:
-
-> The gateway position of this credential cannot be determined …
-
-with `details: { consumer_id, credential_type, unresolved_credentials }`. New
-credentials on the same consumer are unaffected, and `keyauth` and `jwt` rows
-are located by their secret whatever their ordinal. To find them:
-
-```sql
-SELECT ferrum_consumer_id, credential_type, COUNT(*) AS unresolved
-  FROM credential_metadata
-  WHERE edge_ordinal IS NULL AND status <> 'revoked' AND credential_type = 'basicauth'
-  GROUP BY ferrum_consumer_id, credential_type
-  HAVING COUNT(*) > 1;
-```
 
 ### Reconciling one
 

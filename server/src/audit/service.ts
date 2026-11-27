@@ -196,14 +196,6 @@ export const AuditAction = {
    */
   API_PLUGIN_ROLLBACK: 'api.plugin_rollback',
   /**
-   * The startup pass finished for a namespace with every palette config that
-   * carried a key Edge has removed (`ip_restriction.mode`, issue #727)
-   * rewritten, each with its own `api.plugin_set` row naming `retired_keys`.
-   * Written by the system once per namespace, targeting it; the pass itself
-   * still runs at every start.
-   */
-  API_PLUGIN_KEYS_STRIPPED: 'api.plugin_keys_stripped',
-  /**
    * A `spec_enforcement` conversion could neither finish nor put the original
    * proxy back, so the API has no gateway object at all.
    *
@@ -336,14 +328,6 @@ export const AuditAction = {
    */
   ACCESS_REVOKE_COMPLETE: 'access.revoke_complete',
   /**
-   * The one-time repair queued access gateway jobs for decisions a release
-   * before `access_gateway_jobs` may have left half-applied: revoked grants
-   * whose group may still be on the consumer, and approved requests with no
-   * grant. Written by the system once; its presence is what stops later
-   * starts from scanning again.
-   */
-  ACCESS_STRANDED_REPAIR_QUEUED: 'access.stranded_repair_queued',
-  /**
    * A provider's agent publish or spec build is about to add the API's MCP-all
    * group to an all-tools grantee whose consumer holds the REST group but not
    * that one. Committed before the consumer write.
@@ -427,14 +411,6 @@ export const AuditAction = {
    */
   CREDENTIAL_RECONCILE: 'credential.reconcile',
   /**
-   * The upgrade scan found a `basicauth` append an earlier release left on the
-   * gateway without a live row, and wrote a `retiring` placeholder that holds
-   * the consumer's positions closed until the type is cleared.
-   * `source_event_id` names the {@link CREDENTIAL_APPEND_ROLLBACK} row it
-   * came from.
-   */
-  CREDENTIAL_LEGACY_PLACEHOLDER: 'credential.legacy_placeholder',
-  /**
    * The revocation a trusted password reset owes has failed often enough that
    * it no longer blocks the account from issuing credentials. Written by the
    * recovery worker as the system ({@link SYSTEM_ACTOR}), once per queued
@@ -451,13 +427,6 @@ export const AuditAction = {
 
   /* admin */
   ADMIN_SETTINGS_UPDATE: 'admin.settings_update',
-  /**
-   * The one-time startup conversion of unbound legacy (`v1`) encrypted
-   * settings to key-bound `v2` blobs ran (GHSA-qm46-qg94-mpg7). Written by the
-   * system once; its presence is what stops any later start from converting a
-   * `v1` row again, so it must not be deleted.
-   */
-  SETTINGS_ENCRYPTION_BOUND: 'settings.encryption_bound',
   ADMIN_TEMPLATE_UPDATE: 'admin.template_update',
   /** An email template override was removed, restoring the built-in default. */
   ADMIN_TEMPLATE_RESET: 'admin.template_reset',
@@ -637,10 +606,6 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_PLUGIN_REMOVE_START]: INTENT,
   [AuditAction.API_PLUGIN_REMOVE]: TRANSACTIONAL,
   [AuditAction.API_PLUGIN_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
-  [AuditAction.API_PLUGIN_KEYS_STRIPPED]: rowOnly(
-    'A once-per-namespace marker: each rewrite committed its own api.plugin_set row before ' +
-      'it, and a run that found nothing to rewrite still records that the namespace is clean.',
-  ),
   [AuditAction.API_GATEWAY_REPAIR_REQUIRED]: postCommit(
     `${COMPENSATION_TRAIL} The reconciliation flag, which is a change of its own, records ` +
       'it in its transaction.',
@@ -675,10 +640,6 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.ACCESS_REVOKE]: TRANSACTIONAL,
   [AuditAction.ACCESS_REVOKE_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.ACCESS_REVOKE_COMPLETE]: TRANSACTIONAL,
-  [AuditAction.ACCESS_STRANDED_REPAIR_QUEUED]: rowOnly(
-    'A one-time marker: its jobs were queued in bounded, idempotent writes before it, and a ' +
-      'repair that found nothing stranded still records that it ran, so later starts skip it.',
-  ),
   [AuditAction.ACCESS_MCP_ENROLL]: INTENT,
   [AuditAction.ACCESS_MCP_ENROLL_SKIP]: rowOnly(
     'Records a write that was deliberately not made; there is no portal change to commit with it.',
@@ -695,7 +656,6 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.CREDENTIAL_SETTLE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_APPEND_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.CREDENTIAL_RECONCILE]: TRANSACTIONAL,
-  [AuditAction.CREDENTIAL_LEGACY_PLACEHOLDER]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_RECOVERY_STALLED]: TRANSACTIONAL,
   [AuditAction.MESSAGE_THREAD_CREATE]: TRANSACTIONAL,
   [AuditAction.MESSAGE_SEND]: TRANSACTIONAL,
@@ -703,10 +663,6 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
     "Marks the caller's own notifications read; no authority, access or shared state changes.",
   ),
   [AuditAction.ADMIN_SETTINGS_UPDATE]: TRANSACTIONAL,
-  [AuditAction.SETTINGS_ENCRYPTION_BOUND]: rowOnly(
-    'Commits with the conversion it marks complete; on a portal with no legacy rows to ' +
-      'convert it is the transaction’s only write.',
-  ),
   [AuditAction.ADMIN_TEMPLATE_UPDATE]: TRANSACTIONAL,
   [AuditAction.ADMIN_TEMPLATE_RESET]: TRANSACTIONAL,
   [AuditAction.ADMIN_MASS_EMAIL]: INTENT,

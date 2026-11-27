@@ -25,14 +25,9 @@ import {
   type SetApiPluginResponse,
 } from '@ferrum-nexus/shared';
 
-import { createKeyedSerializer, proxyLockKey } from '../lib/keyed-serializer.js';
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { effectiveInstances } from '../ferrum-admin/palette.js';
 import type { EdgePluginConfig } from '../ferrum-admin/types.js';
-import {
-  stripRetiredPaletteKeys,
-  type RetiredKeysDeps,
-  type RetiredKeysResult,
-} from '../plugins/retired-keys.js';
 import {
   aclGroupsProblem,
   mockCacheStorageAllowed,
@@ -43,15 +38,13 @@ import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from '
 
 const COMPRESSION_REQUEST_DEDUPLICATION = /compression.*request_deduplication/;
 const PRIORITY_OVERRIDE = /priority_override/;
-const BACKEND_CACHE_CONTROL = /backend Cache-Control/;
 const DOES_NOT_ACCEPT_EXECUTION = /does not accept an execution trigger/;
 const VALIDATION_FAILED_CODE = /VALIDATION_FAILED/;
 const CORRELATION_ID_CONFIGURATION_NOT = /Correlation ID configuration is not valid/i;
 const ACL_GROUPS_CAP = /acl_groups must not have more than 500 entries \(got 501\)/;
-const CHANGED_WHILE_STRIPPED = /changed while its removed keys were stripped/;
+const CARRIES_UNWRITTEN = /ip_restriction plugin on the gateway carries settings .* \(mode\)/;
 const AI_AGENTS = /AI agents/;
 const GATEWAY_OPERATOR = /gateway operator/;
-const STILL_CARRIES = /ip_restriction plugin still carries a setting/;
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -59,6 +52,10 @@ function errorCode(body: string): string {
 
 function errorMessage(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.message;
+}
+
+function errorDetails(body: string): unknown {
+  return (JSON.parse(body) as ApiErrorBody).error.details;
 }
 
 /** The plugin names Edge would actually run for a proxy, sorted. */
@@ -290,6 +287,52 @@ describe('provider plugin palette', () => {
           .some((request) => request.method !== 'GET' && request.path.startsWith('/plugins')),
         false,
       );
+    });
+
+    // Review of #767, F1: Edge accepts any key on a disabled config, so a
+    // live config can carry a key the portal does not write (edited by hand,
+    // or retired by a newer Edge). A conversion replays live configs verbatim,
+    // so it is refused before any intent is recorded, naming the plugin.
+    it('refuses a conversion while a live palette config carries a key the portal does not write', async () => {
+      const allow = ['203.0.113.0/24'];
+      const saved = await setPlugin('ip_restriction', { enabled: false, config: { allow } });
+      assert.equal(saved.statusCode, 200, saved.body);
+      const configId = String(edgeConfig('ip_restriction').id);
+      storedConfig(configId).config = { allow, mode: 'allow_first' };
+
+      const before = harness.edge.requests.length;
+      const refused = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.match(errorMessage(refused.body), CARRIES_UNWRITTEN);
+      assert.deepEqual(errorDetails(refused.body), {
+        kind: 'palette_config_undeclared_keys',
+        plugin_name: 'ip_restriction',
+        plugin_config_id: configId,
+        keys: ['mode'],
+      });
+      assert.equal(
+        harness.edge.requests.slice(before).some((request) => request.method !== 'GET'),
+        false,
+        'nothing was written to the gateway',
+      );
+      const api = await harness.store.apis.findById(apiId);
+      assert.equal(api?.gateway_state, 'deployed', 'the serving API is not marked for repair');
+      assert.equal(await harness.store.settings.get(`gateway_recovery:nexus:${apiId}`), null);
+
+      // Saving the plugin again writes exactly its declared keys.
+      const resaved = await setPlugin('ip_restriction', { enabled: false, config: { allow } });
+      assert.equal(resaved.statusCode, 200, resaved.body);
+      assert.deepEqual(edgeConfig('ip_restriction').config, { allow });
+      const converted = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(converted.statusCode, 200, converted.body);
     });
 
     it('bot_detection: patterns, allow list, missing-UA policy and status', async () => {
@@ -565,40 +608,13 @@ describe('provider plugin palette', () => {
       assert.equal(mockCacheStorageAllowed(true, 'private, max-age=60'), false);
     });
 
-    it('allows disabling and removing a retired response cache without touching operator configs', async () => {
-      const legacy = seedOperatorConfig('response_caching', 'legacy-cache', { ttl_seconds: 60 });
-      seedOperatorConfig('response_caching', 'operator-cache', { ttl_seconds: 900 });
-      await harness.store.apiPlugins.upsert({
-        api_id: apiId,
-        plugin_name: 'response_caching',
-        enabled: true,
-        config: { ttl_seconds: 60 },
-        trigger: null,
-        ferrum_plugin_config_id: String(legacy.id),
-      });
-      const disabled = await setPlugin('response_caching', {
-        enabled: false,
-        config: { ttl_seconds: 60 },
-      });
-      assert.equal(disabled.statusCode, 200, disabled.body);
-      assert.equal(storedConfig('legacy-cache').enabled, false);
-      const removed = await harness.authed(provider, {
-        method: 'DELETE',
-        url: `/api/apis/${apiId}/plugins/response_caching`,
-      });
-      assert.equal(removed.statusCode, 200, removed.body);
-      assert.equal(harness.edge.pluginConfigs.has('nexus/legacy-cache'), false);
-      assert.equal(storedConfig('operator-cache').enabled, true);
-    });
-
-    it('retires response caching with an actionable error and no gateway write', async () => {
+    it('does not offer response caching, and writes nothing for it', async () => {
       assert.equal(
         PROVIDER_PLUGINS.some((plugin) => plugin.name === 'response_caching'),
         false,
       );
       const response = await setPlugin('response_caching', { config: {} });
-      assert.equal(response.statusCode, 400);
-      assert.match(errorMessage(response.body), BACKEND_CACHE_CONTROL);
+      assert.equal(response.statusCode, 404, response.body);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'response_caching'), undefined);
     });
 
@@ -1565,270 +1581,6 @@ describe('provider plugin palette', () => {
         was_attached: false,
         plugin_config_id: null,
       });
-    });
-  });
-
-  /* ── Keys Edge removed (issue #727) ────────────────────────────────────── */
-
-  describe('keys Edge removed', () => {
-    /**
-     * Put back what an earlier release left on an `ip_restriction` save: the
-     * row and the gateway config both carrying `mode`, which the palette no
-     * longer accepts and the mock (like Edge v0.9.21) refuses on write.
-     */
-    async function seedLegacyIpRestriction(): Promise<Record<string, unknown>> {
-      const saved = await setPlugin('ip_restriction', { config: { allow: ['203.0.113.0/24'] } });
-      assert.equal(saved.statusCode, 200, saved.body);
-      const row = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
-      assert.ok(row);
-      const legacy = { allow: ['203.0.113.0/24'], mode: 'allow_first' };
-      await harness.store.apiPlugins.upsert({
-        api_id: apiId,
-        plugin_name: 'ip_restriction',
-        enabled: row.enabled,
-        config: legacy,
-        trigger: row.trigger,
-        ferrum_plugin_config_id: row.ferrum_plugin_config_id,
-      });
-      const live = edgeConfig('ip_restriction');
-      live.config = { ...legacy };
-      live.priority_override = 2_222;
-      return live;
-    }
-
-    function strip(overrides: Partial<RetiredKeysDeps> = {}): Promise<RetiredKeysResult> {
-      return stripRetiredPaletteKeys({
-        store: harness.store,
-        audit: harness.services.audit,
-        apiPlugins: harness.services.apiPlugins,
-        locks: createKeyedSerializer({ leases: harness.store.leases }),
-        namespace: 'nexus',
-        ...overrides,
-      });
-    }
-
-    // One test, because the namespace is recorded once and this file shares
-    // one database: the failed first run must record nothing, and the run that
-    // succeeds must record it so a third finds it recorded and nothing to do.
-    it('rewrites a config saved with mode, keeping operator fields, and records the run once', async () => {
-      const live = await seedLegacyIpRestriction();
-      const configId = String(live.id);
-
-      harness.edge.queueFailure(500, { error: 'boom' }, `/plugins/config/${configId}`, 'PUT');
-      const failed = await strip();
-      assert.deepEqual(failed, { alreadyRecorded: false, rewritten: 0, deferred: 0, failed: 1 });
-      assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
-        allow: ['203.0.113.0/24'],
-        mode: 'allow_first',
-      });
-      assert.equal((await harness.auditRows('api.plugin_keys_stripped')).length, 0);
-
-      const done = await strip();
-      assert.equal(done.alreadyRecorded, false);
-      assert.equal(done.failed, 0);
-      assert.ok(done.rewritten >= 1);
-      const written = storedConfig(configId);
-      assert.deepEqual(written.config, { allow: ['203.0.113.0/24'] });
-      assert.equal(written.priority_override, 2_222, 'the operator override survives');
-      assert.ok(effectiveIds(harness, proxyId).includes(configId));
-      assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
-        allow: ['203.0.113.0/24'],
-      });
-      const audited = (await harness.auditRows('api.plugin_set')).filter(
-        (entry) => entry.target_id === apiId && entry.details.retired_keys !== undefined,
-      );
-      assert.equal(audited.length, 1);
-      assert.equal(audited[0]?.actor_user_id, null);
-      assert.deepEqual(audited[0]?.details.retired_keys, ['mode']);
-      assert.equal((await harness.auditRows('api.plugin_keys_stripped')).length, 1);
-
-      assert.deepEqual(await strip(), {
-        alreadyRecorded: true,
-        rewritten: 0,
-        deferred: 0,
-        failed: 0,
-      });
-    });
-
-    it('writes a config saved with mode back without it on the next save', async () => {
-      const live = await seedLegacyIpRestriction();
-      // The form never sends `mode`, so re-saving the same settings is enough.
-      const resaved = await setPlugin('ip_restriction', { config: { allow: ['203.0.113.0/24'] } });
-      assert.equal(resaved.statusCode, 200, resaved.body);
-      assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
-    });
-
-    // Review sol F3: the record is per namespace, and never stops a later scan.
-    it('records each namespace on its own and keeps rewriting after the record', async () => {
-      assert.equal((await strip({ namespace: 'elsewhere' })).alreadyRecorded, false);
-      assert.equal((await strip({ namespace: 'elsewhere' })).alreadyRecorded, true);
-      const recorded = (await harness.auditRows('api.plugin_keys_stripped')).filter(
-        (entry) => entry.target_id === 'elsewhere',
-      );
-      assert.deepEqual(
-        recorded.map((entry) => entry.target_type),
-        ['namespace'],
-      );
-
-      const live = await seedLegacyIpRestriction();
-      const later = await strip();
-      assert.equal(later.failed, 0);
-      assert.ok(later.rewritten >= 1);
-      assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
-    });
-
-    // Review round 2, dsf F4: an API deleted while the pass works on it has no
-    // row left to clean, so it is not a failure that holds the record back.
-    it('counts an API deleted during the pass as gone, not failed', async () => {
-      const deleted = apiId;
-      await seedLegacyIpRestriction();
-      const result = await strip({
-        apiPlugins: {
-          async stripRetiredConfigKeys(id, name) {
-            if (id === deleted) {
-              const removed = await harness.authed(provider, {
-                method: 'DELETE',
-                url: `/api/apis/${deleted}`,
-              });
-              assert.equal(removed.statusCode, 200, removed.body);
-            }
-            return harness.services.apiPlugins.stripRetiredConfigKeys(id, name);
-          },
-        },
-      });
-      assert.equal(result.failed, 0);
-      assert.equal(result.deferred, 0);
-      assert.equal(await harness.store.apis.findById(deleted), null);
-    });
-
-    // Review round 2, sol F1: an unfinished conversion's journal holds the live
-    // configs as they were, and its recovery refuses once one changes.
-    it('leaves an API with a recovery journal for its recovery to finish first', async () => {
-      const live = await seedLegacyIpRestriction();
-      const journal = `gateway_recovery:nexus:${apiId}`;
-      await harness.store.settings.set(journal, { pending: true });
-      const deferred = await strip();
-      assert.ok(deferred.deferred >= 1);
-      assert.deepEqual(storedConfig(String(live.id)).config, {
-        allow: ['203.0.113.0/24'],
-        mode: 'allow_first',
-      });
-      assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
-        allow: ['203.0.113.0/24'],
-        mode: 'allow_first',
-      });
-
-      await harness.store.settings.delete(journal);
-      const finished = await strip();
-      assert.equal(finished.deferred, 0);
-      assert.ok(finished.rewritten >= 1);
-      assert.deepEqual(storedConfig(String(live.id)).config, { allow: ['203.0.113.0/24'] });
-    });
-
-    // Review round 3, sol F1: parent APIs are read in bounded batches, so an
-    // upgrade with more legacy rows than SQLite binds per statement still runs.
-    it('reads the parent APIs in bounded batches', async () => {
-      const first = await seedLegacyIpRestriction();
-      await publishApi();
-      const second = await seedLegacyIpRestriction();
-      const sizes: number[] = [];
-      const bound = <T extends object>(target: T, override: Partial<T>): T =>
-        new Proxy(target, {
-          get(object, property) {
-            if (Object.hasOwn(override, property)) return override[property as keyof T];
-            const value: unknown = Reflect.get(object, property, object);
-            return typeof value === 'function' ? value.bind(object) : value;
-          },
-        });
-      const apis = bound(harness.store.apis, {
-        findManyByIds: async (ids: string[]) => {
-          sizes.push(ids.length);
-          return harness.store.apis.findManyByIds(ids);
-        },
-      });
-      const result = await strip({ store: bound(harness.store, { apis }), batchSize: 1 });
-      assert.equal(result.failed, 0);
-      assert.ok(sizes.length >= 2, `expected several lookups, got ${sizes.length}`);
-      assert.ok(sizes.every((size) => size <= 1));
-      assert.deepEqual(storedConfig(String(first.id)).config, { allow: ['203.0.113.0/24'] });
-      assert.deepEqual(storedConfig(String(second.id)).config, { allow: ['203.0.113.0/24'] });
-    });
-
-    // Review round 3, sol F2: a conversion replays the live configs verbatim,
-    // so one still carrying a removed key is refused until it is cleaned.
-    it('refuses a conversion while a palette config carries a removed key', async () => {
-      await seedLegacyIpRestriction();
-      const before = harness.edge.requests.length;
-      const refused = await harness.authed(provider, {
-        method: 'PATCH',
-        url: `/api/apis/${apiId}`,
-        payload: { spec_enforcement: 'routes' },
-      });
-      assert.equal(refused.statusCode, 409, refused.body);
-      assert.match(errorMessage(refused.body), STILL_CARRIES);
-      assert.equal(
-        harness.edge.requests.slice(before).some((request) => request.method !== 'GET'),
-        false,
-      );
-
-      const resaved = await setPlugin('ip_restriction', { config: { allow: ['203.0.113.0/24'] } });
-      assert.equal(resaved.statusCode, 200, resaved.body);
-      const converted = await harness.authed(provider, {
-        method: 'PATCH',
-        url: `/api/apis/${apiId}`,
-        payload: { spec_enforcement: 'routes' },
-      });
-      assert.equal(converted.statusCode, 200, converted.body);
-    });
-
-    // Review round 3, dsf F2: an API whose proxy is gone has no live config to
-    // protect, so its row is cleaned rather than deferred for ever.
-    it('cleans the row of an API whose proxy is gone instead of deferring it', async () => {
-      await seedLegacyIpRestriction();
-      await harness.store.apis.update(apiId, {
-        ferrum_proxy_id: null,
-        gateway_state: 'repair_required',
-      });
-      const result = await strip();
-      assert.equal(result.deferred, 0);
-      assert.equal(result.failed, 0);
-      assert.deepEqual((await harness.store.apiPlugins.find(apiId, 'ip_restriction'))?.config, {
-        allow: ['203.0.113.0/24'],
-      });
-    });
-
-    // Review dsf F1: a restore that re-points the row during the gateway write
-    // owns it; the pass gives up (and the next start looks again) instead of
-    // writing the old config id back.
-    it('does not write back a config id that changed during the rewrite', async () => {
-      await seedLegacyIpRestriction();
-      const pluginConfigs = harness.edgeClient.pluginConfigs;
-      const replace = pluginConfigs.replace.bind(pluginConfigs);
-      pluginConfigs.replace = async (...args) => {
-        pluginConfigs.replace = replace;
-        const row = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
-        assert.ok(row);
-        await harness.store.apiPlugins.upsert({
-          api_id: apiId,
-          plugin_name: 'ip_restriction',
-          enabled: row.enabled,
-          config: row.config,
-          trigger: row.trigger,
-          ferrum_plugin_config_id: 'restored-config',
-        });
-        return replace(...args);
-      };
-      try {
-        await assert.rejects(
-          harness.services.apiPlugins.stripRetiredConfigKeys(apiId, 'ip_restriction'),
-          CHANGED_WHILE_STRIPPED,
-        );
-      } finally {
-        pluginConfigs.replace = replace;
-      }
-      const row = await harness.store.apiPlugins.find(apiId, 'ip_restriction');
-      assert.equal(row?.ferrum_plugin_config_id, 'restored-config');
-      assert.deepEqual(row?.config, { allow: ['203.0.113.0/24'], mode: 'allow_first' });
     });
   });
 

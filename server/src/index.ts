@@ -32,7 +32,6 @@ import {
 } from './admin/gateway-reconciliation.js';
 import { createGodService, type GodService } from './admin/god-service.js';
 import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
-import { bindLegacyEncryptedSettings } from './admin/rotate-key.js';
 import { createSettingsService, type SettingsService } from './admin/settings-service.js';
 import { createSmtpTestService, type SmtpTestService } from './admin/smtp-test-service.js';
 import { createAuditService, type AuditService } from './audit/service.js';
@@ -58,7 +57,6 @@ import {
   createAccessGatewayWorker,
   type AccessGatewayWorker,
 } from './access/gateway-job-worker.js';
-import { queueStrandedAccessRepairs } from './access/stranded-repair.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
 import {
@@ -99,7 +97,6 @@ import {
 } from './middleware/error-handler.js';
 import { responseCachingHook } from './middleware/session-cookies.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
-import { stripRetiredPaletteKeys } from './plugins/retired-keys.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createApiViewersService, type ApiViewersService } from './publishing/viewers.js';
 import { createApplicationsService, type ApplicationsService } from './applications/service.js';
@@ -269,13 +266,6 @@ export interface BuildServerDeps {
    * `services.reconciliation.scan()` themselves, so no pass ever runs mid-assert.
    */
   startReconciliationWorker?: boolean;
-  /**
-   * Run the start-up rewrite of palette configs that carry a key Edge removed
-   * (`plugins/retired-keys.ts`, issue #727). Same default as
-   * {@link BuildServerDeps.startOutboxWorker}: tests call
-   * `stripRetiredPaletteKeys` themselves.
-   */
-  startRetiredKeysPass?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
   /**
@@ -435,22 +425,6 @@ export async function buildServer(
   });
 
   const audit = createAuditService(deps.store);
-  // Before any service reads a setting: runtime reads refuse an unbound
-  // legacy (`v1`) encrypted setting, so the first start of this release
-  // re-binds every one to its own row, once, and records that it did
-  // (GHSA-qm46-qg94-mpg7); a legacy row this key cannot open stops the start
-  // with nothing converted. Later starts convert nothing.
-  const binding = await bindLegacyEncryptedSettings(deps.store, crypto, audit, locks);
-  if (binding.bound.length > 0) {
-    app.log.info({ keys: binding.bound }, 'Bound legacy encrypted settings to their keys');
-  }
-  if (binding.unreadable.length > 0) {
-    app.log.warn(
-      { keys: binding.unreadable },
-      'Unbound legacy encrypted settings are refused (the one-time binding already ran); ' +
-        're-enter them in the admin settings',
-    );
-  }
   const captcha = createCaptchaService({
     store: deps.store,
     crypto,
@@ -572,20 +546,6 @@ export async function buildServer(
     });
     return attempt.revoked;
   };
-  // One-off upgrade scan for `basicauth` appends an earlier release left
-  // without a row. It must not keep the portal down: a failure is logged, the
-  // service reports the scan `failed`, and — since completion is recorded only
-  // on success — the next start runs it again.
-  try {
-    await credentials.initializeLegacyBasicAuthPositions();
-  } catch (error) {
-    app.log.error(
-      { err: error },
-      'Could not scan for HTTP Basic credentials left unconfirmed by an earlier release; ' +
-        'it runs again at the next start. Until it completes, reconcile basicauth for any ' +
-        'consumer with a credential.append_rollback basicauth row with withdrawn: false',
-    );
-  }
   // After credentials for the same reason: an account whose claims no longer
   // map to a role is disabled through the same durable gateway revocation.
   const sso = createSsoService({
@@ -858,7 +818,6 @@ export async function buildServer(
         config,
         store: deps.store,
         edge: deps.edge,
-        credentials,
         reconciliation,
       });
     },
@@ -1084,57 +1043,8 @@ export async function buildServer(
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
   if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
   if (deps.startAccountRecoveryWorker ?? config.env !== 'test') recovery.start();
-  if (deps.startAccessGatewayWorker ?? config.env !== 'test') {
-    // Once per database: queue the gateway work that decisions made by a
-    // release before `access_gateway_jobs` may have stranded (issue #651). A
-    // database created at the base schema has none, so this finds nothing.
-    // In the background, so a large history never delays serving; a run that
-    // fails is retried by the next start.
-    void queueStrandedAccessRepairs({
-      store: deps.store,
-      audit,
-      locks,
-      namespace: config.edge.namespace,
-    })
-      .then((repair) => {
-        if (!repair.alreadyRecorded) {
-          app.log.info(repair, 'Queued access gateway repairs for decisions made before 015');
-        }
-      })
-      .catch((error: unknown) => {
-        app.log.warn(
-          { error: error instanceof Error ? error.message : String(error) },
-          'Could not queue access gateway repairs; the next start tries again',
-        );
-      });
-    accessJobs.start();
-  }
+  if (deps.startAccessGatewayWorker ?? config.env !== 'test') accessJobs.start();
   if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
-  if (deps.startRetiredKeysPass ?? config.env !== 'test') {
-    // At every start: rewrite the palette configs an earlier release wrote
-    // with a key Edge v0.9.21 refuses (issue #727). It has to finish while
-    // the gateway is still on v0.9.20, which accepts them. In the background; it only reads the
-    // store once nothing is left, and whatever a run misses the next retries.
-    void stripRetiredPaletteKeys({
-      store: deps.store,
-      audit,
-      apiPlugins,
-      locks,
-      namespace: config.edge.namespace,
-      log: warn,
-    })
-      .then((result) => {
-        if (result.rewritten > 0 || !result.alreadyRecorded) {
-          app.log.info(result, 'Stripped removed keys from palette plugin configs');
-        }
-      })
-      .catch((error: unknown) => {
-        app.log.warn(
-          { error: error instanceof Error ? error.message : String(error) },
-          'Could not strip removed palette config keys; the next start tries again',
-        );
-      });
-  }
   if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 
   return app;

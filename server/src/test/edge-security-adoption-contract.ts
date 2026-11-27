@@ -15,7 +15,6 @@ import type { EdgeDeploymentSnapshot } from '../ferrum-admin/types.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
-import { parseOpenApiSpec } from '../publishing/oas.js';
 import {
   deleteRecoveryJournal,
   readRecoveryJournal,
@@ -1313,124 +1312,6 @@ export function runEdgeSecurityAdoptionContract(
         );
         assert.ok(harness.edge.requests.slice(retryOffset).every((call) => call.method === 'GET'));
         assert.deepEqual(await harness.store.settings.get(key), sealed);
-      });
-    }
-
-    /**
-     * Journal a conversion of `apiId` as a release paired with Edge v0.9.12 wrote it:
-     * unmarked, with v0.9.12 authority (spec bytes inline, no api_spec_contents, a
-     * token in the v0.9.12 MAC domain), optionally with an acknowledged operation.
-     */
-    async function writeLegacyConversionJournal(
-      apiId: string,
-      acknowledged = false,
-    ): Promise<Record<string, unknown>> {
-      const key = `gateway_recovery:nexus:${apiId}`;
-      const api = await harness.store.apis.findById(apiId);
-      const spec = await harness.store.apiSpecs.findCurrentByApi(apiId);
-      assert.ok(api && spec && api.ferrum_proxy_id);
-      const proxy = await harness.edgeClient.proxies.get(api.ferrum_proxy_id);
-      assert.ok(proxy);
-      // The authority as Edge v0.9.12 journaled it: spec bytes inline, no
-      // api_spec_contents, and a token in the v0.9.12 MAC domain.
-      const current = await harness.edgeClient.deployments.snapshot(actor.id);
-      const inline = (rows: unknown): Record<string, unknown>[] =>
-        (rows as Record<string, unknown>[]).map((row) => {
-          const entry = current.api_spec_contents.find((item) => item.id === row.id);
-          assert.ok(entry);
-          return {
-            ...row,
-            spec_content: [...Buffer.from(entry.spec_content_base64, 'base64')],
-            external_ref_snapshot: null,
-          };
-        });
-      const { api_spec_contents: _contents, ...rest } = current;
-      const resources = [...(current.evidence.resources as unknown[])];
-      resources[5] = inline(resources[5]);
-      const legacy = {
-        ...rest,
-        namespace_etag: harness.edge.previousReleaseDeploymentTag('nexus'),
-        api_specs: inline(current.api_specs),
-        evidence: { ...current.evidence, resources },
-      };
-      const shape = {
-        slug: api.slug,
-        namespace: api.namespace,
-        upstream_url: api.upstream_url,
-        auth_plugin: api.auth_plugin,
-        requestable: api.requestable,
-        rate_limit: api.rate_limit,
-        cors: api.cors,
-        allowed_methods: api.allowed_methods,
-        timeouts: api.timeouts,
-        circuit_breaker: api.circuit_breaker,
-        spec_enforcement: api.spec_enforcement,
-        agents: api.agents ?? null,
-      };
-      const journal = {
-        apiId,
-        namespace: 'nexus',
-        shape,
-        catalogShape: shape,
-        originalSpecId: spec.id,
-        catalogSpecId: spec.id,
-        originalSpecDocument: await harness.edgeClient.apiSpecs.documentByProxy(proxy.id),
-        proxy,
-        plugins: await harness.edgeClient.pluginConfigs.listByProxy(proxy.id),
-        document: parseOpenApiSpec(spec.raw_spec).document,
-        originalAuthority: legacy,
-        attempt: null,
-        ...(acknowledged
-          ? {
-              mutations: [
-                { kind: 'replace', id: proxy.api_spec_id, original: legacy, acknowledged: true },
-              ],
-            }
-          : {}),
-      };
-      await writeRecoveryJournal(harness.store, harness.app.nexus.crypto, key, journal);
-      await harness.store.apis.update(apiId, { gateway_state: 'repair_required' });
-      return journal;
-    }
-
-    it('keeps a journal holding Edge v0.9.12 authority readable but never acts on it', async () => {
-      const published = await publish('routes');
-      const apiId = published.api.id;
-      const key = `gateway_recovery:nexus:${apiId}`;
-      const journal = await writeLegacyConversionJournal(apiId);
-      // Older journals stay readable for custody checks and inspection.
-      assert.deepEqual(await readJournal(key), journal);
-      const offset = harness.edge.requests.length;
-      await assert.rejects(harness.services.publishing.remove(actor, apiId), (error: unknown) => {
-        assert.ok(isNexusError(error));
-        assert.equal(error.code, 'CONFLICT');
-        assert.deepEqual(error.details, { kind: 'legacy_deployment_authority' });
-        return true;
-      });
-      assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
-      await assertDeleteRetainsCustody(apiId);
-      assert.deepEqual(await readJournal(key), journal);
-    });
-
-    for (const acknowledged of [false, true]) {
-      it(`completes a missed v0.9.12 journal by observation (acked=${String(acknowledged)})`, async () => {
-        const published = await publish('routes');
-        const apiId = published.api.id;
-        const key = `gateway_recovery:nexus:${apiId}`;
-        await writeLegacyConversionJournal(apiId, acknowledged);
-        // The live deployment already matches the catalog: nothing needs the
-        // journal's v0.9.12 authority, so the restore only observes and commits.
-        const state = gatewayState();
-        const offset = harness.edge.requests.length;
-        const restored = await harness.services.publishing.restoreGateway(actor, apiId);
-        assert.equal(restored.api.gateway_state, 'deployed');
-        assert.equal(restored.api.ferrum_proxy_id, published.api.ferrum_proxy_id);
-        assert.ok(harness.edge.requests.slice(offset).every((call) => call.method === 'GET'));
-        assert.deepEqual(gatewayState(), state, 'no deployment authority was exercised');
-        assert.deepEqual(await journalRows(key), []);
-        const completed = await completionRows(apiId);
-        assert.equal(completed.restore.length, 1);
-        assert.equal(completed.restore[0]!.details.rebuilt, false);
       });
     }
 

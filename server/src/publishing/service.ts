@@ -210,7 +210,7 @@ import {
   listenPathFor,
   roleAtLeast,
   testConsumerUsername,
-  withoutRetiredConfigKeys,
+  undeclaredPaletteKeys,
   type AccessDisruptionDetails,
   type Api,
   type ApiAgents,
@@ -286,8 +286,8 @@ import {
   deploymentSpecDocument,
   deploymentTarget,
   isDeploymentSnapshot,
-  isLegacyDeploymentSnapshot,
-  legacyDeploymentAuthority,
+  checkRetainedAuthority,
+  invalidDeploymentAuthority,
 } from '../ferrum-admin/deployment.js';
 import {
   accessDisruptionConfirmationRequired,
@@ -1577,12 +1577,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   async function assertDeletionCustody(tx: NexusStore, api: ApiRecord): Promise<void> {
     const record = (value: unknown): value is Record<string, unknown> =>
       typeof value === 'object' && value !== null && !Array.isArray(value);
+    // Another namespace's authority belongs to another deployment; an
+    // incomplete one of this namespace is the typed invalid-authority refusal.
     const authority = (value: unknown): value is EdgeDeploymentSnapshot => {
-      // Edge v0.9.12 authority in an older journal: readable, never usable.
-      if (isLegacyDeploymentSnapshot(value)) throw legacyDeploymentAuthority();
-      if (!isDeploymentSnapshot(value) || value.namespace !== namespace) return false;
-      assertDeploymentEvidence(value, namespace);
-      return true;
+      if (!record(value) || value.namespace !== namespace) return false;
+      return checkRetainedAuthority(() => {
+        if (!isDeploymentSnapshot(value)) throw invalidDeploymentAuthority();
+        assertDeploymentEvidence(value, namespace);
+        return true;
+      });
     };
     const conversionRow = await tx.settings.get(recoveryKey(api.id));
     const recovery = await readRecoveryJournal<unknown>(tx, deps.crypto, recoveryKey(api.id));
@@ -1748,10 +1751,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     },
     message = 'The gateway deployment changed before its original authority was captured',
   ): void {
-    // Journaled Edge v0.9.12 authority fails 412 on Edge v0.9.13. Refuse it here,
-    // before any comparison could lead to a request or a fresh-token retry.
-    if (isLegacyDeploymentSnapshot(original)) throw legacyDeploymentAuthority();
-    const target = deploymentTarget(original, expected.proxy.id);
+    // Refuse anything but complete authority here, before any comparison could
+    // lead to a request or a fresh-token retry.
+    if (!isDeploymentSnapshot(original)) throw invalidDeploymentAuthority();
+    const target = checkRetainedAuthority(() => deploymentTarget(original, expected.proxy.id));
     const sorted = (plugins: EdgePluginConfig[]): EdgePluginConfig[] =>
       [...plugins].sort((left, right) => left.id.localeCompare(right.id));
     if (
@@ -1761,7 +1764,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       ) ||
       !isDeepStrictEqual(sorted(target.plugins), sorted(expected.plugins)) ||
       !isDeepStrictEqual(
-        target.spec ? deploymentSpecDocument(original, target.spec) : null,
+        target.spec
+          ? checkRetainedAuthority(() => deploymentSpecDocument(original, target.spec!))
+          : null,
         expected.document,
       )
     ) {
@@ -1983,10 +1988,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         plugin.plugin_name !== row.plugin_name ||
         plugin.enabled !== row.enabled ||
         !running.has(plugin.id) ||
-        // A config written before the palette dropped a key Edge removed
-        // still matches until the startup pass rewrites it (issue #727).
         !isDeepStrictEqual(
-          plugin.config && withoutRetiredConfigKeys(row.plugin_name, plugin.config),
+          plugin.config,
           paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit),
         ) ||
         !isDeepStrictEqual(plugin.trigger ?? null, edgeTriggerFor(row.trigger) ?? null)
@@ -3632,12 +3635,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         if (nextAgents && (agentsMoved || enforcementMoved) && proxyId) {
           await assertAgentsCompose(proxyId);
         }
-        // A conversion replays the live configs exactly (its recovery depends
-        // on them), so one still carrying a key Edge removed is cleaned first.
+        // A conversion replays the live palette configs exactly (its recovery
+        // compares them), so one carrying a key the portal does not write is
+        // refused here, before any intent is recorded or the API marked for
+        // repair, naming the plugin to save again (issue #727).
         if (enforcementMoved && proxyId) {
-          await assertNoRetiredPaletteKeys(api, plugins);
+          await assertPaletteConfigsWritable(api, plugins);
         }
-
         // ── Which first-class configs are the portal's to change ──────────
         //
         // By recorded id, never by plugin name — see `firstClassOwnership`.
@@ -5380,8 +5384,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   api_id: api.id,
                   plugin_name: entry.plugin_name,
                   enabled: entry.enabled,
-                  // As written to the gateway above: without a key Edge removed.
-                  config: withoutRetiredConfigKeys(entry.plugin_name, entry.config),
+                  config: entry.config,
                   trigger: entry.trigger,
                   ferrum_plugin_config_id: configId,
                 });
@@ -5477,7 +5480,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 }
               }
               if (target.spec) {
-                const document = deploymentSpecDocument(original, target.spec);
+                const spec = target.spec;
+                const document = checkRetainedAuthority(() =>
+                  deploymentSpecDocument(original, spec),
+                );
                 if (
                   !attemptedSpecDocument ||
                   !isDeepStrictEqual(document, attemptedSpecDocument) ||
@@ -6372,31 +6378,39 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
-   * Refuse a conversion while a palette config the API owns still carries a
-   * key Edge has removed (issue #727). A conversion rebuilds the proxy from
-   * the live configs verbatim, because its recovery journal compares them,
-   * so it would write the key back; saving the plugin again, or the startup
-   * pass, drops it first.
+   * Refuse a conversion while a palette config the API owns carries a key the
+   * portal does not write: one edited on the gateway by hand, or one a newer
+   * Edge retired after an earlier release wrote it. Edge accepts any key on a
+   * disabled config, so such a config can be live and serving. A conversion
+   * rebuilds the proxy from the live configs verbatim, so it would write the
+   * key back and fail part way; saving the plugin again in the portal writes
+   * exactly its declared keys.
    */
-  async function assertNoRetiredPaletteKeys(
+  async function assertPaletteConfigsWritable(
     api: ApiRecord,
     onProxy: EdgePluginConfig[],
   ): Promise<void> {
-    const owned = new Set(
-      (await store.apiPlugins.listByApi(api.id)).map((row) => row.ferrum_plugin_config_id),
-    );
-    const legacy = onProxy.find(
-      (plugin) =>
-        owned.has(plugin.id) &&
-        plugin.config !== null &&
-        withoutRetiredConfigKeys(plugin.plugin_name, plugin.config) !== plugin.config,
-    );
-    if (!legacy) return;
-    throw conflict(
-      `This API's ${legacy.plugin_name} plugin still carries a setting the gateway no longer ` +
-        'accepts; save that plugin again (or restart Nexus, which rewrites it), then convert',
-      { plugin_name: legacy.plugin_name, plugin_config_id: legacy.id },
-    );
+    for (const row of await store.apiPlugins.listByApi(api.id)) {
+      const live = onProxy.find((plugin) => plugin.id === row.ferrum_plugin_config_id);
+      if (!live || live.config === null) continue;
+      const written = new Set(
+        Object.keys(paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit)),
+      );
+      const undeclared = undeclaredPaletteKeys(row.plugin_name, live.config).filter(
+        (key) => !written.has(key),
+      );
+      if (undeclared.length === 0) continue;
+      throw conflict(
+        `This API's ${row.plugin_name} plugin on the gateway carries settings the portal does ` +
+          `not write (${undeclared.join(', ')}); save that plugin again, then convert`,
+        {
+          kind: 'palette_config_undeclared_keys',
+          plugin_name: row.plugin_name,
+          plugin_config_id: live.id,
+          keys: undeclared,
+        },
+      );
+    }
   }
 
   /**

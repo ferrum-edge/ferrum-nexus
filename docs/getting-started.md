@@ -509,7 +509,8 @@ grant. If the gateway write fails, the request goes back to `pending` and can
 be approved again.
 
 The client gets a notification and an `access_approved` email. The email waits
-in the outbox as `pending` until SMTP is configured, which is fine for now.
+in the outbox as `pending` until SMTP is configured, which is fine for this
+walkthrough.
 
 ---
 

@@ -415,9 +415,8 @@ export type NotificationRecord = Notification;
  *
  * A message carrying a single-use link (verification, password reset) is
  * stored sealed: its real subject and bodies are one AES-256-GCM envelope in
- * `body_text`, `body_html` is empty, and `subject` is this marker. The store
- * only needs the marker to filter on and to make {@link EmailOutboxRepo.sealContent}
- * a compare-and-swap; the envelope itself is `email/sealed-outbox.ts`'s.
+ * `body_text`, `body_html` is empty, and `subject` is this marker. The
+ * envelope itself is `email/sealed-outbox.ts`'s.
  */
 export const OUTBOX_SEALED_SUBJECT = 'nexus:sealed:v1';
 
@@ -803,13 +802,6 @@ export interface NotificationFilter {
 export interface EmailOutboxFilter {
   status?: EmailOutboxEntry['status'];
   to_email?: string;
-  /** Only rows whose `idempotency_key` starts with this (ASCII) prefix, e.g. `reset:`. */
-  idempotency_key_prefix?: string;
-  /**
-   * `true`: only sealed rows (`subject` is {@link OUTBOX_SEALED_SUBJECT});
-   * `false`: only rows that are not.
-   */
-  sealed?: boolean;
 }
 
 /** Filters for `gatewayTeardownJobs.list`. */
@@ -1224,19 +1216,6 @@ export interface ApiPluginRepo {
   /** One plugin by its `(api, plugin_name)` key. */
   find(apiId: Uuid, pluginName: string): Promise<ApiPluginRecord | null>;
   /**
-   * Every row, of any API in any namespace, whose plugin is a key of `keys`
-   * and whose config holds one of the config keys listed for it, ordered by
-   * `api_id` then `plugin_name`.
-   *
-   * The startup pass's probe for configs that still carry a key Edge removed
-   * (issue #727): one query over the named plugins' rows, so a store with
-   * nothing left to rewrite costs one query rather than one per API. Exact:
-   * a narrowing text match is re-checked against the parsed config.
-   */
-  listCarryingConfigKeys(
-    keys: Readonly<Record<string, readonly string[]>>,
-  ): Promise<ApiPluginRecord[]>;
-  /**
    * Create or replace the row for `(api_id, plugin_name)` in one statement.
    *
    * Upsert rather than create+update because the pair is unique and the route
@@ -1313,17 +1292,6 @@ export interface AccessRequestRepo {
     patch: UpdateInput<AccessRequestRecord>,
   ): Promise<AccessRequestRecord | null>;
   list(filter: AccessRequestFilter, options?: ListOptions): Promise<Paginated<AccessRequestRecord>>;
-  /**
-   * Up to `limit` requests in `status` whose id sorts after `afterId` (from
-   * the first when `null`), in id order: a keyset page that rows changing
-   * status meanwhile cannot shift, unlike an offset over the same filter.
-   * For one-time scans over the whole table.
-   */
-  pageByStatus(
-    status: AccessRequestStatus,
-    afterId: Uuid | null,
-    limit: number,
-  ): Promise<AccessRequestRecord[]>;
   /** Duplicate guard: an open request by this user for this API. */
   findPendingByApiAndUser(
     apiId: Uuid,
@@ -1367,12 +1335,6 @@ export interface GrantRepo {
     patch: UpdateInput<GrantRecord>,
   ): Promise<GrantRecord | null>;
   list(filter: GrantFilter, options?: ListOptions): Promise<Paginated<GrantRecord>>;
-  /**
-   * Up to `limit` grants in `status` whose id sorts after `afterId` (from the
-   * first when `null`), in id order: a keyset page that rows changing status
-   * meanwhile cannot shift. For one-time scans over the whole table.
-   */
-  pageByStatus(status: GrantStatus, afterId: Uuid | null, limit: number): Promise<GrantRecord[]>;
   /**
    * The single `status = 'active'` grant for an API and one identity, if any.
    * The schema enforces at most one via a partial unique index over
@@ -1422,6 +1384,11 @@ export interface GrantRepo {
 }
 
 /** Show-once gateway credential metadata (fingerprint + last4 only). */
+/** What {@link CredentialRepo.create} takes: the store assigns `edge_ordinal` unless given. */
+export type CreateCredentialInput = Omit<CreateInput<CredentialRecord>, 'edge_ordinal'> & {
+  edge_ordinal?: number;
+};
+
 export interface CredentialRepo {
   /**
    * Insert a row and assign its `edge_ordinal`.
@@ -1434,12 +1401,8 @@ export interface CredentialRepo {
    * "largest already recorded" the row's true append position. A unique index
    * on `(consumer, type, ordinal)` turns a breach of that rule into a
    * `CONFLICT` rather than two rows claiming one Edge slot.
-   *
-   * Pass `edge_ordinal: null` only to record a row whose gateway position is
-   * unknown. Multiple unresolved rows cannot be addressed individually.
-   * No service does this.
    */
-  create(input: CreateInput<CredentialRecord>): Promise<CredentialRecord>;
+  create(input: CreateCredentialInput): Promise<CredentialRecord>;
   findById(id: Uuid): Promise<CredentialRecord | null>;
   /** `edge_ordinal` is not updatable: a row's position is fixed at append time. */
   update(
@@ -1467,10 +1430,9 @@ export interface CredentialRepo {
   ): Promise<CredentialRecord | null>;
   list(filter: CredentialFilter, options?: ListOptions): Promise<Paginated<CredentialRecord>>;
   /**
-   * All credentials of a consumer in gateway order: rows without an ordinal
-   * first (every one of them predates every row that has one), then by
-   * `edge_ordinal`, then by `created_at` and `id` as a tie-break only the
-   * unresolved rows need.
+   * All credentials of a consumer in gateway order: by `edge_ordinal`, then
+   * by `created_at` and `id` as a tie-break that never decides between two
+   * rows of one type.
    *
    * `statuses` restricts the read to rows in one of those states; omitted, it
    * returns every row. The credential paths pass the live statuses: rotation
@@ -1753,16 +1715,6 @@ export interface EmailOutboxRepo {
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
   list(filter: EmailOutboxFilter, options?: ListOptions): Promise<Paginated<EmailOutboxRecord>>;
-  /**
-   * Replace a row's rendered content with its sealed form: `subject` becomes
-   * {@link OUTBOX_SEALED_SUBJECT} and the bodies are the supplied ones. Status,
-   * attempts, schedule and `updated_at` are left alone.
-   *
-   * A compare-and-swap on "not sealed yet": `false` means the row is gone or
-   * was already sealed (by another instance's sweep, say), and nothing was
-   * written.
-   */
-  sealContent(id: Uuid, sealed: { body_html: string; body_text: string }): Promise<boolean>;
 }
 
 /**
@@ -1899,14 +1851,6 @@ export interface AccessGatewayJobRepo {
    * every older snapshot and claim of it.
    */
   upsertClaimed(input: AccessGatewayJobInput, now: IsoTimestamp): Promise<AccessGatewayJobRecord>;
-  /**
-   * Queue a job for `input.subject_id` unless the subject already carries one:
-   * `pending`, due at `now`, `attempts = 0`. An existing row — owned by a live
-   * decision or already queued — is left exactly as it is. Resolves to
-   * whether this call inserted the row. Used by the one-time repair that
-   * queues gateway work that decisions made before `access_gateway_jobs` stranded.
-   */
-  enqueueIfAbsent(input: AccessGatewayJobInput, now: IsoTimestamp): Promise<boolean>;
   findBySubject(subjectId: Uuid): Promise<AccessGatewayJobRecord | null>;
   /**
    * Atomically claim up to `limit` rows that are `pending` with
@@ -1947,27 +1891,6 @@ export interface SettingRepo {
   get(key: string): Promise<SettingRecord | null>;
   /** Upsert. `encrypted` records how `value` was stored, not what it means. */
   set(key: string, value: unknown, encrypted?: boolean): Promise<SettingRecord>;
-  /**
-   * Insert `key` **only if it does not exist yet**, returning whether this
-   * caller was the one that created it. An existing row is left untouched and
-   * reported as `false`; this never throws `CONFLICT`.
-   *
-   * This is the store's one atomic compare-and-set, and it is atomic because
-   * `app_settings.key` is unique — not because of any transaction. Concurrent
-   * callers on any adapter (including PostgreSQL at READ COMMITTED and
-   * MongoDB, where two transactions can both observe "absent") see exactly one
-   * `true`. Used to elect the bootstrap `super_admin`; use it for any other
-   * "exactly one winner" decision rather than read-then-write.
-   */
-  insertIfAbsent(key: string, value: unknown, encrypted?: boolean): Promise<boolean>;
-  /**
-   * Replace an **encrypted** row's value only if it still holds exactly
-   * `expected`, in one conditional statement, returning whether it did. A row
-   * that is gone, not encrypted, or holds anything else is left untouched and
-   * reported as `false`. Used to re-encrypt a setting without overwriting a
-   * value another writer saved (or a delete it made) in the meantime.
-   */
-  replaceEncryptedIfMatches(key: string, expected: string, value: string): Promise<boolean>;
   /** Upsert several keys; adapters apply them in one statement batch. */
   setMany(entries: { key: string; value: unknown; encrypted?: boolean }[]): Promise<void>;
   delete(key: string): Promise<boolean>;

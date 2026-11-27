@@ -77,7 +77,6 @@ import {
 
 import type { GatewayReconciliationService } from '../admin/gateway-reconciliation.js';
 import type { NexusConfig } from '../config/index.js';
-import type { CredentialsService } from '../credentials/service.js';
 import type { NexusStore } from '../db/store.js';
 import {
   NAMESPACE_UNSERVED_REASON,
@@ -102,7 +101,6 @@ export interface HealthRoutesOptions {
   config: NexusConfig;
   store: NexusStore;
   edge: FerrumAdminClient;
-  credentials: Pick<CredentialsService, 'legacyBasicAuthScanState'>;
   /**
    * Read-only view of the gateway-reference reconciliation pass.
    *
@@ -295,7 +293,7 @@ function presentReconciliation(
 
 /** `/api/health` route plugin. */
 export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app, options) => {
-  const { config, store, edge, credentials, reconciliation } = options;
+  const { config, store, edge, reconciliation } = options;
 
   // Logging lives inside the memo rather than in the handler: a cached `down`
   // is served for the whole window, and re-logging it on every hit would
@@ -388,9 +386,6 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
       checked_at: new Date(Math.min(db.checkedAt, gateway.checkedAt)).toISOString(),
       database,
       edge: edgeHealth,
-      credentials: {
-        legacy_basicauth_scan: detailAllowed ? credentials.legacyBasicAuthScanState() : null,
-      },
     };
   });
 

@@ -86,13 +86,6 @@ export function draftFor(
         draft[field.key] = field.options ? values : values.join('\n');
         break;
       }
-      case 'integer_list': {
-        const values = Array.isArray(saved)
-          ? saved.map(String)
-          : [...(field.default ?? [])].map(String);
-        draft[field.key] = field.options ? values : values.join('\n');
-        break;
-      }
     }
   }
   return draft;
@@ -149,17 +142,6 @@ export function draftToConfig(
         config[field.key] = entries;
         break;
       }
-      case 'integer_list': {
-        const entries = linesOf(value);
-        if (entries.length === 0 && field.required !== true && field.min_entries === undefined) {
-          break;
-        }
-        config[field.key] = entries.map((entry) => {
-          const parsed = Number(entry);
-          return Number.isFinite(parsed) ? parsed : entry;
-        });
-        break;
-      }
     }
   }
   return config;
@@ -197,7 +179,7 @@ function fieldError(field: PluginFieldSpec, draft: PluginDraft): string | null {
     return null;
   }
 
-  if (field.kind === 'string_list' || field.kind === 'integer_list') {
+  if (field.kind === 'string_list') {
     const entries = linesOf(value ?? '');
     if (entries.length === 0) {
       return field.required === true || (field.min_entries ?? 0) > 0 ? 'Add at least one' : null;
@@ -205,15 +187,6 @@ function fieldError(field: PluginFieldSpec, draft: PluginDraft): string | null {
     if (entries.length > field.max_entries) return `At most ${field.max_entries} entries`;
     if ((field.min_entries ?? 0) > entries.length) {
       return `Add at least ${String(field.min_entries)}`;
-    }
-    if (field.kind === 'integer_list') {
-      for (const entry of entries) {
-        const parsed = Number(entry);
-        if (!Number.isInteger(parsed) || parsed < field.item_min || parsed > field.item_max) {
-          return `Every entry must be a whole number between ${String(field.item_min)} and ${String(field.item_max)}`;
-        }
-      }
-      return null;
     }
     if (field.options === undefined && field.item_pattern !== undefined) {
       const bad = entries.find((entry) => !matches(field.item_pattern ?? '', entry));
@@ -269,7 +242,7 @@ function OptionList({
   onChange,
   disabled,
 }: {
-  field: Extract<PluginFieldSpec, { kind: 'string_list' | 'integer_list' }>;
+  field: Extract<PluginFieldSpec, { kind: 'string_list' }>;
   selected: string[];
   onChange: (next: string[]) => void;
   disabled?: boolean;
@@ -365,7 +338,7 @@ function PluginField({
     );
   }
 
-  if ((field.kind === 'string_list' || field.kind === 'integer_list') && field.options) {
+  if (field.kind === 'string_list' && field.options) {
     return (
       <Field
         label={field.label}
@@ -384,7 +357,7 @@ function PluginField({
     );
   }
 
-  if (field.kind === 'string_list' || field.kind === 'integer_list') {
+  if (field.kind === 'string_list') {
     return (
       <Field
         label={field.label}

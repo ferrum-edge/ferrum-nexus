@@ -196,7 +196,6 @@ import {
   assertAuditDetailsKey,
   assertLeaseKeyLength,
   OUTBOX_PRIORITY,
-  OUTBOX_SEALED_SUBJECT,
   SPEC_HISTORY_PRUNE_BATCH,
 } from '../../store.js';
 import {
@@ -206,7 +205,6 @@ import {
   execute,
   insertParts,
   int,
-  intOrNull,
   json,
   mapConflict,
   page,
@@ -220,7 +218,6 @@ import {
   type Param,
   type Row,
 } from './sql.js';
-import { carriesConfigKey, configKeyProbe } from '../config-keys.js';
 
 /* ── Row mappers ────────────────────────────────────────────────────────── */
 
@@ -585,7 +582,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: textOrNull(row.label),
     status: text(row.status) as CredentialStatus,
     rotated_from_id: textOrNull(row.rotated_from_id),
-    edge_ordinal: intOrNull(row.edge_ordinal),
+    edge_ordinal: int(row.edge_ordinal),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -2105,18 +2102,6 @@ class SqliteStore implements NexusStore {
       return row ? mapApiPlugin(row) : null;
     },
 
-    listCarryingConfigKeys: async (keys) => {
-      const probe = configKeyProbe(keys);
-      if (!probe) return [];
-      return queryAll(
-        this.db,
-        `SELECT * FROM api_plugins WHERE ${probe.sql} ORDER BY api_id ASC, plugin_name ASC`,
-        probe.params,
-      )
-        .map(mapApiPlugin)
-        .filter((row) => carriesConfigKey(row, keys));
-    },
-
     upsert: async (input) => {
       const meta = stamps({});
       // `ON CONFLICT … DO UPDATE` keeps the original `created_at` — the row is
@@ -2356,13 +2341,6 @@ class SqliteStore implements NexusStore {
       return { items: rows.map(mapAccessRequest), total };
     },
 
-    pageByStatus: async (status, afterId, limit) =>
-      queryAll(
-        this.db,
-        `SELECT * FROM access_requests WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-        [status, afterId ?? '', Math.max(1, Math.floor(limit))],
-      ).map(mapAccessRequest),
-
     findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new WhereBuilder()
         .always('api_id = ?', apiId)
@@ -2506,13 +2484,6 @@ class SqliteStore implements NexusStore {
       );
       return { items: rows.map(mapGrant), total };
     },
-
-    pageByStatus: async (status, afterId, limit) =>
-      queryAll(
-        this.db,
-        `SELECT * FROM grants WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`,
-        [status, afterId ?? '', Math.max(1, Math.floor(limit))],
-      ).map(mapGrant),
 
     findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
       const where = new WhereBuilder()
@@ -2681,13 +2652,11 @@ class SqliteStore implements NexusStore {
         .add(type, 'credential_type = ?', type ?? null)
         .addIn('status', statuses)
         .build();
-      // Unresolved rows (NULL ordinal) first, then append order. The CASE keeps
-      // the NULL placement explicit rather than relying on the engine default.
+      // Append order.
       return queryAll(
         this.db,
         `SELECT * FROM credential_metadata${where.sql}
-          ORDER BY CASE WHEN edge_ordinal IS NULL THEN 0 ELSE 1 END ASC, edge_ordinal ASC,
-                   created_at ASC, id ASC`,
+          ORDER BY edge_ordinal ASC, created_at ASC, id ASC`,
         where.params,
       ).map(mapCredential);
     },
@@ -3416,15 +3385,9 @@ class SqliteStore implements NexusStore {
       ),
 
     list: async (filter, options) => {
-      const prefix = filter.idempotency_key_prefix;
-      const sealed = filter.sealed;
       const where = new WhereBuilder()
         .add(filter.status, 'status = ?', filter.status ?? null)
         .add(filter.to_email, 'lower(to_email) = ?', (filter.to_email ?? '').toLowerCase())
-        // `substr` rather than `LIKE`, so a prefix never needs wildcard
-        // escaping; the length is our own integer, never caller text.
-        .add(prefix, `substr(idempotency_key, 1, ${prefix?.length ?? 0}) = ?`, prefix ?? null)
-        .add(sealed, sealed ? 'subject = ?' : 'subject <> ?', OUTBOX_SEALED_SUBJECT)
         .build();
       const { limit, offset } = page(options);
       const total = queryCount(
@@ -3439,14 +3402,6 @@ class SqliteStore implements NexusStore {
       );
       return { items: rows.map(mapOutbox), total };
     },
-
-    sealContent: async (id, sealed) =>
-      execute(
-        this.db,
-        `UPDATE email_outbox SET subject = ?, body_html = ?, body_text = ?
-         WHERE id = ? AND subject <> ?`,
-        [OUTBOX_SEALED_SUBJECT, sealed.body_html, sealed.body_text, id, OUTBOX_SEALED_SUBJECT],
-      ) > 0,
   };
 
   /* ── gatewayTeardownJobs ──────────────────────────────────────────────── */
@@ -3765,29 +3720,6 @@ class SqliteStore implements NexusStore {
       return job;
     },
 
-    enqueueIfAbsent: async (input, now) =>
-      execute(
-        this.db,
-        `INSERT INTO access_gateway_jobs
-           (id, generation, kind, subject_id, api_id, user_id, application_id, requested_by,
-            status, attempts, next_attempt_at, last_error, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)
-         ON CONFLICT (subject_id) DO NOTHING`,
-        [
-          newId(),
-          newId(),
-          input.kind,
-          input.subject_id,
-          input.api_id,
-          input.user_id,
-          input.application_id,
-          input.requested_by,
-          now,
-          now,
-          now,
-        ],
-      ) > 0,
-
     findBySubject: async (subjectId) => {
       const row = queryOne(this.db, 'SELECT * FROM access_gateway_jobs WHERE subject_id = ?', [
         subjectId,
@@ -3923,31 +3855,6 @@ class SqliteStore implements NexusStore {
       const created = await this.settings.get(key);
       if (!created) throw new Error('settings.set: row vanished immediately after upsert');
       return created;
-    },
-
-    insertIfAbsent: async (key, value, encrypted = false) => {
-      const at = nowIso();
-      // `ON CONFLICT DO NOTHING` reports 0 changed rows when the key is taken,
-      // which is the whole answer — no read, no transaction.
-      return (
-        execute(
-          this.db,
-          `INSERT INTO app_settings (key, value_json, encrypted, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT (key) DO NOTHING`,
-          [key, JSON.stringify(value ?? null), encodeBool(encrypted), at, at],
-        ) > 0
-      );
-    },
-
-    replaceEncryptedIfMatches: async (key, expected, value) => {
-      const changed = execute(
-        this.db,
-        `UPDATE app_settings SET value_json = ?, updated_at = ?
-         WHERE key = ? AND encrypted = 1 AND value_json = ?`,
-        [JSON.stringify(value), nowIso(), key, JSON.stringify(expected)],
-      );
-      return changed > 0;
     },
 
     setMany: async (entries) => {

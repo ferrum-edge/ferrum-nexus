@@ -126,8 +126,7 @@
  *
  * No read projection shows `basicauth`, so for that type the mirror is the only
  * word on where an entry sits: a row's index is its place among the pair's
- * live rows in ordinal order ({@link resolveCredentialIndex}), and two rows
- * that predate the ordinal make that place unknowable. A positional delete is
+ * live rows in ordinal order ({@link resolveCredentialIndex}). A positional delete is
  * only as good as that word: one gateway entry the mirror does not know about
  * moves every index after it, and revoking the credential behind it then
  * deletes a different password and marks the requested row `revoked` while
@@ -213,16 +212,10 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { approvalGroupsForIdentity } from '../access/approval-groups.js';
-import {
-  AuditAction,
-  SYSTEM_ACTOR,
-  auditRowCommitted,
-  type AuditService,
-} from '../audit/service.js';
+import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
-  AuditLogRecord,
-  CreateInput,
+  CreateCredentialInput,
   CredentialFilter,
   CredentialRecord,
   GatewayIdentityRecord,
@@ -285,9 +278,6 @@ const LIVE_STATUSES = new Set<string>(LIVE_CREDENTIAL_STATUSES);
  * the consumer is still live (issue #598).
  */
 const CONFIRMED_ABSENCE = { confirmedAbsence: true } as const;
-const LEGACY_BASICAUTH_SCAN_SETTING = 'credentials.legacy_basicauth_scan_v1';
-/** What the owner sees on a placeholder the upgrade scan wrote. Never read back. */
-const LEGACY_PLACEHOLDER_LABEL = 'Unconfirmed HTTP Basic credential from an earlier release';
 /**
  * How many times one recovery sweep lists a status again because a key it
  * skipped changed under it, before it gives up and leaves the job to retry.
@@ -387,17 +377,6 @@ const UNLOCATED_CREDENTIAL_MESSAGE =
  */
 const CREDENTIAL_GONE_MESSAGE =
   'This credential is no longer on the gateway — it was removed outside the portal — so it has been marked revoked; issue a new one';
-
-/**
- * Raised when the target predates the append ordinal and shares that state
- * with another live row of its type, so its gateway position cannot be known.
- *
- * Not an Edge error: both sides are internally consistent, the portal simply
- * cannot say which entry is which. The fix is
- * {@link CredentialsService.reconcile}; see `operations.md` §12.
- */
-const AMBIGUOUS_MESSAGE =
-  'The gateway position of this credential cannot be determined: it predates the portal’s position tracking and shares that state with another live credential of the same type. An administrator must reconcile this consumer — clearing the credential type on the gateway and revoking its portal rows — after which new credentials can be issued';
 
 /**
  * Raised when a `basicauth` pair holds a `retiring` row: an earlier append or
@@ -567,21 +546,10 @@ export interface IssueForConsumerInput {
 /** The key {@link CredentialsService.restoreGatewayAccess} uses for the account's own identity. */
 const ACCOUNT_IDENTITY = 'account';
 
-/** Progress of the one-off legacy `basicauth` scan, for startup health. */
-export type LegacyBasicAuthScanState = 'pending' | 'completed' | 'failed';
-
 /** Credential operations. */
 export interface CredentialsService {
   /** Consumer provisioning, shared with the access service. */
   readonly provisioner: ConsumerProvisioner;
-  /**
-   * Idempotently marks pre-fix Basic Auth append orphans as unconfirmed. Runs
-   * once: a completed scan is recorded and later calls return at once. A scan
-   * that throws is not recorded, and runs again on the next call.
-   */
-  initializeLegacyBasicAuthPositions(): Promise<void>;
-  /** Whether that scan has completed, failed, or not yet run in this process. */
-  legacyBasicAuthScanState(): LegacyBasicAuthScanState;
   /**
    * Revoke every live credential after a reset proves the account's address.
    *
@@ -1169,25 +1137,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * Rows still occupying an Edge array slot, in array order.
    *
    * The store already returns this order; sorting again here keeps the
-   * invariant local to the code that depends on it. Rows without an ordinal
-   * precede every row with one — they were all appended before the counter
-   * existed — and are otherwise left in the store's tie-break order, which is
-   * meaningless for position and never read as such (see
-   * {@link resolveCredentialIndex}). `created_at` plays no part.
+   * invariant local to the code that depends on it. `created_at` plays no part.
    */
   async function liveRows(consumerId: string, type: CredentialType): Promise<CredentialRecord[]> {
     const rows = await store.credentials.listByConsumer(consumerId, type, LIVE_CREDENTIAL_STATUSES);
-    const live = rows.filter((row) => LIVE_STATUSES.has(row.status));
-    return live
-      .map((row, position) => ({ row, position }))
-      .sort((a, b) => {
-        if (a.row.edge_ordinal === null || b.row.edge_ordinal === null) {
-          if (a.row.edge_ordinal === b.row.edge_ordinal) return a.position - b.position;
-          return a.row.edge_ordinal === null ? -1 : 1;
-        }
-        return a.row.edge_ordinal - b.row.edge_ordinal;
-      })
-      .map((entry) => entry.row);
+    return rows
+      .filter((row) => LIVE_STATUSES.has(row.status))
+      .sort((a, b) => a.edge_ordinal - b.edge_ordinal);
   }
 
   /**
@@ -1212,20 +1168,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     // whole credential type: everything still live belongs to someone else's
     // successful operation.
     if (index === -1) return 'not-live';
-    // A target without an ordinal sits in the leading block of legacy rows.
-    // Alone there, it is index 0 whatever else is live; with company, its
-    // position within that block is unknowable and acting on `index` would be
-    // exactly the wrong-key deletion this module exists to prevent.
-    if (target.edge_ordinal === null) {
-      const unresolved = rows.filter((row) => row.edge_ordinal === null).length;
-      if (unresolved > 1) {
-        throw conflict(AMBIGUOUS_MESSAGE, {
-          consumer_id: target.ferrum_consumer_id,
-          credential_type: target.credential_type,
-          unresolved_credentials: unresolved,
-        });
-      }
-    }
     return index;
   }
 
@@ -2114,7 +2056,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
     const generated = generateCredential(input.type, input.consumerUsername);
     const fingerprint = crypto.fingerprint(generated.material);
-    const row: CreateInput<CredentialRecord> = {
+    const row: CreateCredentialInput = {
       user_id: input.ownerId,
       application_id: input.applicationId ?? null,
       ferrum_consumer_id: input.consumerId,
@@ -2382,154 +2324,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     });
   }
 
-  /** Where {@link CredentialsService.initializeLegacyBasicAuthPositions} got to. */
-  let legacyScanState: LegacyBasicAuthScanState = 'pending';
-
-  /**
-   * Walk every `credential.append_rollback` a release wrote for a `basicauth`
-   * entry it could not take back, and hold each one that may still be on the
-   * gateway without a row ({@link placeLegacyPlaceholder}).
-   *
-   * Paged, so the history is never held in memory; the store filters on the
-   * action and the two detail fields, so unrelated events are never read.
-   */
-  async function scanLegacyBasicAuthAppends(): Promise<void> {
-    let offset = 0;
-    while (true) {
-      const page = await store.auditLogs.list(
-        {
-          action: AuditAction.CREDENTIAL_APPEND_ROLLBACK,
-          details: { credential_type: 'basicauth', withdrawn: false },
-        },
-        { limit: MAX_PAGE_SIZE, offset },
-      );
-      for (const event of page.items) await placeLegacyPlaceholder(event);
-      if (page.items.length < MAX_PAGE_SIZE) return;
-      offset += page.items.length;
-    }
-  }
-
-  /**
-   * Write a `retiring` placeholder for one historical `basicauth` append that
-   * may still be on the gateway with no live row naming it.
-   *
-   * That is the event `v0.2.0` wrote with **no** `stranded_credential_id` — a
-   * lost acknowledgement ({@link reclaimUnacknowledgedAppend}) or a row write
-   * that failed after the append — and one whose stranded row is no longer
-   * live, so nothing still accounts for the entry. An event whose row is live
-   * is already held by that row. Nothing is written when a later reconcile or
-   * whole-type revoke of the consumer's `basicauth` already removed the entry,
-   * or when the placeholder exists: its fingerprint derives from the event id,
-   * so a re-run after a partial scan finds it, in any status.
-   *
-   * The row is attributed to the identity the consumer mapping names, falling
-   * back to the event's owner for a consumer with no mapping (a provider test
-   * consumer).
-   */
-  async function placeLegacyPlaceholder(event: AuditLogRecord): Promise<void> {
-    const details = event.details;
-    const consumerId = details.consumer_id;
-    if (typeof consumerId !== 'string') return;
-    const fingerprint = crypto.fingerprint(`legacy-unconfirmed:${event.id}`);
-    await edge.serializePerKey(consumerId, async () => {
-      if (await store.credentials.findByFingerprint(fingerprint)) return;
-      const stranded = details.stranded_credential_id;
-      if (typeof stranded === 'string') {
-        const row = await store.credentials.findById(stranded);
-        if (row && LIVE_STATUSES.has(row.status)) return;
-      }
-      if (await basicAuthClearedSince(consumerId, event.created_at)) return;
-      const mapping = await store.consumers.findByFerrumId(consumerId);
-      const eventOwner =
-        typeof details.owner_user_id === 'string' ? details.owner_user_id : event.actor_user_id;
-      const ownerId = mapping?.user_id ?? eventOwner;
-      if (!ownerId || !(await store.users.findById(ownerId))) return;
-      const last4Seen = typeof details.last4 === 'string' ? details.last4 : '????';
-      await store.transaction(async (tx) => {
-        const placeholder = await tx.credentials.create({
-          user_id: ownerId,
-          application_id: mapping?.application_id ?? null,
-          ferrum_consumer_id: consumerId,
-          credential_type: 'basicauth',
-          ferrum_credential_id: `${consumerId}/credentials/basicauth`,
-          fingerprint,
-          last4: last4Seen,
-          label: LEGACY_PLACEHOLDER_LABEL,
-          status: 'retiring',
-          rotated_from_id: null,
-        });
-        await audit.forStore(tx).record(
-          SYSTEM_ACTOR,
-          AuditAction.CREDENTIAL_LEGACY_PLACEHOLDER,
-          { type: 'credential', id: placeholder.id },
-          {
-            credential_type: 'basicauth',
-            consumer_id: consumerId,
-            last4: last4Seen,
-            owner_user_id: ownerId,
-            source_event_id: event.id,
-          },
-          null,
-        );
-      });
-    });
-  }
-
-  /**
-   * Whether a reconcile of `consumerId`'s `basicauth`, or a whole-type
-   * `basicauth` revoke on it, was recorded after `since` — either of which
-   * emptied the type on the gateway and took any older orphan with it.
-   * Both reads filter on `credential_type`: a whole-type `keyauth` or `jwt`
-   * revoke on the same consumer removed no `basicauth` entry.
-   *
-   * Each is one filtered, newest-first read of a single row.
-   */
-  async function basicAuthClearedSince(consumerId: string, since: string): Promise<boolean> {
-    const reconciled = await store.auditLogs.list(
-      {
-        action: AuditAction.CREDENTIAL_RECONCILE,
-        from: since,
-        details: { consumer_id: consumerId, credential_type: 'basicauth' },
-      },
-      { limit: 1, offset: 0 },
-    );
-    if (reconciled.items.some((row) => row.created_at > since)) return true;
-    const revoked = await store.auditLogs.list(
-      {
-        action: AuditAction.CREDENTIAL_REVOKE,
-        from: since,
-        details: { consumer_id: consumerId, credential_type: 'basicauth', scope: 'whole-type' },
-      },
-      { limit: 1, offset: 0 },
-    );
-    return revoked.items.some((row) => row.created_at > since);
-  }
-
   return {
     provisioner,
     issueForConsumer,
-
-    async initializeLegacyBasicAuthPositions(): Promise<void> {
-      try {
-        if (await store.settings.get(LEGACY_BASICAUTH_SCAN_SETTING)) {
-          legacyScanState = 'completed';
-          return;
-        }
-        await scanLegacyBasicAuthAppends();
-        // Only a scan that reached the end is recorded: one that failed part
-        // way through runs again from the start on the next boot, and every
-        // placeholder it already wrote is found by its fingerprint.
-        await store.settings.insertIfAbsent(LEGACY_BASICAUTH_SCAN_SETTING, { completed: true });
-        legacyScanState = 'completed';
-      } catch (error) {
-        legacyScanState = 'failed';
-        throw error;
-      }
-    },
-
-    legacyBasicAuthScanState(): LegacyBasicAuthScanState {
-      return legacyScanState;
-    },
 
     async revokeForAccountRecovery(user, ip = null, cutoff = null): Promise<number> {
       const consumerIds = new Set<string>();
@@ -3856,25 +3653,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // the create never landed.
       //
       // A registration that stopped before even that — claimed, nothing asked
-      // for yet — is resolved by the id the username derives to, which is the
-      // id the *first* consumer of a name always carries, and only an identity
-      // older than that derivation falls through to the capped scan. Past the
-      // cap the scan throws rather than answering "not found", so the caller
-      // keeps the registration intact instead of closing over a consumer
-      // nobody looked at.
-      //
-      // No registration at all is still worth one derived-id read: it is what
-      // an identity stranded before #139 was fixed looks like, and one `GET`
-      // is what it takes to collect it rather than leave it on the gateway for
-      // good. Never the scan in that case — there is nothing to say a consumer
-      // was ever created, so a namespace-wide read would be paid on every
-      // deletion of an API that simply never had a test consumer.
-      const live = !current
-        ? await edge.consumers.get(edge.consumers.derivedId(username), CONFIRMED_ABSENCE)
-        : current.ferrum_consumer_id !== null
-          ? await edge.consumers.get(current.ferrum_consumer_id, CONFIRMED_ABSENCE)
-          : ((await edge.consumers.get(edge.consumers.derivedId(username), CONFIRMED_ABSENCE)) ??
-            (await edge.consumers.getByUsername(username)));
+      // for yet — and no registration at all are both resolved by the id the
+      // username derives to, which is the id the *first* consumer of a name
+      // always carries ({@link FerrumAdminClient.consumers} `ensure` creates
+      // under it). One `GET`, on a gateway of any size.
+      const live = await edge.consumers.get(
+        current?.ferrum_consumer_id ?? edge.consumers.derivedId(username),
+        CONFIRMED_ABSENCE,
+      );
       let revoked = 0;
       if (live) {
         // Name, then id — the order creation takes the two keys in. A test
