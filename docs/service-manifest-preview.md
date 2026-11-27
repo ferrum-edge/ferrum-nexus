@@ -10,7 +10,7 @@ That tag keeps v1 but narrows it to what Alloy's export and Edge accept
 (ferrum-contracts#74 and #82): Edge's field bounds, control-character and reserved
 path-character rules (`;`, `%`, `\`, `.` segments), and cleartext telemetry only to a
 loopback IP literal. It adds the shared valid fixtures `edge-limits.json` and
-`unicode-host.json` and 18 invalid fixtures, and moves `valid/orders-api.json` to an
+`unicode-host.json` and 17 invalid fixtures, and moves `valid/orders-api.json` to an
 `https://` exporter.
 The vendored [`PIN`](../contracts/ferrum-contracts/PIN) records SHA-256 for the
 schema, every shared manifest fixture and the shared expectations, with every other

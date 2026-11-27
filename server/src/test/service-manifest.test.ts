@@ -9,7 +9,6 @@ import { buildTestApp } from './helpers.js';
 const CHECKSUM_LINE = /^([a-f0-9]{64})  (.+)$/;
 const MANIFEST_FILE = /service-manifest\/|^fixtures\/invalid-expectations\.json$/;
 
-const CLEARTEXT_REFUSED = /must use https unless its host is a loopback IP literal/;
 const RESOURCE_REFERENCE = /resource reference exceeds the limit/;
 
 const root = new URL('../../../contracts/ferrum-contracts/', import.meta.url);
@@ -48,11 +47,11 @@ describe('published immutable service-manifest consumer', () => {
       .map((line) => CHECKSUM_LINE.exec(line))
       .filter((match): match is RegExpExecArray => match !== null)
       .filter(([, , path]) => MANIFEST_FILE.test(path ?? ''));
-    // The schema, the shared invalid expectations, and 5 valid and 27 invalid
+    // The schema, the shared invalid expectations, and 5 valid and 26 invalid
     // fixtures (contracts-edge-0.9.21 added `edge-limits.json`,
-    // `unicode-host.json` and 18 invalid fixtures for Edge's field limits,
+    // `unicode-host.json` and 17 invalid fixtures for Edge's field limits,
     // control characters, reserved path characters and cleartext telemetry).
-    assert.equal(manifestRows.length, 34);
+    assert.equal(manifestRows.length, 33);
     for (const [, digest, path] of manifestRows) {
       assert.ok(path);
       assert.equal(
@@ -145,7 +144,11 @@ describe('published immutable service-manifest consumer', () => {
       // Not White_Space, so Edge keeps it in the written authority.
       'http://127.0.0.1\ufeff',
     ]) {
-      assert.throws(() => validatedManifest(withEndpoint(refused)), CLEARTEXT_REFUSED, refused);
+      // The pinned schema states Edge's rule since contracts-edge-0.9.21
+      // (ferrum-contracts#82), so it refuses these before the preview's own
+      // check, which stays as a second line.
+      assert.equal(manifestValidator.safeParse(withEndpoint(refused)).success, false, refused);
+      assert.throws(() => validatedManifest(withEndpoint(refused)), refused);
     }
     // The pinned schema pattern runs first: `.` stops at a line terminator, so
     // a separator after a path is refused before Edge's trim could apply.
