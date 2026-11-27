@@ -370,12 +370,12 @@ export interface MockFerrumEdge {
    * /consumers/{id}/credentials/{type}` and `DELETE .../{type}/{index}`) treat
    * `If-Match`:
    *
-   * - `'evaluate'` (the default) models ferrum-edge#7393: the tag is compared
-   *   with the Consumer's own `ETag`, and a stale one is refused with `412`
-   *   and nothing written;
-   * - `'unsupported'` models Edge v0.9.20, the pinned release: the router
-   *   refuses the header with `400` before reading the consumer or writing
-   *   anything.
+   * - `'evaluate'` (the default) models Edge v0.9.21, the pinned release
+   *   (ferrum-edge#7393): the tag is compared with the Consumer's own `ETag`,
+   *   and a stale one is refused with `412` and nothing written;
+   * - `'unsupported'` models Edge v0.9.20 and earlier, which Nexus refuses:
+   *   the router refuses the header with `400` before reading the consumer
+   *   or writing anything.
    *
    * Omitting the header keeps either write unconditional. `reset()` restores
    * `'evaluate'`.
@@ -739,7 +739,6 @@ const PROXY_KEYS = new Set([
   'pool_http2_max_frame_size',
   'pool_http2_max_concurrent_streams',
   'pool_http3_connections_per_backend',
-  'pool_max_requests_per_connection',
   'upstream_id',
   'upstream_subset',
   'api_spec_id',
@@ -894,9 +893,9 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
   ],
   request_size_limiting: ['max_bytes'],
   response_size_limiting: ['max_bytes', 'require_buffered_check'],
-  // Edge main (after v0.9.20) refuses `ip_restriction.mode` and the two
-  // `response_caching` cache-key switches as unknown keys (issue #727); the
-  // mock refuses them too, so no test can pass on a body the next Edge refuses.
+  // Edge v0.9.21 refuses `ip_restriction.mode` and the two `response_caching`
+  // cache-key switches as unknown keys (issue #727, ferrum-edge#7114); the
+  // mock refuses them too, so no test can pass on a body Edge refuses.
   ip_restriction: ['allow', 'deny'],
   bot_detection: [
     'blocked_patterns',
@@ -2217,7 +2216,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return {
       gateway: {
         mode: 'database',
-        ferrum_version: '0.9.20',
+        ferrum_version: '0.9.21',
         uptime_seconds: MOCK_GATEWAY_UPTIME_SECONDS,
         total_requests: totalRequests,
         proxy_count: proxies.size,
@@ -2490,8 +2489,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return fail(res, 405, 'Method not allowed');
     }
 
-    // Edge v0.9.20's router refuses `If-Match` on every mutating route that
-    // does not evaluate it, before dispatch: nothing is read or written.
+    // Edge v0.9.20's router (and every earlier release's) refuses `If-Match`
+    // on every mutating route that does not evaluate it, before dispatch:
+    // nothing is read or written.
     if (
       credentialIfMatch === 'unsupported' &&
       credentialsSegment === 'credentials' &&

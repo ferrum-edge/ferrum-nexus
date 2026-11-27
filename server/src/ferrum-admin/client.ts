@@ -644,11 +644,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * The start of the `400` that Ferrum Edge releases before ferrum-edge#7393
- * (v0.9.20, the pinned release, included) answer to `If-Match` on a consumer
- * credential route. Their router refuses the header before dispatch, so
- * nothing was written.
+ * (v0.9.20 and earlier) answer to `If-Match` on a consumer credential route.
+ * Their router refuses the header before dispatch, so nothing was written.
+ * Edge v0.9.21, the first release Nexus supports, evaluates it.
  */
 const IF_MATCH_UNSUPPORTED = 'If-Match is only supported on';
+
+/** What an Edge older than v0.9.21 is told when it refuses a conditional credential write. */
+const EDGE_TOO_OLD_FOR_CREDENTIAL_WRITES =
+  'The gateway refused If-Match on a consumer credential change, so nothing was changed. ' +
+  'Nexus requires Ferrum Edge v0.9.21 or later, which evaluates it (ferrum-edge#7393)';
 
 /** Edge's router refusal of `If-Match` on a route that does not evaluate it. */
 function isIfMatchUnsupportedRefusal(parsed: unknown): boolean {
@@ -659,13 +664,10 @@ function isIfMatchUnsupportedRefusal(parsed: unknown): boolean {
   );
 }
 
-/** Credential writes an Edge without the credential precondition refused for their `If-Match`. */
-const IF_MATCH_UNSUPPORTED_ERRORS = new WeakSet<object>();
-
-/** Errors a conditional credential write raised before anything was sent. */
+/** Errors of a conditional credential write that certainly wrote nothing. */
 const CREDENTIAL_WRITE_NOT_APPLIED = new WeakSet<object>();
 
-/** Mark `error` as raised before any credential write was sent, and return it. */
+/** Mark `error` as one after which no credential write ran, and return it. */
 function notApplied(error: unknown): unknown {
   if (typeof error === 'object' && error !== null) CREDENTIAL_WRITE_NOT_APPLIED.add(error);
   return error;
@@ -680,10 +682,8 @@ const CONSUMER_ROW_CHANGED_MESSAGE = 'The gateway consumer changed; read it agai
 
 /**
  * Whether a consumer write was refused because the Consumer changed after the
- * read its `If-Match` came from: Edge's `412`, or, on an Edge that does not
- * evaluate `If-Match` on credential routes, a re-read whose tag no longer
- * matched. Either way nothing was written. The caller reads again and decides
- * again; it never resends the same write.
+ * read its `If-Match` came from: Edge's `412`. Nothing was written. The
+ * caller reads again and decides again; it never resends the same write.
  */
 export function consumerPreconditionFailed(error: unknown): boolean {
   return (
@@ -697,9 +697,9 @@ export function consumerPreconditionFailed(error: unknown): boolean {
 /**
  * Whether a conditional credential write certainly wrote nothing: a refused
  * precondition ({@link consumerPreconditionFailed}), or a failure before the
- * write was sent — an unusable tag, or, on an Edge that refuses `If-Match` on
- * credential routes, a re-read that could not verify the tag (issue #737).
- * Any other failure may still have applied and is an unknown outcome.
+ * write was sent — an unusable tag — or refused by an Edge older than v0.9.21,
+ * whose router turns `If-Match` on credential routes away before acting. Any
+ * other failure may still have applied and is an unknown outcome.
  *
  * It proves only that this write did not run. A `412` means another writer
  * changed the consumer, possibly by removing the very entry the write was
@@ -1502,6 +1502,9 @@ export function createFerrumAdminClient(
   /** Whether the last `GET /version` was refused with `403`; logged once per transition. */
   let versionRefused = false;
 
+  /** Whether this client logged an Edge older than v0.9.21 refusing credential `If-Match`. */
+  let ifMatchUnsupportedLogged = false;
+
   /**
    * `GET /version`, best effort. Edge has no such endpoint and answers `404`
    * (or `405`), which reads `null`. Edge v0.9.17 answers an unknown global path
@@ -1695,14 +1698,24 @@ export function createFerrumAdminClient(
       CONSUMER_CREDENTIALS_PATH.test(path) &&
       isIfMatchUnsupportedRefusal(parsed)
     ) {
-      // Not logged as a failure: the conditional write falls back to a
-      // verified re-read (see `conditionalCredentialWrite`).
-      const refusal = edgeError('The gateway does not evaluate If-Match on this route', {
-        status: statusCode,
-        kind: 'if_match_unsupported',
-      });
-      IF_MATCH_UNSUPPORTED_ERRORS.add(refusal);
-      throw refusal;
+      // An Edge older than v0.9.21 (ferrum-edge#7393). Its router refused the
+      // header before acting, so nothing was written; Nexus never resends the
+      // write without it, since only Edge's precondition pins the entries the
+      // caller decided from. Logged once: it is a deployment problem.
+      if (!ifMatchUnsupportedLogged) {
+        ifMatchUnsupportedLogged = true;
+        logger.error(
+          { path: '/consumers/{id}/credentials', status: statusCode },
+          'Ferrum Edge does not evaluate If-Match on consumer credential writes; ' +
+            'upgrade the gateway to Ferrum Edge v0.9.21 or later (ferrum-edge#7393)',
+        );
+      }
+      throw notApplied(
+        edgeError(EDGE_TOO_OLD_FOR_CREDENTIAL_WRITES, {
+          status: statusCode,
+          kind: 'if_match_unsupported',
+        }),
+      );
     }
     if (statusCode >= 400 && !contract.statuses.includes(statusCode)) {
       const quiet = options.quiet === true || (options.quiet ?? []).includes(statusCode);
@@ -2126,33 +2139,26 @@ export function createFerrumAdminClient(
     return { consumer, etag };
   }
 
-  /** Whether the "fell back to a re-read" warning was logged by this client. */
-  let ifMatchFallbackLogged = false;
-
   /**
    * A consumer credential write conditioned on the Consumer `ETag` of the read
-   * the caller decided it from (ferrum-edge#7393).
+   * the caller decided it from (ferrum-edge#7393, Edge v0.9.21).
    *
    * Credential entries have no id, and reads redact them, so an index (or a
    * decision to empty a type) names the right entries only in the array that
-   * read returned. Edge with ferrum-edge#7393 compares `If-Match` with the
-   * Consumer's own tag under its admission lease and answers `412` if anything
-   * about the Consumer changed; {@link classify} turns that into a
-   * `precondition_failed` `CONFLICT` ({@link consumerPreconditionFailed}).
-   * Nothing is resent: the caller reads again and decides again.
+   * read returned. Edge compares `If-Match` with the Consumer's own tag under
+   * its admission lease and answers `412` if anything about the Consumer
+   * changed; {@link classify} turns that into a `precondition_failed`
+   * `CONFLICT` ({@link consumerPreconditionFailed}). Nothing is resent: the
+   * caller reads again and decides again.
    *
-   * Edge v0.9.20, the pinned release, refuses `If-Match` on these routes with a
-   * `400` from its router, before acting. That answer falls back to a verified
-   * re-read: the Consumer is read again, the write is refused with the same
-   * `CONFLICT` unless that read carries the caller's tag (or the Consumer is
-   * gone), and only then is the write sent without `If-Match`. That narrows
-   * the race from "since the caller's read" to the moment between the re-read
-   * and the write; only the Edge precondition closes it.
+   * An Edge older than v0.9.21 refuses `If-Match` on these routes with a `400`
+   * from its router, before acting. That is refused here as a definite
+   * non-write ({@link credentialWriteNotApplied}) naming the Edge release
+   * Nexus requires; the write is never sent without the header.
    */
   async function conditionalCredentialWrite<T>(
-    consumerId: string,
     ifMatch: string,
-    send: (ifMatch: string | undefined) => Promise<T>,
+    send: (ifMatch: string) => Promise<T>,
   ): Promise<T> {
     if (!isStrongRowTag(ifMatch)) {
       throw notApplied(
@@ -2162,33 +2168,7 @@ export function createFerrumAdminClient(
         ),
       );
     }
-    try {
-      return await send(ifMatch);
-    } catch (error) {
-      if (!(error instanceof Error) || !IF_MATCH_UNSUPPORTED_ERRORS.has(error)) throw error;
-    }
-    if (!ifMatchFallbackLogged) {
-      ifMatchFallbackLogged = true;
-      logger.warn(
-        { path: '/consumers/{id}/credentials' },
-        'Ferrum Edge does not evaluate If-Match on consumer credential writes ' +
-          '(ferrum-edge#7393); re-reading the consumer to verify its tag instead',
-      );
-    }
-    // Until the unconditional write below is sent, nothing has been written:
-    // the router refused the conditional one before acting. A re-read that
-    // fails (unreachable, untagged, a protocol error) says so too, rather
-    // than passing for a write whose outcome is unknown.
-    let current: Awaited<ReturnType<typeof readTaggedConsumer>>;
-    try {
-      current = await readTaggedConsumer(consumerId, true);
-    } catch (error) {
-      throw notApplied(error);
-    }
-    if (current === null || current.etag !== ifMatch) {
-      throw conflict(CONSUMER_CHANGED_MESSAGE, { kind: 'precondition_failed' });
-    }
-    return send(undefined);
+    return send(ifMatch);
   }
 
   /**
@@ -2698,9 +2678,7 @@ export function createFerrumAdminClient(
         const path = `/consumers/${encodeURIComponent(id)}/credentials/${type}`;
         const send = (tag: string | undefined): Promise<EdgeConsumer> =>
           callRequired<EdgeConsumer>('POST', path, { body: entry, subject, ifMatch: tag });
-        return ifMatch === undefined
-          ? send(undefined)
-          : conditionalCredentialWrite(id, ifMatch, send);
+        return ifMatch === undefined ? send(undefined) : conditionalCredentialWrite(ifMatch, send);
       },
 
       async deleteCredentialAt(
@@ -2711,7 +2689,7 @@ export function createFerrumAdminClient(
         ifMatch: string,
       ): Promise<EdgeConsumer> {
         const path = `/consumers/${encodeURIComponent(id)}/credentials/${type}/${index}`;
-        return conditionalCredentialWrite(id, ifMatch, (tag) =>
+        return conditionalCredentialWrite(ifMatch, (tag) =>
           callRequired<EdgeConsumer>('DELETE', path, { subject, ifMatch: tag }),
         );
       },
@@ -2727,7 +2705,7 @@ export function createFerrumAdminClient(
           await call('DELETE', path, { subject, ifMatch: tag });
         };
         if (ifMatch === undefined) await send(undefined);
-        else await conditionalCredentialWrite(id, ifMatch, send);
+        else await conditionalCredentialWrite(ifMatch, send);
       },
     },
 

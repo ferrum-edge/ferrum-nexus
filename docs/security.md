@@ -1373,9 +1373,10 @@ of its secret, and deletes at that read's index with that read's consumer
 `ETag` as `If-Match`. No stored or remembered index ever chooses what is
 deleted. A secret on more than one entry, or a consumer that cannot be read, is
 refused with nothing sent. The secrets in that read stay inside the request.
-On Edge v0.9.20, which does not evaluate `If-Match` on credential routes, Nexus
-verifies the tag with a re-read first; a change between that re-read and the
-delete is the one window left, closed by ferrum-edge#7393.
+Edge v0.9.21 evaluates that `If-Match` against the consumer's own `ETag`
+(ferrum-edge#7393) and refuses a consumer that changed since the read with `412`,
+deleting nothing. An older Edge refuses the header itself; Nexus treats that as
+a refusal and never sends the delete without it, so Nexus requires Edge v0.9.21.
 
 **A row changes state only on that evidence.**
 
@@ -2177,7 +2178,7 @@ cutover use Edge's conditional deployment protocol; a `412` or a `507` keeps the
 journal, and no fresh-token retry or unconditional fallback is allowed. Journal
 custody is described in
 [Gateway recovery journals](operations.md#gateway-recovery-journals), the
-protocol in the [released protocol and replay limits](edge-conversion-recovery-blocker.md).
+protocol in the [released protocol and replay limits](conversion-recovery-protocol.md).
 To resolve an unconfirmed mutation, follow the
 [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
 

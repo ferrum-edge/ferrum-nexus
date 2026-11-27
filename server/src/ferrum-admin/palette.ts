@@ -126,8 +126,8 @@ export function edgeTriggerFor(trigger: ApiPluginTrigger | null): EdgePluginTrig
  * endpoint is folded in here rather than being stored on the row. Every other
  * plugin is written as the provider configured it, less any key Edge has
  * removed: a row saved before the palette dropped one (`ip_restriction.mode`)
- * is replayed without it, so a rebuild never writes what the next Edge
- * release refuses (issue #727).
+ * is replayed without it, so a rebuild never writes what Edge v0.9.21 refuses
+ * (issue #727).
  */
 export function paletteGatewaySettings(
   pluginName: string,

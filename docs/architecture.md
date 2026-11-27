@@ -478,7 +478,7 @@ Admin/traffic identity, or a control plane whose data-plane attestation covers a
 least `NEXUS_EXPECTED_DATA_PLANES` settled data planes. See
 [`operations.md`](operations.md#backend-egress-admission-and-the-public-only-guarantee)
 for the topology and [gateway recovery journals](operations.md#gateway-recovery-journals),
-and the [released recovery protocol](edge-conversion-recovery-blocker.md).
+and the [released recovery protocol](conversion-recovery-protocol.md).
 
 ### 5.3 The plugin naming trap
 
@@ -1392,5 +1392,5 @@ are never interpreted as omission. Local presentation/reference budgets further 
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
 and has no store, gateway, network or source-file reader dependency. The shared v1 format
-is implemented in published `contracts-edge-0.9.20`. Preview cannot invoke publishing or
+is implemented in published `contracts-edge-0.9.21`. Preview cannot invoke publishing or
 install agent policy.

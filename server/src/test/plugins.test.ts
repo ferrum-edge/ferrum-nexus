@@ -275,8 +275,8 @@ describe('provider plugin palette', () => {
       });
     });
 
-    // Issue #727: `mode` decided nothing, and the next Edge release refuses it
-    // as an unknown key, so a save carrying it is refused before any write.
+    // Issue #727: `mode` decided nothing, and Edge v0.9.21 refuses it as an
+    // unknown key, so a save carrying it is refused before any write.
     it('ip_restriction: refuses the removed mode key before touching the gateway', async () => {
       const before = harness.edge.requests.length;
       const response = await setPlugin('ip_restriction', {
@@ -1574,7 +1574,7 @@ describe('provider plugin palette', () => {
     /**
      * Put back what an earlier release left on an `ip_restriction` save: the
      * row and the gateway config both carrying `mode`, which the palette no
-     * longer accepts and the mock (like Edge after v0.9.20) refuses on write.
+     * longer accepts and the mock (like Edge v0.9.21) refuses on write.
      */
     async function seedLegacyIpRestriction(): Promise<Record<string, unknown>> {
       const saved = await setPlugin('ip_restriction', { config: { allow: ['203.0.113.0/24'] } });
