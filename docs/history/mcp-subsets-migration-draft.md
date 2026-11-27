@@ -1,5 +1,7 @@
 # MCP subset rollout and exposure identities
 
+> **Historical record.** The `v0.4.0` rollout of MCP tool subsets; the enrollment and exposure-identity rules below still describe current behaviour, and [the agent marketplace](../agent-marketplace.md) is the live guide.
+
 Nexus `v0.4.0` ships the optional tool subsets tracked by
 [#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446), implemented in
 [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519). This page describes the
@@ -9,8 +11,8 @@ upgrade to `v0.4.0` required.
 > **Historical for upgrades.** Since `v0.6.0` there is no upgrade path before 1.0: a
 > database written by an earlier release is refused, not migrated, and the base schema
 > already has the tool columns (see
-> [schema and upgrades before 1.0](operations.md#schema-and-upgrades-before-10) and
-> [moving to a new release](operations.md#moving-to-a-new-release)). The enrollment and
+> [schema and upgrades before 1.0](../operations.md#schema-and-upgrades-before-10) and
+> [moving to a new release](../operations.md#moving-to-a-new-release)). The enrollment and
 > exposure-identity rules below still describe how subsets behave; the migration and
 > writer-drain steps applied to the `v0.4.0` upgrade only.
 
@@ -47,7 +49,7 @@ agent APIs, obtain each provider's authenticated save or republish, then qualify
 discovery and calls using the pinned acceptance suite before allowing subset requests.
 Retained APIs continue their phase-1 all-tools behavior until that opt-in write.
 
-Follow the [supported topology](operations.md#supported-topologies): exactly one
+Follow the [supported topology](../operations.md#supported-topologies): exactly one
 active Nexus instance may perform gateway mutations. Lease fencing and transaction
 queues do not promise global consistency across independent store objects or make
 mixed writers safe.
@@ -71,7 +73,7 @@ does not end at an object, or reaching a `$id`, `$dynamicRef` or `$recursiveRef`
 member) folds in the whole document except `info`, hashed as text; an unresolvable
 selected Path Item or a document whose reading and hashing pass the work budget
 hashes every tool from its selection and that digest. See
-[agent-marketplace.md](agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)
+[agent-marketplace.md](../agent-marketplace.md#optional-subsets-and-cross-repository-follow-up)
 for the exact cases.
 
 A tool keeps its ID across a spec revision, a rollback or an agents edit only while

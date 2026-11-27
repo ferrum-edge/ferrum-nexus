@@ -3,7 +3,7 @@
 > **Historical record.** This is the 2026-09-07 preparation record of
 > [PR #166](https://github.com/ferrum-edge/ferrum-nexus/pull/166), which merged. Every version
 > it names has since moved on, and its "draft" is that PR; read `package.json`, the lockfile
-> and [CHANGELOG.md](../CHANGELOG.md) for what Nexus uses now. The log path it cites is outside
+> and [CHANGELOG.md](../../CHANGELOG.md) for what Nexus uses now. The log path it cites is outside
 > this repository.
 
 Metadata and public advisories checked on 2026-09-07. The baseline is

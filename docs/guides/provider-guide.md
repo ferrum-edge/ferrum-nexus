@@ -37,7 +37,10 @@ other people's APIs from the same account.
    settings.
 4. Choose **Publish API**.
 
-If any step fails, everything created is removed and nothing is saved.
+If any step fails, Nexus removes what it created on the gateway and saves nothing.
+If that removal fails too, or the server stops partway, a proxy can be left on the
+gateway; an administrator finds and removes it (see
+[when a gateway change cannot be taken back](../operations.md#when-a-gateway-change-cannot-be-taken-back)).
 
 ### What the document must contain
 
@@ -227,7 +230,7 @@ including the new name of a tool you renamed.
 Older requests and grants show tool IDs that no longer exist as expired.
 
 APIs published before tool subsets must be republished once before accepting subsets.
-Review the [upgrade tradeoff](../mcp-subsets-migration-draft.md) before rollout.
+Review the [upgrade tradeoff](../history/mcp-subsets-migration-draft.md) before rollout.
 
 The complete subset rules are in the
 [API reference](../api.md#optional-mcp-access-subsets); see also the

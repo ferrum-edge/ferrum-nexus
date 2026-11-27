@@ -12,7 +12,7 @@ commit as `durable` `not_started` or `not_committed` instead of `unknown`. Nexus
 pairs with [Edge v0.9.15](https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15) and
 `contracts-edge-0.9.15`, whose deployment mutation sources and schemas are unchanged, and
 Nexus `v0.6.0` pairs with Edge v0.9.20 and `contracts-edge-0.9.20`, also unchanged. See the
-[artifact identities](edge-0.9.11-adoption.md). To resolve an
+[artifact identities](history/edge-0.9.11-adoption.md). To resolve an
 unconfirmed mutation, follow the
 [operator runbook](operations.md#resolving-an-unconfirmed-gateway-deployment-mutation).
 
@@ -112,7 +112,10 @@ restore remains an operator recovery contract and is never a conversion fallback
 ## Test coverage
 
 The four Nexus adapter contracts exercise production service paths with the
-released HTTP mock; it does not reproduce owner raw SQL/BSON internals. Packaged
-acceptance tests real v0.9.13 conversion traffic, preservation of complete consumer/
-trust/upstream evidence, stale original-token refusal and invalid conditional modes.
+released HTTP mock; it does not reproduce owner raw SQL/BSON internals. The packaged
+acceptance suite runs real conversion traffic against the Edge release pinned in the
+checkout's [compatibility record](../release/compatibility.env) (Edge v0.9.13 when this
+protocol was first qualified, for Nexus `v0.4.0`), and checks preservation of complete
+consumer/trust/upstream evidence, stale original-token refusal and invalid conditional
+modes.
 Owner-side store behaviour is covered by Edge's own native store tests, not by Nexus.

@@ -1387,7 +1387,7 @@ for the supported combination and the upgrade steps.
   journaled, restore and rollback completion re-read the stored journal, and an
   [operator runbook](docs/operations.md#resolving-an-unconfirmed-gateway-deployment-mutation)
   covers unconfirmed mutations. See the
-  [released protocol and replay limits](docs/edge-conversion-recovery-blocker.md).
+  [released protocol and replay limits](docs/conversion-recovery-protocol.md).
 
 - **Optional MCP tool subsets** (Refs #446). Consumers request published exposure IDs;
   providers can narrow approval. Separate MCP-all/per-tool groups preserve REST access
@@ -1395,7 +1395,7 @@ for the supported combination and the upgrade steps.
   empty means REST-only. Migration 011 covers all four stores. Exposure changes fail
   closed. Existing phase-1 APIs require provider opt-in before explicit subsets;
   deployment must stop and drain older writers and cannot roll back while subset
-  grants exist. Read the [rollout notes](docs/mcp-subsets-migration-draft.md)
+  grants exist. Read the [rollout notes](docs/history/mcp-subsets-migration-draft.md)
   and spec-change tradeoff before deployment.
 - **Redacted service-manifest preview** (Refs ferrum-edge/ferrum-alloy#27, Nexus portion).
   Authenticated namespace-authorized bounded intake validates the exact immutable
@@ -1428,7 +1428,7 @@ for the supported combination and the upgrade steps.
   PR #529 advanced both to `v0.9.13`. Nexus `v0.4.0` pairs with Edge `v0.9.13`
   only. Read [Upgrading to Edge v0.9.13](docs/operations.md#upgrading-to-edge-v0913)
   first: settle every conversion and restore journal before upgrading Edge, and
-  upgrade both sides in one window. See [adoption facts](docs/edge-0.9.11-adoption.md).
+  upgrade both sides in one window. See [adoption facts](docs/history/edge-0.9.11-adoption.md).
   - **Egress policy schema 2.** Nexus reads `schema_version: 2`, whose
     `public_only_guaranteed` is true only for `local-data-plane`; schema 1 (Edge
     v0.9.12 and earlier) is refused as `unsupported_egress_policy_schema`. The
@@ -1478,7 +1478,7 @@ for the supported combination and the upgrade steps.
   jest-dom 7 matcher augmentation. An optional read-only hosted workflow
   produces both npm locks with immutable input/output provenance. This was
   first-stage progress: that stage retained jsdom 26, Undici 7, Node 22.14
-  support and runtime image pins. See [migration notes](docs/dependency-majors-449.md).
+  support and runtime image pins. See [migration notes](docs/history/dependency-majors-449.md).
 
 - **Returning SSO authorization and deployment boundaries are clarified** (#515).
   Returning callbacks keep their account-only lease and authorize at the

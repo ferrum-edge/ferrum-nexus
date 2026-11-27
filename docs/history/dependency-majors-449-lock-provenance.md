@@ -1,5 +1,7 @@
 # Hosted lock provenance for issue #449
 
+> **Historical record.** The hosted-lock provenance for issue #449 (released in `v0.4.0`); the current lockfiles are the record now.
+
 Nexus `v0.4.0` released jsdom 30.1.2 / Undici 8.11.2 and the supported Node range
 `^22.22.2 || ^24.15.0 || >=26.0.0`; releases before it keep their Node 22.14+ profile. The
 records below are the historical lock provenance for that change.

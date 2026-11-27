@@ -27,26 +27,36 @@ row before calling Edge.
 
 ## Development status
 
-`v0.6.0` is the current release, paired with Ferrum Edge `v0.9.20`; `v0.1.0` was the
-first supported release. `v0.6.0` folds every earlier migration into one base schema
-and does not open a database an earlier version created. The
-[release notes](docs/release-notes.md) list the supported pair, how to move from
-`v0.5.2` (a new, empty database), and the known limitations; see also
-[upgrading to Edge v0.9.20](docs/operations.md#upgrading-to-edge-v0920).
+As of 2026-11-22 the latest published release is `v0.6.0`, paired with Ferrum Edge
+`v0.9.20`; `v0.1.0` was the first supported release. The
+[releases page](https://github.com/ferrum-edge/ferrum-nexus/releases) lists every release, and the
+[release notes](docs/release-notes.md) give each one's supported Ferrum Edge release,
+upgrade steps and known limitations.
+
+**Versioning.** Nexus follows [semantic versioning](https://semver.org/). Before
+`1.0.0`, a minor release may change behaviour incompatibly, and its release notes say
+what changed and what to do. From `1.0.0` onward, an incompatible change to the documented
+`/api` surface or to configuration ships only in a new major release, after a deprecation
+named in the release notes; surfaces documented as preview are excluded. Each release
+supports exactly one Ferrum Edge release, recorded in its
+[compatibility record](release/compatibility.env). Security support is in
+[SECURITY.md](SECURITY.md), and the standing limits are in
+[known limitations](docs/known-limitations.md).
 
 Since `v0.4.0` the supported Node range is `^22.22.2 || ^24.15.0 || >=26.0.0`.
 Node 22 remains supported; older Node 22/24 patches and Node 23/25 are excluded.
 Releases before `v0.4.0` supported Node 22.14 or later.
 
-- **No upgrade path before 1.0.** Nexus is in buildout. Each backend has one base
-  schema that new databases are created at, and no upgrade paths will be designed
-  until 1.0. A database is never migrated: one created by `v0.5.2` or earlier, or
-  at a different base schema, is refused at startup and must be recreated (from
-  `v0.6.0`, which folded the earlier migrations into the base schema). A release
-  whose base schema generation is unchanged opens the previous release's database;
-  each release's notes say which applies. See
-  [schema and upgrades before 1.0](docs/operations.md#schema-and-upgrades-before-10),
-  [moving to a new release](docs/operations.md#moving-to-a-new-release) and
+- **Upgrades.** A release upgrades the database the previous release left, in place, with
+  forward-only schema migrations; downgrades are not supported. A new, empty database is
+  created at first start. An existing database is never changed by startup: the migrate
+  command upgrades it, and the server refuses to start while migrations are pending. A
+  database created by `v0.6.0` can be upgraded. One created by `v0.5.2` or earlier
+  cannot, and is refused unchanged; move such a portal to a new, empty database.
+  Stop Nexus and back up Nexus and Ferrum Edge together before every upgrade: that
+  backup is the way back. See
+  [schema and upgrades](docs/operations.md#schema-and-upgrades-before-10),
+  [moving from a release before v0.6.0](docs/operations.md#moving-to-a-new-release) and
   [backup and restore](docs/operations.md#5-backup-and-restore).
 
 ## Features
@@ -165,7 +175,7 @@ FERRUM_GATEWAY_PUBLIC_URL=http://127.0.0.1:8000
 Then create the schema and start:
 
 ```bash
-npm run migrate   # builds shared, then creates the database schema
+npm run migrate   # builds shared, then creates or upgrades the database schema
 npm run dev       # backend :8787, web :5173
 ```
 
@@ -272,10 +282,13 @@ The bootstrap token is printed to the container log (`docker logs`). Pass
 
 The Compose example runs Nexus, PostgreSQL and Ferrum Edge. The
 [compatibility record](release/compatibility.env) selects the Edge image by
-digest — `v0.9.20` at the `v0.6.0` tag, `v0.9.15` at the `v0.5.2` tag — the same
-image CI tests for that checkout. The Nexus image is built from your
-checkout, so check out the release tag first
-(`git checkout --detach v0.6.0`).
+digest, the same image CI tests for that checkout (for example `v0.9.20` at the
+`v0.6.0` tag and `v0.9.15` at the `v0.5.2` tag). The Nexus image is built from
+your checkout, so check out the release you install first. In a fresh clone,
+`git checkout --detach "$(git describe --tags --abbrev=0 --match 'v[0-9]*')"` checks
+out the latest release tag on `main`; name another tag from the
+[releases page](https://github.com/ferrum-edge/ferrum-nexus/releases) to install that
+release instead.
 
 The four secrets and the Edge image are required. Keep the secrets stable for
 the life of the stack: store them in a secret manager instead of generating new
@@ -311,8 +324,8 @@ single-active-writer model.
 Cross-repo contracts — shared vocabularies, JSON schemas and fixtures — live in the org
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) store. Nexus vendors the
 Ferrum Edge vocabularies it speaks under
-[`contracts/ferrum-contracts/`](contracts/ferrum-contracts/), pinned by tag
-(`contracts-edge-0.9.20`) and per-file SHA-256 in
+[`contracts/ferrum-contracts/`](contracts/ferrum-contracts/), pinned by the tag on the first
+line of `PIN` and per-file SHA-256 in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN), in the format ferrum-contracts
 [`docs/consumer-pins.md`](https://github.com/ferrum-edge/ferrum-contracts/blob/main/docs/consumer-pins.md)
 defines. The `shared` contract test parses `PIN` strictly, fails on any vendored file without a

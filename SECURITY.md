@@ -30,9 +30,23 @@ Ferrum Edge Admin API. Reports of particular interest:
   from `NEXUS_SECRET_KEY`).
 
 See [docs/security.md](docs/security.md) for the threat model and hardening
-guide.
+guide, and [docs/known-limitations.md](docs/known-limitations.md) for the standing
+deployment, gateway-write and single sign-on limits.
 
 ## Supported versions
 
-Security fixes land on `main`. Run a pinned release, and watch `main` and this
-repository's advisories for fixes.
+| Version                  | Security fixes                                                    |
+| ------------------------ | ----------------------------------------------------------------- |
+| 1.x, latest minor        | Yes, from `1.0.0` onward, as patch releases of that minor release |
+| 1.x, earlier minors      | No; upgrade to the latest 1.x release                             |
+| 0.x, latest release      | Until `1.0.0` is released, as a new 0.x release                   |
+| 0.x, any earlier release | No                                                                |
+
+Security fixes land on `main` first and ship in the next release. From `1.0.0` onward
+they are released as patch releases of the latest 1.x minor release, which is
+compatible with the earlier 1.x releases, so upgrading within 1.x is how an older 1.x
+deployment receives a fix. Before `1.0.0`, only the latest 0.x release is supported,
+and a fix ships in the next 0.x release. Each release supports one Ferrum Edge
+release, named in its
+[compatibility record](release/compatibility.env); run that pair. Watch this
+repository's security advisories and release notes for fixes.
