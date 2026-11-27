@@ -194,7 +194,7 @@ NEXUS_BOOTSTRAP_TOKEN=walkthrough-bootstrap-token
 Then start it:
 
 ```bash
-npm run migrate   # creates or upgrades the schema; the server refuses pending migrations
+npm run migrate   # creates or upgrades the schema (startup creates only a new database)
 npm run dev       # backend :8787, web :5173 (NEXUS_PORT / NEXUS_WEB_PORT)
 ```
 
