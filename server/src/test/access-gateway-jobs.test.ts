@@ -36,10 +36,9 @@ import {
   createAccessGatewayWorker,
   type AccessGatewayWorker,
 } from '../access/gateway-job-worker.js';
-import { queueStrandedAccessRepairs } from '../access/stranded-repair.js';
 import { canonicalConsumerLockKey } from '../credentials/consumers.js';
-import type { AccessRequestRepo, NexusStore } from '../db/store.js';
-import { createKeyedSerializer, proxyLockKey } from '../lib/keyed-serializer.js';
+import type { NexusStore } from '../db/store.js';
+import { proxyLockKey } from '../lib/keyed-serializer.js';
 import { crashingStore, type CrashingStore } from './fault-injection.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -1056,67 +1055,5 @@ describe('access gateway jobs survive a crash between the claim and the Edge wri
     assert.deepEqual(groupsOf(client.user.id), []);
     assert.equal((await database.accessRequests.findById(requestId))?.status, 'pending');
     assert.equal(await database.accessGatewayJobs.findBySubject(requestId), null);
-  });
-
-  it('the one-time repair considers every candidate while the worker drains them', async () => {
-    const client = await crashed.registerUser({ role: 'client' });
-    const apiId = await publish(crashed);
-    const stranded = new Set<string>();
-    for (let index = 0; index < 5; index += 1) {
-      const row = await database.accessRequests.create({
-        api_id: apiId,
-        user_id: client.user.id,
-        application_id: null,
-        justification: `Approved before 015 (${index})`,
-        status: 'approved',
-        decided_by: provider.user.id,
-        decided_at: new Date().toISOString(),
-        decision_note: null,
-      });
-      stranded.add(row.id);
-    }
-
-    // Each page read is followed by the worker settling what it returned, so
-    // the approved set shrinks under the scan — an offset would skip rows.
-    const requests = database.accessRequests;
-    const draining = new Proxy(requests, {
-      get(target, property, receiver): unknown {
-        if (property !== 'pageByStatus') {
-          const value: unknown = Reflect.get(target, property, receiver);
-          return typeof value === 'function' ? value.bind(target) : value;
-        }
-        const page: AccessRequestRepo['pageByStatus'] = async (status, afterId, limit) => {
-          const rows = await target.pageByStatus(status, afterId, limit);
-          for (const row of rows) {
-            if (stranded.has(row.id)) {
-              await target.updateIfStatus(row.id, 'approved', { status: 'cancelled' });
-            }
-          }
-          return rows;
-        };
-        return page;
-      },
-    });
-    const store = new Proxy(database, {
-      get(target, property, receiver): unknown {
-        if (property === 'accessRequests') return draining;
-        const value: unknown = Reflect.get(target, property, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
-
-    const repair = await queueStrandedAccessRepairs({
-      store,
-      audit: restarted.services.audit,
-      locks: createKeyedSerializer({ leases: database.leases }),
-      namespace: 'nexus',
-      pageSize: 2,
-    });
-    assert.equal(repair.alreadyRecorded, false);
-    assert.ok(repair.approvals >= stranded.size);
-    for (const id of stranded) {
-      assert.equal((await database.accessGatewayJobs.findBySubject(id))?.kind, 'approve', id);
-      await database.accessGatewayJobs.deleteBySubject(id);
-    }
   });
 });

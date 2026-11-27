@@ -337,10 +337,9 @@ export const AuditAction = {
   ACCESS_REVOKE_COMPLETE: 'access.revoke_complete',
   /**
    * The one-time repair queued access gateway jobs for decisions a release
-   * before `access_gateway_jobs` may have left half-applied: revoked grants
-   * whose group may still be on the consumer, and approved requests with no
-   * grant. Written by the system once; its presence is what stops later
-   * starts from scanning again.
+   * before `access_gateway_jobs` may have left half-applied. `v0.6.0`
+   * recorded it at its first start; nothing writes it any more, and the
+   * action stays in the catalog so those rows remain listable and filterable.
    */
   ACCESS_STRANDED_REPAIR_QUEUED: 'access.stranded_repair_queued',
   /**
@@ -668,8 +667,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.ACCESS_REVOKE_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.ACCESS_REVOKE_COMPLETE]: TRANSACTIONAL,
   [AuditAction.ACCESS_STRANDED_REPAIR_QUEUED]: rowOnly(
-    'A one-time marker: its jobs were queued in bounded, idempotent writes before it, and a ' +
-      'repair that found nothing stranded still records that it ran, so later starts skip it.',
+    'Historical: v0.6.0 committed it alone at its first start; nothing writes it any more.',
   ),
   [AuditAction.ACCESS_MCP_ENROLL]: INTENT,
   [AuditAction.ACCESS_MCP_ENROLL_SKIP]: rowOnly(

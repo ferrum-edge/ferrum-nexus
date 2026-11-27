@@ -3189,15 +3189,6 @@ class MongoStore implements NexusStore {
         mapAccessRequest,
       ),
 
-    pageByStatus: async (status, afterId, limit) => {
-      const docs = await this.col(COLLECTIONS.accessRequests)
-        .find({ status, _id: { $gt: afterId ?? '' } } as Filter<NexusDoc>, this.opts)
-        .sort({ _id: 1 })
-        .limit(Math.max(1, Math.floor(limit)))
-        .toArray();
-      return docs.map((doc) => mapAccessRequest(doc as Row));
-    },
-
     findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
       const query: Record<string, unknown> = { api_id: apiId, user_id: userId, status: 'pending' };
       scopeQuery(query, applicationId);
@@ -3312,15 +3303,6 @@ class MongoStore implements NexusStore {
 
     list: async (filter, options) =>
       this.paginate(COLLECTIONS.grants, grantFilter(filter), NEWEST_FIRST, options, mapGrant),
-
-    pageByStatus: async (status, afterId, limit) => {
-      const docs = await this.col(COLLECTIONS.grants)
-        .find({ status, _id: { $gt: afterId ?? '' } } as Filter<NexusDoc>, this.opts)
-        .sort({ _id: 1 })
-        .limit(Math.max(1, Math.floor(limit)))
-        .toArray();
-      return docs.map((doc) => mapGrant(doc as Row));
-    },
 
     findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
       const query: Record<string, unknown> = { api_id: apiId, user_id: userId, status: 'active' };

@@ -4772,69 +4772,6 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       await store.accessGatewayJobs.deleteBySubject(owned.subject_id);
     });
 
-    it('grants and accessRequests: pageByStatus walks one status by keyset', async () => {
-      const owner = await makeUser({ role: 'provider' });
-      const client = await makeUser();
-      const api = await makeApi(owner.id);
-      const requests = new Set<string>();
-      for (let index = 0; index < 5; index += 1) {
-        const row = await store.accessRequests.create({
-          api_id: api.id,
-          user_id: client.id,
-          justification: `keyset ${index}`,
-          status: 'denied',
-        });
-        requests.add(row.id);
-      }
-      const grants = new Set<string>();
-      for (let index = 0; index < 3; index += 1) {
-        const row = await store.grants.create({
-          api_id: api.id,
-          user_id: client.id,
-          acl_group: `nexus:api:${api.id}:approved`,
-          status: 'revoked',
-          granted_by: owner.id,
-        });
-        grants.add(row.id);
-      }
-
-      // Rows leaving the status behind the cursor cannot shift the next page,
-      // so every row is met exactly once.
-      const seenRequests: string[] = [];
-      let afterRequest: string | null = null;
-      for (;;) {
-        const page = await store.accessRequests.pageByStatus('denied', afterRequest, 2);
-        assert.ok(page.length <= 2);
-        const last = page.at(-1);
-        if (!last) break;
-        for (const row of page) {
-          assert.equal(row.status, 'denied');
-          if (requests.has(row.id)) {
-            seenRequests.push(row.id);
-            await store.accessRequests.updateIfStatus(row.id, 'denied', { status: 'cancelled' });
-          }
-        }
-        afterRequest = last.id;
-      }
-      assert.equal(seenRequests.length, requests.size);
-      assert.deepEqual(new Set(seenRequests), requests);
-
-      const seenGrants: string[] = [];
-      let afterGrant: string | null = null;
-      for (;;) {
-        const page = await store.grants.pageByStatus('revoked', afterGrant, 2);
-        const last = page.at(-1);
-        if (!last) break;
-        for (const row of page) {
-          assert.equal(row.status, 'revoked');
-          if (grants.has(row.id)) seenGrants.push(row.id);
-        }
-        afterGrant = last.id;
-      }
-      assert.equal(seenGrants.length, grants.size);
-      assert.deepEqual(new Set(seenGrants), grants);
-    });
-
     it('stores spec metadata and audit details as large as the API accepts (#604, #605)', async () => {
       // MySQL held these in VARCHAR(255), VARCHAR(64) and TEXT (65,535 bytes),
       // narrower than what the parser and the agents schema accept; strict
