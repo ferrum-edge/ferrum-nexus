@@ -50,6 +50,8 @@ const RESUME =
 const BUSY = /holds the test schema migration lock/;
 const IN_TRANSACTION = /cannot run inside its migration transaction/;
 const NOT_PLAIN_KEY = /not a plain object of field directions/;
+const NOT_COVERED = /options the checksum cannot cover/;
+const NOT_EMPTY = /not a new, empty database/;
 const MODIFIED = /The image or installation is modified/;
 const INJECTED = /injected interruption/;
 const ORDER = /repeated or out of order/;
@@ -387,7 +389,9 @@ describe('ensureSchema', () => {
       async listRecorded() {
         return [{ id: BASE_SCHEMA_ID, checksum: null }];
       },
-      async createBaseSchema() {},
+      async createBaseSchema() {
+        return true;
+      },
       async prepareLedger() {},
       async applyMigration() {
         throw refusal;
@@ -461,6 +465,10 @@ function nonTransactionalDriver(): SchemaDriver<SqlMigration> & {
   failNext: boolean;
   lockHeldByOther: boolean;
   locks: number;
+  /** Runs as the lock is taken: what a peer did between the first read and the lock. */
+  beforeLock: () => void;
+  /** Runs after each migration: what a peer did between this run's transactions. */
+  afterApply: () => void;
 } {
   const ledger = new Map<string, LedgerEntry>();
   const driver = {
@@ -470,8 +478,11 @@ function nonTransactionalDriver(): SchemaDriver<SqlMigration> & {
     failNext: false,
     lockHeldByOther: false,
     locks: 0,
+    beforeLock: (): void => undefined,
+    afterApply: (): void => undefined,
     async acquireLock(): Promise<() => Promise<void>> {
       if (driver.lockHeldByOther) throw schemaBusyError('test');
+      driver.beforeLock();
       driver.locks += 1;
       return async () => undefined;
     },
@@ -482,8 +493,9 @@ function nonTransactionalDriver(): SchemaDriver<SqlMigration> & {
     async listRecorded(): Promise<LedgerEntry[]> {
       return [...ledger.values()].map((entry) => ({ ...entry }));
     },
-    async createBaseSchema(schema: BaseSchema): Promise<void> {
+    async createBaseSchema(schema: BaseSchema): Promise<boolean> {
       ledger.set(schema.id, { id: schema.id, checksum: null });
+      return true;
     },
     async prepareLedger(): Promise<void> {},
     async beginMigration(migration: SqlMigration): Promise<void> {
@@ -503,6 +515,7 @@ function nonTransactionalDriver(): SchemaDriver<SqlMigration> & {
       const entry = ledger.get(migration.id);
       assert.equal(entry?.inProgress, true, 'applied only after it was begun');
       ledger.set(migration.id, { id: migration.id, checksum: migration.checksum });
+      driver.afterApply();
     },
   };
   return driver;
@@ -719,7 +732,7 @@ describe('migration statements', () => {
       CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;
     `);
     refuseTransactionControl(pg, 'pg');
-    assert.equal(topLevelStatements(pg.sql).length, 3);
+    assert.equal(topLevelStatements(pg.sql, 'pg').length, 3);
     const sqlite = migration(`
       CREATE TABLE a (id TEXT, n INT);
       CREATE TRIGGER t AFTER INSERT ON a BEGIN
@@ -727,7 +740,7 @@ describe('migration statements', () => {
       END;
     `);
     refuseTransactionControl(sqlite, 'sqlite');
-    assert.equal(topLevelStatements(sqlite.sql).length, 2);
+    assert.equal(topLevelStatements(sqlite.sql, 'sqlite').length, 2);
   });
 });
 
@@ -751,5 +764,157 @@ describe('MongoDB step checksums', () => {
       indexes: [{ collection: 'users', name: 'ix_probe', key: new Map([['a', 1]]) }],
     };
     assert.throws(() => mongoMigration(mapped), NOT_PLAIN_KEY);
+  });
+});
+
+describe('runner edge cases', () => {
+  it('lets startup apply migrations only to a database it created itself', async () => {
+    const driver = nonTransactionalDriver();
+    const schema = loadBaseSchema('sqlite');
+    // Empty at the first read; a peer records the baseline before the lock is taken.
+    driver.beforeLock = () => driver.ledger.set(schema.id, { id: schema.id, checksum: null });
+    await assert.rejects(
+      ensureSchema(driver, schema, [WIDGETS], { mode: 'startup' }),
+      (error: unknown) => isNexusError(error) && PENDING.test(error.message),
+    );
+    assert.equal(driver.ledger.has(WIDGETS.id), false, 'startup applied nothing');
+  });
+
+  it('refuses success when a newer migrator recorded more meanwhile', async () => {
+    const driver = nonTransactionalDriver();
+    const schema = loadBaseSchema('sqlite');
+    await ensureSchema(driver, schema, []);
+    driver.afterApply = () => driver.ledger.set('018_newer', { id: '018_newer', checksum: 'peer' });
+    await assert.rejects(ensureSchema(driver, schema, [WIDGETS]), NEWER);
+  });
+
+  it('initialises from an empty ledger v0.6.0 left behind', async () => {
+    const db = openSqliteDatabase(':memory:');
+    try {
+      db.exec(
+        `CREATE TABLE ${SCHEMA_LEDGER_TABLE} (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
+      );
+      const result = await ensureSchema(
+        createSqliteSchemaDriver(db),
+        loadBaseSchema('sqlite'),
+        [WIDGETS],
+        { mode: 'startup' },
+      );
+      assert.deepEqual(result, { created: true, applied: [WIDGETS.id] });
+      assert.deepEqual(ledgerColumns(db), ['id', 'applied_at', 'checksum', 'state']);
+      assert.deepEqual(
+        ledger(db).map((entry) => entry.id),
+        [BASE_SCHEMA_ID, WIDGETS.id],
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('refuses an empty ledger beside tables the schema would create', async () => {
+    const db = openSqliteDatabase(':memory:');
+    try {
+      db.exec(`
+        CREATE TABLE ${SCHEMA_LEDGER_TABLE} (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+        CREATE TABLE users (id TEXT PRIMARY KEY);
+      `);
+      await assert.rejects(
+        ensureSchema(createSqliteSchemaDriver(db), loadBaseSchema('sqlite'), [WIDGETS]),
+        (error: unknown) => isNexusError(error) && NOT_EMPTY.test(error.message),
+      );
+      assert.deepEqual(tables(db), [SCHEMA_LEDGER_TABLE, 'users']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('refuses at once, never waiting, while another SQLite connection writes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nexus-sqlite-lock-'));
+    const path = join(dir, 'nexus.sqlite');
+    const db = openSqliteDatabase(path);
+    const other = openSqliteDatabase(path);
+    try {
+      const driver = createSqliteSchemaDriver(db);
+      const schema = loadBaseSchema('sqlite');
+      await ensureSchema(driver, schema, []);
+      other.exec('BEGIN IMMEDIATE');
+      const started = Date.now();
+      await assert.rejects(ensureSchema(driver, schema, [WIDGETS]), (error: unknown) => {
+        assert.ok(isNexusError(error), String(error));
+        assert.equal(error.code, 'CONFLICT');
+        return true;
+      });
+      assert.ok(Date.now() - started < 2_000, 'did not wait out the busy timeout');
+      other.exec('ROLLBACK');
+      await ensureSchema(driver, schema, [WIDGETS]);
+      assert.equal(ledger(db).at(-1)?.id, WIDGETS.id);
+    } finally {
+      other.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('transaction boundaries by dialect', () => {
+  const migration = (sql: string): SqlMigration => sqlMigration('016_probe', 'probe.sql', sql);
+
+  it('refuse prepared transactions and statements that act outside the transaction', () => {
+    for (const sql of [
+      "PREPARE TRANSACTION 'x';",
+      'ALTER SYSTEM SET work_mem = 1;',
+      'DISCARD ALL;',
+      "CREATE TABLESPACE t LOCATION '/tmp';",
+      'REINDEX DATABASE nexus;',
+      "COMMIT PREPARED 'x';",
+    ]) {
+      assert.throws(() => refuseTransactionControl(migration(sql), 'pg'), IN_TRANSACTION, sql);
+    }
+    for (const sql of ['PRAGMA foreign_keys = OFF;', "ATTACH 'x.db' AS x;", 'DETACH x;']) {
+      assert.throws(() => refuseTransactionControl(migration(sql), 'sqlite'), IN_TRANSACTION, sql);
+    }
+  });
+
+  it('end a SQLite block comment at the first closing delimiter, unlike PostgreSQL', () => {
+    const sql = 'CREATE TABLE a (id TEXT); /* outer /* inner */ COMMIT; /* tail */';
+    assert.throws(() => refuseTransactionControl(migration(sql), 'sqlite'), IN_TRANSACTION);
+    refuseTransactionControl(migration(sql), 'pg');
+  });
+
+  it('read PostgreSQL backslash-escaped strings whole', () => {
+    refuseTransactionControl(
+      migration("CREATE TABLE a (note TEXT DEFAULT E'it\\'s; COMMIT;');"),
+      'pg',
+    );
+  });
+});
+
+describe('MongoDB index specs', () => {
+  const step = (filter: Record<string, unknown> | undefined): MongoMigrationStep => ({
+    id: '016_probe',
+    indexes: [
+      {
+        collection: 'users',
+        name: 'ix_probe',
+        key: { a: 1 },
+        ...(filter === undefined ? {} : { partialFilterExpression: filter }),
+      },
+    ],
+  });
+
+  it('change the checksum with the partial filter', () => {
+    const plain = mongoMigration(step(undefined)).checksum;
+    const active = mongoMigration(step({ status: 'active' })).checksum;
+    assert.notEqual(active, plain);
+    assert.notEqual(mongoMigration(step({ status: 'revoked' })).checksum, active);
+  });
+
+  it('refuse a filter or option the checksum could not cover', () => {
+    assert.throws(() => mongoMigration(step({ created_at: new Date(0) })), NOT_COVERED);
+    const extra = {
+      id: '016_probe',
+      indexes: [{ collection: 'users', name: 'ix_probe', key: { a: 1 }, sparse: true }],
+    } as unknown as MongoMigrationStep;
+    assert.throws(() => mongoMigration(extra), NOT_COVERED);
   });
 });

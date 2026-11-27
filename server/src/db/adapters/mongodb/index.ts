@@ -1535,9 +1535,23 @@ export function canonicalIndexes(indexes: readonly IndexDefinition[]): unknown[]
   }));
 }
 
-/** Create one {@link IndexDefinition}. */
+/**
+ * Every schema read goes to the primary with majority read concern, and every
+ * schema write (index builds, a step's updates, the ledger and the lock) waits
+ * for a journaled majority, whatever the application's URL says. A ledger
+ * entry is marked applied only after the writes it records are majority
+ * committed, so a failover cannot keep the entry and lose the change, and a
+ * lagging secondary never hides a migration a newer release recorded.
+ */
+const SCHEMA_COLLECTION_OPTIONS: CollectionOptions = {
+  readPreference: 'primary',
+  readConcern: { level: 'majority' },
+  writeConcern: { w: 'majority', journal: true },
+};
+
+/** Create one {@link IndexDefinition}, with majority write concern. */
 async function createIndex(db: Db, index: IndexDefinition): Promise<void> {
-  await db.collection(index.collection).createIndex(index.key, {
+  await db.collection(index.collection, SCHEMA_COLLECTION_OPTIONS).createIndex(index.key, {
     name: index.name,
     ...(index.unique === true ? { unique: true } : {}),
     ...(index.partialFilterExpression
@@ -1552,6 +1566,31 @@ async function createIndex(db: Db, index: IndexDefinition): Promise<void> {
  * `Map`, an array, a bare string) would not appear in the canonical form the
  * checksum covers, so a changed key could keep its checksum.
  */
+const INDEX_FIELDS = new Set(['collection', 'name', 'key', 'unique', 'partialFilterExpression']);
+
+/**
+ * Refuse an index a migration step declares unless every part of it is in the
+ * checksum's canonical form: only the fields {@link canonicalIndexes} covers,
+ * a key that is a plain object of field directions, and a partial filter made
+ * of plain JSON values (a date or other BSON value would hash like its JSON
+ * text but match differently).
+ */
+function assertCanonicalIndex(stepId: string, index: IndexDefinition): void {
+  const extra = Object.keys(index).filter((field) => !INDEX_FIELDS.has(field));
+  const filter = index.partialFilterExpression;
+  if (
+    extra.length > 0 ||
+    (filter !== undefined && !isDeepStrictEqual(JSON.parse(JSON.stringify(filter)), filter))
+  ) {
+    throw new NexusError(
+      'INTERNAL',
+      `MongoDB migration ${stepId} declares index ${index.name} with options the checksum ` +
+        'cannot cover (only collection, name, key, unique and a plain-JSON partial filter)',
+    );
+  }
+  assertCanonicalKey(stepId, index);
+}
+
 function assertCanonicalKey(stepId: string, index: IndexDefinition): void {
   const key: unknown = index.key;
   const plain =
@@ -1576,7 +1615,7 @@ function assertCanonicalKey(stepId: string, index: IndexDefinition): void {
  * index keys or updates would not round-trip into that checksum.
  */
 export function mongoMigration(step: MongoMigrationStep): MongoMigration {
-  for (const index of step.indexes) assertCanonicalKey(step.id, index);
+  for (const index of step.indexes) assertCanonicalIndex(step.id, index);
   const updates = step.updates ?? [];
   if (!isDeepStrictEqual(JSON.parse(JSON.stringify(updates)), updates)) {
     throw new NexusError(
@@ -1641,17 +1680,6 @@ export const SCHEMA_LOCK_COLLECTION = 'schema_migrations_lock';
 export const SCHEMA_LOCK_ID = 'schema';
 
 /**
- * Every ledger and lock read goes to the primary with majority read concern,
- * and every write waits for a majority, whatever the application's URL says:
- * a lagging secondary must never hide a migration a newer release recorded.
- */
-const SCHEMA_COLLECTION_OPTIONS: CollectionOptions = {
-  readPreference: 'primary',
-  readConcern: { level: 'majority' },
-  writeConcern: { w: 'majority' },
-};
-
-/**
  * Bring the database to this build's schema (`migrate.ts`). The migration
  * lock is a document with an owner token, inserted only when there is work
  * and never taken over: a second migrator is refused, and a lock a crashed
@@ -1704,9 +1732,11 @@ export async function ensureMongoSchema(
       };
     },
     lockHeld: async (): Promise<boolean> => (await locks.findOne({ _id: SCHEMA_LOCK_ID })) !== null,
-    createBaseSchema: async (base: BaseSchema): Promise<void> => {
+    createBaseSchema: async (base: BaseSchema): Promise<boolean> => {
       for (const index of BASE_INDEXES) await createIndex(db, index);
       await ledger.insertOne({ _id: base.id, applied_at: nowIso() });
+      // Always created here: the lock is held and the ledger was re-read under it.
+      return true;
     },
     prepareLedger: async (): Promise<void> => {
       // Documents carry `checksum` and `state` as fields; nothing to alter.
@@ -1723,7 +1753,7 @@ export async function ensureMongoSchema(
       for (const index of migration.step.indexes) await createIndex(db, index);
       for (const change of migration.step.updates ?? []) {
         await db
-          .collection(change.collection)
+          .collection(change.collection, SCHEMA_COLLECTION_OPTIONS)
           .updateMany(change.filter as Filter<Document>, change.update as UpdateFilter<Document>);
       }
       const result = await ledger.updateOne(

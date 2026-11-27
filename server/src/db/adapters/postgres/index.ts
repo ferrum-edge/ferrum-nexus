@@ -34,6 +34,7 @@ import { nowIso } from '../../../lib/ids.js';
 import {
   checksumMismatchError,
   ensureSchema,
+  notEmptyError,
   loadShippedMigrations,
   refuseTransactionControl,
   schemaBusyError,
@@ -44,6 +45,7 @@ import {
   type SqlMigration,
 } from '../../migrate.js';
 import {
+  baseTables,
   loadBaseSchema,
   SCHEMA_LEDGER_TABLE,
   splitSqlStatements,
@@ -127,8 +129,28 @@ async function ledgerEmpty(client: PgClient): Promise<boolean> {
   return result.rows.length === 0;
 }
 
+/** Refuse to create the schema over tables the base schema would create. */
+async function refuseNonEmpty(client: PgClient, schema: BaseSchema): Promise<void> {
+  const result = await client.query(
+    `SELECT table_name FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = ANY($1::text[])`,
+    [baseTables(schema)],
+  );
+  const existing = (result.rows as { table_name: unknown }[]).map((row) => String(row.table_name));
+  if (existing.length > 0) throw notEmptyError(existing);
+}
+
+/** The ledger columns v0.6.0's ledger lacks, added before a migration is recorded. */
+async function addLedgerColumns(client: PgClient): Promise<void> {
+  await client.query(
+    `ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN IF NOT EXISTS checksum TEXT, ` +
+      'ADD COLUMN IF NOT EXISTS state TEXT',
+  );
+}
+
 /** Create the base schema and record it, inside the caller's transaction. */
 async function createBase(client: PgClient, schema: BaseSchema): Promise<void> {
+  await refuseNonEmpty(client, schema);
   for (const statement of splitSqlStatements(schema.sql)) {
     await client.query(statement);
   }
@@ -179,26 +201,30 @@ export function createPostgresSchemaDriver(client: PgClient): SchemaDriver<SqlMi
         inProgress: row.state === 'in_progress',
       }));
     },
-    async createBaseSchema(schema: BaseSchema): Promise<void> {
-      await inSchemaTransaction(client, async () => {
-        if (await ledgerEmpty(client)) await createBase(client, schema);
-      });
-    },
-    async createFresh(schema: BaseSchema, migrations: readonly SqlMigration[]): Promise<void> {
-      // One transaction: another instance sees an empty database or a complete one.
+    async createBaseSchema(schema: BaseSchema): Promise<boolean> {
+      let created = false;
       await inSchemaTransaction(client, async () => {
         if (!(await ledgerEmpty(client))) return;
         await createBase(client, schema);
-        for (const migration of migrations) await runMigration(client, migration);
+        created = true;
       });
+      return created;
+    },
+    async createFresh(schema: BaseSchema, migrations: readonly SqlMigration[]): Promise<boolean> {
+      // One transaction: another instance sees an empty database or a complete one.
+      let created = false;
+      await inSchemaTransaction(client, async () => {
+        if (!(await ledgerEmpty(client))) return;
+        await createBase(client, schema);
+        // An empty ledger v0.6.0 left behind lacks the columns migrations record.
+        if (migrations.length > 0) await addLedgerColumns(client);
+        for (const migration of migrations) await runMigration(client, migration);
+        created = true;
+      });
+      return created;
     },
     async prepareLedger(): Promise<void> {
-      await inSchemaTransaction(client, async () => {
-        await client.query(
-          `ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN IF NOT EXISTS checksum TEXT, ` +
-            'ADD COLUMN IF NOT EXISTS state TEXT',
-        );
-      });
+      await inSchemaTransaction(client, () => addLedgerColumns(client));
     },
     async applyMigration(migration: SqlMigration): Promise<void> {
       await inSchemaTransaction(client, async () => {

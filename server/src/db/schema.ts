@@ -88,6 +88,16 @@ export function loadBaseSchema(dialect: SchemaDialect): BaseSchema {
   return { id: BASE_SCHEMA_ID, source: filename, sql };
 }
 
+const BASE_TABLE = /^CREATE TABLE IF NOT EXISTS\s+([a-z][a-z0-9_]*)/i;
+
+/** The tables a SQL base schema creates, in file order. */
+export function baseTables(schema: BaseSchema): string[] {
+  return splitSqlStatements(schema.sql).flatMap((statement) => {
+    const table = BASE_TABLE.exec(statement)?.[1];
+    return table === undefined ? [] : [table];
+  });
+}
+
 /* ── SQL helpers for adapters whose driver runs one statement at a time ─── */
 
 /**

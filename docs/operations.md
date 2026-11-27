@@ -2277,10 +2277,12 @@ rotated in that window ([§12](#12-the-credential-mirror)).
 ### Compatible versions
 
 - **Nexus:** restore into the Nexus release that wrote the backup, or into a
-  later release, which upgrades it at startup like any other database
-  ([schema and upgrades](#schema-and-upgrades)). Never restore into an older
-  release: it refuses a database a newer release upgraded. A backup from
-  `v0.5.2` or earlier opens only in the release that wrote it.
+  later release after running that release's migrate command against the
+  restored database, as for any upgrade (the later release's server refuses
+  to start until you do; see [schema and upgrades](#schema-and-upgrades)).
+  Never restore into an older release: it refuses a database a newer release
+  upgraded. A backup from `v0.5.2` or earlier opens only in the release that
+  wrote it.
 - **Ferrum Edge:** restore into the Edge release that wrote it, or one Edge
   documents as compatible. Nexus is validated against the release pinned in
   [`release/compatibility.env`](../release/compatibility.env).
@@ -2309,8 +2311,12 @@ It is the only way to keep issued credentials working.
 4. Start the **same** Nexus release with the same `NEXUS_SECRET_KEY`,
    `FERRUM_ADMIN_JWT_SECRET`, `FERRUM_ADMIN_JWT_ISSUER` and `FERRUM_NAMESPACE`,
    and `FERRUM_ADMIN_URL` pointing at the restored gateway. The startup
-   schema check should find the schema current and do nothing (a later
-   release applies its migrations instead).
+   schema check should find the schema current and do nothing. To restore into
+   a later release instead, first run that release's migrate command against
+   the restored database, with every instance still stopped
+   ([upgrading Nexus](#upgrading-nexus), step 5); its server refuses to start
+   until you have. Never start Nexus against the target database before the
+   restore has finished: on an empty database it would create a new schema.
 5. [Verify](#verifying-a-restore) before reopening the portal.
 
 **Without an Edge backup**, credentials cannot be recovered: Nexus stores only a

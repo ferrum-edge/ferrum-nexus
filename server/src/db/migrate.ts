@@ -129,17 +129,18 @@ export interface SchemaDriver<M extends Migration = Migration> {
   listRecorded(): Promise<LedgerEntry[]>;
   /**
    * Create the base schema **and** record its id, atomically where the
-   * driver supports DDL transactions. Called only on an empty ledger, and a
-   * no-op if another instance recorded the baseline meanwhile.
+   * driver supports DDL transactions. Called only on an empty ledger.
+   * Resolves `true` when this call created it, `false` when another instance
+   * recorded the baseline meanwhile (and nothing was done).
    */
-  createBaseSchema(schema: BaseSchema): Promise<void>;
+  createBaseSchema(schema: BaseSchema): Promise<boolean>;
   /**
    * Where the backend has transactional DDL: create the base schema and apply
    * every migration in **one** transaction, so another instance sees either
    * an empty database or a complete one. Used instead of
    * {@link createBaseSchema} plus each migration when the ledger is empty.
    */
-  createFresh?(schema: BaseSchema, migrations: readonly M[]): Promise<void>;
+  createFresh?(schema: BaseSchema, migrations: readonly M[]): Promise<boolean>;
   /**
    * Take the exclusive migration lock, or refuse at once (a `CONFLICT`) when
    * another migrator holds it: never wait for it, never take it over. Returns
@@ -213,7 +214,7 @@ export async function ensureSchema<M extends Migration>(
   }
   const release = driver.acquireLock === undefined ? undefined : await driver.acquireLock();
   try {
-    return await applySchema(driver, base, migrations, mode === 'migrate' || fresh);
+    return await applySchema(driver, base, migrations, mode);
   } finally {
     await release?.();
   }
@@ -224,21 +225,19 @@ async function applySchema<M extends Migration>(
   driver: SchemaDriver<M>,
   base: BaseSchema,
   migrations: readonly M[],
-  mayApply: boolean,
+  mode: SchemaMode,
 ): Promise<SchemaResult> {
   let recorded = await driver.listRecorded();
   let created = false;
   if (recorded.length === 0) {
     try {
-      if (driver.createFresh !== undefined) {
-        await driver.createFresh(base, migrations);
-      } else {
-        await driver.createBaseSchema(base);
-      }
+      created =
+        driver.createFresh !== undefined
+          ? await driver.createFresh(base, migrations)
+          : await driver.createBaseSchema(base);
     } catch (error) {
       throw schemaFailure(base, error);
     }
-    created = true;
     recorded = await driver.listRecorded();
   }
   const pending = pendingMigrations(recorded, base, migrations);
@@ -246,7 +245,10 @@ async function applySchema<M extends Migration>(
   const applied: string[] =
     created && driver.createFresh !== undefined ? migrations.map((migration) => migration.id) : [];
   if (pending.length === 0) return { created, applied };
-  if (!mayApply) throw notMigratedError(pending, recorded, false);
+  // Startup applies migrations only to a database this very call created
+  // under the lock; one another instance created meanwhile (perhaps another
+  // build) is only verified.
+  if (mode === 'startup' && !created) throw notMigratedError(pending, recorded, false);
   const resuming = new Set(
     recorded.filter((entry) => entry.inProgress === true).map((entry) => entry.id),
   );
@@ -270,6 +272,11 @@ async function applySchema<M extends Migration>(
     }
     applied.push(migration.id);
   }
+  // Another migrator may have written between this run's transactions (the
+  // PostgreSQL lock is per transaction): succeed only if the whole ledger is
+  // now exactly what this build expects. A newer migration is a downgrade.
+  const remaining = pendingMigrations(await driver.listRecorded(), base, migrations);
+  if (remaining.length > 0) throw notMigratedError(remaining, recorded, false);
   return { created, applied };
 }
 
@@ -431,6 +438,20 @@ export function notMigratedError(
   );
 }
 
+/**
+ * The refusal for a database whose ledger is empty although it already holds
+ * tables the base schema would create: it is not empty, and not Nexus's.
+ */
+export function notEmptyError(tables: readonly string[]): NexusError {
+  return new NexusError(
+    'INTERNAL',
+    `This database's schema ledger is empty, but it already holds tables the Nexus schema ` +
+      `would create (${quote(tables)}), so it is not a new, empty database; nothing was ` +
+      `changed. Give Nexus a dedicated, empty database. See ${SCHEMA_POLICY_DOC}.`,
+    { tables: [...tables].sort() },
+  );
+}
+
 /** The refusal when another migrator holds the migration lock. */
 export function schemaBusyError(backend: string, detail = ''): NexusError {
   return new NexusError(
@@ -490,15 +511,27 @@ function migrationFailure(migration: Migration, error: unknown): unknown {
 
 /* ── Statements a migration may not contain ──────────────────────────── */
 
+/** Transaction control, in either dialect. */
 const TRANSACTION_CONTROL =
-  /^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|START\s+TRANSACTION|END|ABORT|VACUUM)\b/i;
-/** PostgreSQL statements that cannot run inside a transaction block. */
-const PG_OUTSIDE_TRANSACTION = /\bCONCURRENTLY\b|^CREATE\s+DATABASE\b|^DROP\s+DATABASE\b/i;
+  /^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|START\s+TRANSACTION|END|ABORT|VACUUM|PREPARE\s+TRANSACTION)\b/i;
+/**
+ * PostgreSQL statements that cannot run inside a transaction block, or that
+ * would act outside it (PostgreSQL has no implicit commits; these refuse to
+ * run in a transaction, or change server-wide state).
+ */
+const PG_OUTSIDE_TRANSACTION =
+  /\bCONCURRENTLY\b|^(CREATE|DROP|ALTER)\s+(DATABASE|TABLESPACE)\b|^ALTER\s+SYSTEM\b|^DISCARD\b|^CLUSTER\s*$|^REINDEX\s+(SYSTEM|DATABASE)\b|^(LISTEN|UNLISTEN|NOTIFY|SET\s+SESSION|RESET)\b/i;
+/**
+ * SQLite statements that cannot run in a transaction or change the
+ * connection rather than the schema (`ATTACH`, `DETACH`, every `PRAGMA`).
+ */
+const SQLITE_OUTSIDE_TRANSACTION = /^(ATTACH|DETACH|PRAGMA)\b/i;
 const CREATE_HEAD = /^CREATE\b/i;
 const BLOCK_OPEN = /\b(BEGIN|CASE)\b/gi;
 const BLOCK_CLOSE = /\bEND\b/gi;
 const DOLLAR_TAG = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/;
 const WHITESPACE_RUN = /\s+/g;
+const IDENTIFIER_CHAR = /[A-Za-z0-9_$]/;
 
 /** Net `BEGIN`/`CASE` … `END` nesting in a `CREATE` statement's unquoted text. */
 function blockDepth(statement: string): number {
@@ -508,20 +541,27 @@ function blockDepth(statement: string): number {
 
 /**
  * A SQL script's top-level statements with every comment and quoted text
- * blanked out (`'…'`, `"…"` and PostgreSQL `$tag$…$tag$` become `''`), for
- * checking what each statement is. A semicolon inside quotes, inside a
- * comment, or inside the `BEGIN … END` body of a `CREATE TRIGGER` or
- * `BEGIN ATOMIC` function does not end a statement.
+ * blanked out (quoted text becomes `''`), for checking what each statement
+ * is. A semicolon inside quotes, inside a comment, or inside the `BEGIN … END`
+ * body of a `CREATE TRIGGER` or `BEGIN ATOMIC` function does not end a
+ * statement. The dialect decides the lexical rules: PostgreSQL block comments
+ * nest and it has `$tag$…$tag$` and `E'…'` (backslash-escaped) strings; SQLite
+ * block comments end at the first `*` `/`, and it quotes identifiers with
+ * backticks and `[…]` too.
  */
-export function topLevelStatements(sql: string): string[] {
+export function topLevelStatements(sql: string, dialect: 'sqlite' | 'pg'): string[] {
   const statements: string[] = [];
   let current = '';
   let i = 0;
-  const skipQuoted = (quote: string): void => {
+  const skipQuoted = (quote: string, close = quote, backslash = false): void => {
     i += 1;
     while (i < sql.length) {
-      if (sql[i] === quote) {
-        if (sql[i + 1] === quote) {
+      if (backslash && sql[i] === '\\') {
+        i += 2;
+        continue;
+      }
+      if (sql[i] === close) {
+        if (close === quote && sql[i + 1] === quote) {
           i += 2;
           continue;
         }
@@ -543,7 +583,7 @@ export function topLevelStatements(sql: string): string[] {
       let depth = 1;
       i += 2;
       while (i < sql.length && depth > 0) {
-        if (sql[i] === '/' && sql[i + 1] === '*') {
+        if (dialect === 'pg' && sql[i] === '/' && sql[i + 1] === '*') {
           depth += 1;
           i += 2;
         } else if (sql[i] === '*' && sql[i + 1] === '/') {
@@ -556,12 +596,29 @@ export function topLevelStatements(sql: string): string[] {
       current += ' ';
       continue;
     }
+    const previous = sql[i - 1] ?? ' ';
+    if (
+      dialect === 'pg' &&
+      (char === 'E' || char === 'e') &&
+      next === "'" &&
+      !IDENTIFIER_CHAR.test(previous)
+    ) {
+      i += 1;
+      skipQuoted("'", "'", true);
+      i += 1;
+      continue;
+    }
     if (char === "'" || char === '"') {
       skipQuoted(char);
       i += 1;
       continue;
     }
-    if (char === '$') {
+    if (dialect === 'sqlite' && (char === '`' || char === '[')) {
+      skipQuoted(char, char === '[' ? ']' : '`');
+      i += 1;
+      continue;
+    }
+    if (dialect === 'pg' && char === '$') {
       const tag = DOLLAR_TAG.exec(sql.slice(i))?.[0];
       if (tag !== undefined) {
         const close = sql.indexOf(tag, i + tag.length);
@@ -592,17 +649,21 @@ export function topLevelStatements(sql: string): string[] {
 
 /**
  * Refuse a SQLite or PostgreSQL migration containing a statement that would
- * end, nest or escape the transaction the runner applies it in (`BEGIN`,
- * `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `VACUUM`, and on PostgreSQL anything
- * `CONCURRENTLY` or `CREATE DATABASE`): a `COMMIT` part-way would leave changes
- * without their ledger row. Called before anything runs.
+ * end, nest or escape the transaction the runner applies it in: transaction
+ * control (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `END`,
+ * `ABORT`, `PREPARE TRANSACTION`, `VACUUM`); on PostgreSQL anything
+ * `CONCURRENTLY`, database or tablespace DDL, `ALTER SYSTEM`, `DISCARD`, a bare
+ * `CLUSTER`, `REINDEX SYSTEM|DATABASE`, session settings and notifications; on
+ * SQLite `ATTACH`, `DETACH` and `PRAGMA`. A `COMMIT` part-way would leave
+ * changes without their ledger row. Called before anything runs.
  */
 export function refuseTransactionControl(migration: SqlMigration, dialect: 'sqlite' | 'pg'): void {
-  for (const statement of topLevelStatements(migration.sql)) {
+  for (const statement of topLevelStatements(migration.sql, dialect)) {
     const head = statement.replace(WHITESPACE_RUN, ' ').slice(0, 60);
     if (
       TRANSACTION_CONTROL.test(statement) ||
-      (dialect === 'pg' && PG_OUTSIDE_TRANSACTION.test(statement))
+      (dialect === 'pg' && PG_OUTSIDE_TRANSACTION.test(statement)) ||
+      (dialect === 'sqlite' && SQLITE_OUTSIDE_TRANSACTION.test(statement))
     ) {
       throw new NexusError(
         'INTERNAL',

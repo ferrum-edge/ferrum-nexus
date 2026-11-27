@@ -407,7 +407,8 @@ async function indexExists(connection: mysql.PoolConnection, step: AddIndex): Pr
     rows.some((row, i) => {
       const column = step.columns[i]!;
       return (
-        row.COLUMN_NAME !== column.name ||
+        // MySQL resolves column names case-insensitively and reports the declared spelling.
+        String(row.COLUMN_NAME).toLowerCase() !== column.name.toLowerCase() ||
         row.COLLATION !== column.direction ||
         Number(row.NON_UNIQUE) !== 1 ||
         row.SUB_PART !== null ||
@@ -459,12 +460,14 @@ function stepPresent(connection: mysql.PoolConnection, step: MigrationStep): Pro
 async function createBaseSchema(
   connection: mysql.PoolConnection,
   schema: BaseSchema,
-): Promise<void> {
+): Promise<boolean> {
   for (const statement of replayableStatements(schema)) await connection.query(statement);
   await connection.execute(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`, [
     schema.id,
     nowIso(),
   ]);
+  // Always created here: the advisory lock is held and the ledger was re-read under it.
+  return true;
 }
 
 /** Record a migration in progress, after validating the whole file. */

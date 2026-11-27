@@ -74,6 +74,7 @@ const INTERRUPTED = /That upgrade was interrupted part-way/;
 const FAILED = /^Schema migration \S+ failed: /;
 const BUSY = /holds the \w+ schema migration lock/;
 const FORCE_UNLOCK = /--force-unlock/;
+const NOT_EMPTY = /not a new, empty database/;
 const PENDING = /needs schema migrations this release ships.*run the migrate command once/s;
 const THEN = '2026-11-01T00:00:00.000Z';
 const PROBE_NOTE = 'migrated; ok';
@@ -309,6 +310,13 @@ interface V060Database {
   schemaObjects: () => Promise<string[]>;
   /** Hold the migration lock as another migrator would; returns its release. */
   holdLock?: () => Promise<() => Promise<void>>;
+  /**
+   * SQLite and PostgreSQL: run a SQL script against the database, and reduce
+   * it to what v0.6.0 left when it stopped before its first commit (its
+   * empty, two-column ledger and nothing else).
+   */
+  exec?: (sql: string) => Promise<void>;
+  resetToEmptyLedger?: () => Promise<void>;
   drop: () => Promise<void>;
 }
 
@@ -416,6 +424,38 @@ async function v060Sqlite(): Promise<V060Database> {
           .map((row) => String((row as { object: unknown }).object)),
         ...columns().map((column) => `ledger column:${column}`),
       ]),
+    holdLock: async () => {
+      const holder = openSqliteDatabase(path);
+      holder.exec('BEGIN IMMEDIATE');
+      return async () => {
+        holder.exec('ROLLBACK');
+        holder.close();
+      };
+    },
+    exec: async (sql) => {
+      const writer = openSqliteDatabase(path);
+      try {
+        writer.exec(sql);
+      } finally {
+        writer.close();
+      }
+    },
+    resetToEmptyLedger: async () => {
+      const writer = openSqliteDatabase(path);
+      try {
+        writer.pragma('foreign_keys = OFF');
+        const names = writer
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+          )
+          .all()
+          .map((row) => String((row as { name: unknown }).name));
+        for (const name of names) writer.exec(`DROP TABLE "${name}"`);
+        writer.exec(V0_6_0_LEDGER_DDL.sqlite);
+      } finally {
+        writer.close();
+      }
+    },
     drop: async () => rmSync(dir, { recursive: true, force: true }),
   };
 }
@@ -500,6 +540,14 @@ async function v060Postgres(adminUrl: string): Promise<V060Database> {
         await holder.query('ROLLBACK');
         await holder.end();
       };
+    },
+    exec: async (sql) => {
+      await query(sql);
+    },
+    resetToEmptyLedger: async () => {
+      await query('DROP SCHEMA public CASCADE');
+      await query('CREATE SCHEMA public');
+      await query(V0_6_0_LEDGER_DDL.pg);
     },
     drop: async () => {
       const cleaner = new pg.Client({ connectionString: adminUrl });
@@ -840,39 +888,54 @@ function registerUpgrade(
       }
     });
 
-    it(
-      'refuses a second migrator while another holds the lock',
-      {
-        skip:
-          label === 'sqlite' ? 'SQLite is one process; its write lock is per transaction' : false,
-      },
-      async () => {
+    it('refuses a second migrator while another holds the lock', async () => {
+      const target = await open();
+      try {
+        const before = await target.ledger();
+        const release = await target.holdLock!();
+        try {
+          await withStore(target, target.overrides, async (store) => {
+            await assert.rejects(store.migrate(), (error: unknown) => {
+              assert.ok(isNexusError(error), String(error));
+              assert.equal(error.code, 'CONFLICT');
+              assert.match(error.message, BUSY);
+              return true;
+            });
+          });
+          assert.deepEqual(await target.ledger(), before);
+        } finally {
+          await release();
+        }
+        await withStore(target, target.overrides, (store) => store.migrate());
+        assert.equal((await target.ledger()).at(-1)?.id, PROBE_ID);
+      } finally {
+        await target.drop();
+      }
+    });
+
+    if (label === 'sqlite' || label === 'postgres') {
+      it('initialises from an empty v0.6.0 ledger, but not beside existing tables', async () => {
         const target = await open();
         try {
-          const before = await target.ledger();
-          const release = await target.holdLock!();
-          try {
-            await withStore(target, target.overrides, async (store) => {
-              await assert.rejects(store.migrate(), (error: unknown) => {
-                assert.ok(isNexusError(error), String(error));
-                assert.equal(error.code, 'CONFLICT');
-                assert.match(error.message, BUSY);
-                return true;
-              });
-            });
-            assert.deepEqual(await target.ledger(), before);
-          } finally {
-            await release();
-          }
-          await withStore(target, target.overrides, (store) => store.migrate());
-          assert.equal((await target.ledger()).at(-1)?.id, PROBE_ID);
+          // A ledger with no rows next to the tables the schema would create.
+          await target.exec!('DELETE FROM schema_migrations');
+          await withStore(target, target.overrides, async (store) => {
+            await assert.rejects(store.migrate({ mode: 'startup' }), withMessage(NOT_EMPTY));
+          });
+          assert.deepEqual(await target.ledger(), []);
+          // What v0.6.0 leaves if it stops before its first commit: the empty ledger alone.
+          await target.resetToEmptyLedger!();
+          await withStore(target, target.overrides, (store) => store.migrate({ mode: 'startup' }));
+          assert.deepEqual(
+            (await target.ledger()).map((row) => row.id),
+            [V0_6_0_LEDGER_ID, ...target.shipped, PROBE_ID],
+          );
+          assert.ok(await target.probeIndexed());
         } finally {
           await target.drop();
         }
-      },
-    );
+      });
 
-    if (label === 'sqlite' || label === 'postgres') {
       const dialect = label === 'sqlite' ? 'sqlite' : 'pg';
       it('rolls a failing migration back with its ledger row', async () => {
         const target = await open();

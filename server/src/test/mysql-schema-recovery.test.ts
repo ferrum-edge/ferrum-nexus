@@ -39,7 +39,7 @@ const PROBE = sqlMigration(
     id VARCHAR(64) NOT NULL, note TEXT NULL, PRIMARY KEY (id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
   ALTER TABLE users ADD COLUMN recovery_probe_note VARCHAR(64) NULL;
-  CREATE INDEX ix_recovery_probe_users ON users (recovery_probe_note);
+  CREATE INDEX ix_recovery_probe_users ON users (RECOVERY_PROBE_NOTE);
   ALTER TABLE recovery_probe MODIFY COLUMN note LONGTEXT DEFAULT NULL;
   ALTER TABLE users ADD COLUMN recovery_probe_flag INT NOT NULL DEFAULT 0;
   ALTER TABLE users ADD CONSTRAINT ck_users_recovery_probe_flag CHECK (recovery_probe_flag IN (0, 1));
@@ -377,13 +377,15 @@ describe('MySQL base schema recovery', { skip: !adminUrl, timeout: 600_000 }, ()
       const second = mysql.createPool(url);
       let fired = false;
       const started: { peer?: Promise<unknown> } = {};
-      const faulty = intercept(pool, (method, sql, _params, after) => {
+      const faulty = intercept(pool, async (method, sql, _params, after) => {
         if (method === 'execute' && after && sql.startsWith('SELECT GET_LOCK(')) {
-          // Started while the first owns the lock: refused at once, never queued.
+          // Start the peer while the first owns the lock, and hold the first
+          // here until the peer has its answer: refused at once, never queued.
           started.peer = ensureMysqlSchema(second).then(
             () => 'finished',
             (error: unknown) => error,
           );
+          await started.peer;
         }
         if (
           !fired &&

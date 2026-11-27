@@ -102,13 +102,15 @@ import {
   checksumMismatchError,
   ensureSchema,
   loadShippedMigrations,
+  notEmptyError,
   refuseTransactionControl,
+  schemaBusyError,
   type LedgerEntry,
   type SchemaDriver,
   type SchemaOptions,
   type SqlMigration,
 } from '../../migrate.js';
-import { loadBaseSchema, SCHEMA_LEDGER_TABLE, type BaseSchema } from '../../schema.js';
+import { baseTables, loadBaseSchema, SCHEMA_LEDGER_TABLE, type BaseSchema } from '../../schema.js';
 import type {
   AccessRequestFilter,
   AccessRequestRecord,
@@ -845,10 +847,78 @@ function ledgerEntry(row: Row): LedgerEntry {
   };
 }
 
+/** The ledger columns v0.6.0's ledger lacks, added before a migration is recorded. */
+function addLedgerColumns(db: Database): void {
+  const present = ledgerColumns(db);
+  for (const column of ['checksum', 'state']) {
+    if (!present.has(column)) {
+      db.exec(`ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN ${column} TEXT`);
+    }
+  }
+}
+
+/**
+ * Run `work` under `BEGIN IMMEDIATE` without waiting: a schema writer refuses
+ * at once (a `CONFLICT`) when another connection holds the write lock, rather
+ * than waiting out the busy timeout.
+ */
+function immediateSchemaTransaction(db: Database, work: () => void): void {
+  const busyTimeout = Number(db.pragma('busy_timeout', { simple: true }));
+  db.pragma('busy_timeout = 0');
+  try {
+    db.transaction(work).immediate();
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 'SQLITE_BUSY') throw schemaBusyError('SQLite');
+    throw error;
+  } finally {
+    db.pragma(`busy_timeout = ${Number.isInteger(busyTimeout) ? busyTimeout : 5000}`);
+  }
+}
+
+/** Whether the ledger has rows; read under the write lock. */
+function ledgerHasRows(db: Database): boolean {
+  return queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE} LIMIT 1`).length > 0;
+}
+
+/** Refuse to create the schema over tables the base schema would create. */
+function refuseNonEmpty(db: Database, schema: BaseSchema): void {
+  const wanted = new Set(baseTables(schema));
+  const existing = queryAll(db, "SELECT name FROM sqlite_master WHERE type = 'table'")
+    .map((row) => String(row.name))
+    .filter((name) => wanted.has(name));
+  if (existing.length > 0) throw notEmptyError(existing);
+}
+
+/** Create the base schema and record it, inside the caller's transaction. */
+function createBase(db: Database, schema: BaseSchema): void {
+  refuseNonEmpty(db, schema);
+  db.exec(schema.sql);
+  db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
+    schema.id,
+    nowIso(),
+  );
+}
+
+/** Run one migration and record it, inside the caller's transaction. */
+function runMigration(db: Database, step: SqlMigration): void {
+  db.exec(step.sql);
+  db.prepare(
+    `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
+      "VALUES (?, ?, ?, 'applied')",
+  ).run(step.id, nowIso(), step.checksum);
+}
+
 /** The SQLite schema primitives; exported for the schema tests. */
 export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigration> {
   return {
     async ensureLedger(): Promise<void> {
+      // Only when missing, so an existing ledger never needs the write lock here.
+      const present = queryAll(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        [SCHEMA_LEDGER_TABLE],
+      );
+      if (present.length > 0) return;
       db.exec(
         `CREATE TABLE IF NOT EXISTS ${SCHEMA_LEDGER_TABLE} (
            id TEXT PRIMARY KEY,
@@ -865,72 +935,51 @@ export function createSqliteSchemaDriver(db: Database): SchemaDriver<SqlMigratio
         ledgerEntry,
       );
     },
-    async createBaseSchema(schema: BaseSchema): Promise<void> {
-      const create = db.transaction((base: BaseSchema) => {
+    async createBaseSchema(schema: BaseSchema): Promise<boolean> {
+      let created = false;
+      immediateSchemaTransaction(db, () => {
         // Re-read under the write lock: another process may have created it.
-        if (queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).length > 0) return;
-        db.exec(base.sql);
-        db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
-          base.id,
-          nowIso(),
-        );
+        if (ledgerHasRows(db)) return;
+        createBase(db, schema);
+        created = true;
       });
-      create.immediate(schema);
+      return created;
     },
-    async createFresh(schema: BaseSchema, migrations: readonly SqlMigration[]): Promise<void> {
+    async createFresh(schema: BaseSchema, migrations: readonly SqlMigration[]): Promise<boolean> {
       // One transaction: another process sees an empty database or a complete one.
-      const create = db.transaction((base: BaseSchema, steps: readonly SqlMigration[]) => {
-        if (queryAll(db, `SELECT id FROM ${SCHEMA_LEDGER_TABLE}`).length > 0) return;
-        db.exec(base.sql);
-        db.prepare(`INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at) VALUES (?, ?)`).run(
-          base.id,
-          nowIso(),
-        );
-        for (const step of steps) {
-          db.exec(step.sql);
-          db.prepare(
-            `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
-              "VALUES (?, ?, ?, 'applied')",
-          ).run(step.id, nowIso(), step.checksum);
-        }
+      let created = false;
+      immediateSchemaTransaction(db, () => {
+        if (ledgerHasRows(db)) return;
+        createBase(db, schema);
+        // An empty ledger v0.6.0 left behind lacks the columns migrations record.
+        if (migrations.length > 0) addLedgerColumns(db);
+        for (const step of migrations) runMigration(db, step);
+        created = true;
       });
-      create.immediate(schema, migrations);
+      return created;
     },
     async prepareLedger(): Promise<void> {
       // Under the write lock, so a second process cannot add the same column
       // between this check and the ALTER.
-      const prepare = db.transaction(() => {
-        const present = ledgerColumns(db);
-        for (const column of ['checksum', 'state']) {
-          if (!present.has(column)) {
-            db.exec(`ALTER TABLE ${SCHEMA_LEDGER_TABLE} ADD COLUMN ${column} TEXT`);
-          }
-        }
-      });
-      prepare.immediate();
+      immediateSchemaTransaction(db, () => addLedgerColumns(db));
     },
     async applyMigration(migration: SqlMigration): Promise<void> {
       // BEGIN IMMEDIATE takes the write lock first; the ledger is re-read under
       // it, so a second process on the same file (unsupported, but possible)
       // cannot apply the migration twice.
-      const apply = db.transaction((step: SqlMigration) => {
+      immediateSchemaTransaction(db, () => {
         const existing = queryAll(
           db,
           `SELECT id, checksum, state FROM ${SCHEMA_LEDGER_TABLE} WHERE id = ?`,
-          [step.id],
+          [migration.id],
         )[0];
         if (existing !== undefined) {
           const entry = ledgerEntry(existing);
-          if (entry.checksum === step.checksum && entry.inProgress !== true) return;
-          throw checksumMismatchError(entry, step);
+          if (entry.checksum === migration.checksum && entry.inProgress !== true) return;
+          throw checksumMismatchError(entry, migration);
         }
-        db.exec(step.sql);
-        db.prepare(
-          `INSERT INTO ${SCHEMA_LEDGER_TABLE} (id, applied_at, checksum, state) ` +
-            "VALUES (?, ?, ?, 'applied')",
-        ).run(step.id, nowIso(), step.checksum);
+        runMigration(db, migration);
       });
-      apply.immediate(migration);
     },
   };
 }
