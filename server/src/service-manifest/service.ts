@@ -29,7 +29,7 @@ const UPSTREAM_ID_SUFFIX = '-upstream';
 const CORRELATION_ID_PLUGIN_ID_SUFFIX = '-correlation-id';
 const OTEL_TRACING_PLUGIN_ID_SUFFIX = '-otel-tracing';
 
-const CONTRACT_COMMIT = '39da322083044c2e92617209e62983c92387f0ad';
+const CONTRACT_COMMIT = '92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f';
 
 interface Manifest {
   service: { name: string };

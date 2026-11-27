@@ -3,11 +3,15 @@
 Nexus `v0.4.0` ships a read-only preview of Ferrum service manifests, the Nexus
 consumer portion of [Alloy #27](https://github.com/ferrum-edge/ferrum-alloy/issues/27),
 implemented in [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519). Its shared
-v1 contract is published in `contracts-edge-0.9.20`, commit
-`39da322083044c2e92617209e62983c92387f0ad` in
-[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/39da322083044c2e92617209e62983c92387f0ad).
-The manifest schema and fixtures are byte-identical to `contracts-edge-0.9.12`; the
-shared `fixtures/invalid-expectations.json` changes only in other contracts' entries.
+v1 contract is published in `contracts-edge-0.9.21`, commit
+`92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` in
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts/tree/92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f).
+That tag keeps v1 but narrows it to what Alloy's export and Edge accept
+(ferrum-contracts#74 and #82): Edge's field bounds, control-character and reserved
+path-character rules (`;`, `%`, `\`, `.` segments), and cleartext telemetry only to a
+loopback IP literal. It adds the shared valid fixtures `edge-limits.json` and
+`unicode-host.json` and 18 invalid fixtures, and moves `valid/orders-api.json` to an
+`https://` exporter.
 The vendored [`PIN`](../contracts/ferrum-contracts/PIN) records SHA-256 for the
 schema, every shared manifest fixture and the shared expectations, with every other
 vendored contract file of the same publication. The copied `x-contract` metadata records the implemented shared
@@ -39,25 +43,22 @@ ferrum-alloy `main` at `2b206a4616586b6193d25958b646e2478fc40a94`
   refuses cleartext to a named host such as `otel-collector`, but still accepts some
   loopback spellings Edge refuses, such as `[0:0:0:0:0:0:0:1]`
   ([ferrum-alloy#319](https://github.com/ferrum-edge/ferrum-alloy/issues/319)); the
-  canonical-spelling rule here is Edge's. The pinned `contracts-edge-0.9.20` still publishes
-  `valid/orders-api.json` with `http://otel-collector:4318/v1/traces`, so the preview
-  refuses that one shared valid fixture until ferrum-contracts#82 (which moves it to
-  `https://`) is published and re-vendored.
+  canonical-spelling rule here is Edge's, and the pinned v1 schema states the same rule
+  since `contracts-edge-0.9.21`. The preview accepts every shared valid fixture.
 - **Derived resource IDs.** Alloy derives `<proxy_id>-otel-tracing` for every export,
   with or without an exporter, plus `<proxy_id>-upstream` with a health check and
   `<proxy_id>-correlation-id` with correlation on. Each must fit Edge's 254-character
   resource ID limit, so an explicit `gateway.proxy_id` is at most 241 characters (239
   with correlation on).
-- **Edge field bounds.** `api.public_path` at most 500 characters, `api.service_base_path`
-  2049 (Edge's 2048-byte `backend_path` plus the trailing `/`), `upstream.host` 255,
-  `health.path` 2048, `health.interval_seconds` 3600, and `health.timeout_ms` and every
-  `timeouts.*` 86400000. ferrum-contracts `main` publishes the same bounds in the v1
-  schema (ferrum-contracts#74) but no tag carries them yet; a bound the vendored schema
-  declares itself always wins, and it is never clipped. Like the schema's `maxLength`,
-  the lengths count characters; Edge counts UTF-8 bytes, so a non-ASCII value within the
-  character bound can still exceed Edge's byte limit. The pinned Alloy revision caps
-  `api.service_base_path` at 2048 bytes including the `/`, one below v1 and Edge;
-  ferrum-alloy#319 tracks aligning it.
+- **Edge field bounds**, now declared by the pinned v1 schema itself
+  (`contracts-edge-0.9.21`, ferrum-contracts#74), which the preview applies as published:
+  `api.public_path` at most 500 characters, `api.service_base_path` 2049 (Edge's
+  2048-byte `backend_path` plus the trailing `/`), `upstream.host` 255, `health.path`
+  2048, `health.interval_seconds` 3600, and `health.timeout_ms` and every `timeouts.*`
+  86400000. Like the schema's `maxLength`, the lengths count characters; Edge counts
+  UTF-8 bytes, so a non-ASCII value within the character bound can still exceed Edge's
+  byte limit. The pinned Alloy revision caps `api.service_base_path` at 2048 bytes
+  including the `/`, one below v1 and Edge; ferrum-alloy#319 tracks aligning it.
 
 Intentionally narrower than v1: strings the schema leaves unbounded are capped at 2048
 characters; every string refuses C0 control characters and DEL, `upstream.host`

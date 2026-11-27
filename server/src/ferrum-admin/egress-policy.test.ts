@@ -58,7 +58,7 @@ const CLOCK = /clock/;
 const ATTESTATION_UNREADABLE = /attestation is unreadable/;
 const NOT_EVERY_CONNECTED_DATA = /not every connected data plane attests/;
 
-/** The vendored canonical `backend-egress-policy` v2 fixtures (contracts-edge-0.9.20). */
+/** The vendored canonical `backend-egress-policy` v2 fixtures (contracts-edge-0.9.21). */
 const EGRESS_FIXTURES = new URL(
   '../../../contracts/ferrum-contracts/fixtures/backend-egress-policy/v2/',
   import.meta.url,

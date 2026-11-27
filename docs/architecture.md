@@ -1392,5 +1392,5 @@ are never interpreted as omission. Local presentation/reference budgets further 
 accepted input. The configured Edge namespace is the authorization boundary for this
 single-namespace portal. The service returns an allow-listed redacted DTO from `shared/`
 and has no store, gateway, network or source-file reader dependency. The shared v1 format
-is implemented in published `contracts-edge-0.9.20`. Preview cannot invoke publishing or
+is implemented in published `contracts-edge-0.9.21`. Preview cannot invoke publishing or
 install agent policy.
